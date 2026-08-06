@@ -1,4 +1,9 @@
+import json
+import tempfile
+from pathlib import Path
+
 from django.contrib.auth.models import User
+from django.core.management import call_command
 from django.test import TestCase
 from django.urls import reverse
 
@@ -109,6 +114,66 @@ class RoleTests(TestCase):
         response = self.client.get(reverse("index"))
 
         self.assertRedirects(response, reverse("invoice_logs"))
+
+
+class FixtureRoundTripTests(TestCase):
+    """Guards the Neon -> cPanel data move, which goes through dumpdata/loaddata."""
+
+    def dump_and_reload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dump.json"
+
+            call_command(
+                "dumpdata", "auth.user", "invoices",
+                natural_foreign=True, natural_primary=True,
+                output=str(path), verbosity=0,
+            )
+
+            payload = json.loads(path.read_text())
+
+            User.objects.all().delete()
+            Customer.objects.all().delete()
+
+            call_command("loaddata", str(path), verbosity=0)
+
+        return payload
+
+    def test_users_and_roles_survive_a_dump_and_reload(self):
+        boss = User.objects.create_user("boss", password="pw")
+        boss.userrolls.role = UserRolls.ROLE_SUPER_ADMIN
+        boss.userrolls.save()
+        User.objects.create_user("clerk", password="pw")
+
+        self.dump_and_reload()
+
+        self.assertEqual(User.objects.count(), 2)
+        # The post_save signal must not add a second row alongside the fixture's
+        self.assertEqual(UserRolls.objects.count(), 2)
+        self.assertTrue(is_super_admin(User.objects.get(username="boss")))
+        self.assertFalse(is_super_admin(User.objects.get(username="clerk")))
+
+    def test_invoice_data_survives_and_numbering_continues(self):
+        clerk = User.objects.create_user("clerk", password="pw")
+        customer = Customer.objects.create(
+            name="Shifa Pharmacy", address="Lahore", license_no="LIC-1"
+        )
+        invoice = Invoice.objects.create(customer=customer, license_no="LIC-1")
+        Item.objects.create(
+            invoice=invoice, name="Panadol", qty=10,
+            batch="B1", expiry="12/26", price="100.00", discount="10.00",
+        )
+        InvoiceLog.objects.create(
+            invoice=invoice, user=clerk, customer_name=customer.name, amount="900.00"
+        )
+
+        self.dump_and_reload()
+
+        self.assertEqual(Invoice.objects.get().invoice_no, "HHC-9965")
+        self.assertEqual(Item.objects.get().name, "Panadol")
+        self.assertEqual(InvoiceLog.objects.get().amount, 900)
+        self.assertEqual(Customer.objects.get().license_no, "LIC-1")
+        # Fresh invoices must continue after the restored data, not restart
+        self.assertEqual(Invoice.next_invoice_no(), "HHC-9966")
 
 
 class GenerateInvoiceTests(TestCase):

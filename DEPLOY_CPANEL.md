@@ -118,6 +118,34 @@ manage.py shell -c "from django.contrib.auth.models import User; User.objects.cr
 
 Then sign in at `/admin/` and change that password immediately.
 
+## 6b. Import data from the old Neon database (optional)
+
+Postgres and MySQL dumps are not interchangeable, so the data moves through
+Django's serializer instead of raw SQL.
+
+Export from Neon (the shell-level `DATABASE_URL` overrides `.env`):
+
+```bash
+cd ~/lifemed_invoice
+pip install psycopg2-binary
+DATABASE_URL='postgresql://USER:PASSWORD@HOST/DBNAME?sslmode=require' \
+  python manage.py dumpdata auth.user invoices \
+  --natural-foreign --natural-primary --indent 2 -o neon_backup.json
+```
+
+Import into the freshly migrated MySQL database:
+
+```bash
+python manage.py migrate
+python manage.py loaddata neon_backup.json
+```
+
+`contenttypes` and `auth.permission` are deliberately not exported — Django
+recreates them during `migrate`, and importing them causes primary-key clashes.
+
+If the cPanel host blocks outbound port 5432, run the `dumpdata` step on a
+machine that can reach Neon and upload the resulting JSON file.
+
 ## 7. Restart
 
 cPanel → **Setup Python App** → **Restart** on the application.

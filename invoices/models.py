@@ -109,8 +109,10 @@ def is_super_admin(user):
 
 # Signal: Jab bhi naya user banay, uska profile khud ban jaye
 @receiver(post_save, sender=User)
-def create_user_profile(sender, instance, created, **kwargs):
-    if created:
+def create_user_profile(sender, instance, created, raw=False, **kwargs):
+    # `raw` means loaddata is restoring a fixture, which carries its own
+    # UserRolls rows. Creating one here would collide with them.
+    if created and not raw:
         UserRolls.objects.get_or_create(user=instance)
 
 # 2. Invoice Log Model
