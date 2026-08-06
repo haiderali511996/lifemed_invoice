@@ -28,6 +28,7 @@ from .models import (
     WeeklyPlan,
     is_super_admin,
 )
+from .pdf import ROWS_PER_PAGE, TABLE_HEADER_BOTTOM, TABLE_RULE_Y
 from .planning import generate_plan, monday_of
 from .views import customers_with_balances, overdue_invoices
 
@@ -1171,3 +1172,179 @@ class PdfResponseTests(TestCase):
         self.assertIn("Shifa Pharmacy", text)
         self.assertIn("Panadol", text)
         self.assertIn("900.00", text)
+
+
+class InvoicePdfLayoutTests(TestCase):
+    """The template is a fixed form: rows must stay inside the item table.
+
+    Only three rows fit between the column headers (ending y=206.15) and the
+    rule that closes the table (y=240.7). Overflowing past it used to white out
+    the form's own totals labels.
+    """
+
+    def setUp(self):
+        User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+    def generate(self, item_count, customer="Shifa Pharmacy"):
+        n = item_count
+
+        response = self.client.post(reverse("generate"), {
+            "customer_name": customer, "address": "Mall Road, Lahore",
+            "ntn": "1234567-8", "sales_tax": "ST-9", "license_no": "LIC-2211",
+            "item_name[]": [f"Medicine {i}" for i in range(n)],
+            "qty[]": ["2"] * n, "price[]": ["100"] * n,
+            "discount[]": ["10"] * n,
+            "batch[]": [f"B{i}" for i in range(n)],
+            "expiry[]": ["12/26"] * n,
+        })
+
+        import pymupdf
+        return pymupdf.open(stream=response.content, filetype="pdf")
+
+    def all_text(self, doc):
+        return "".join(page.get_text() for page in doc)
+
+    def test_short_invoice_is_a_single_page(self):
+        self.assertEqual(self.generate(ROWS_PER_PAGE).page_count, 1)
+
+    def test_long_invoice_paginates(self):
+        doc = self.generate(ROWS_PER_PAGE + 1)
+
+        self.assertEqual(doc.page_count, 2)
+
+    def test_every_item_appears_exactly_once(self):
+        import re
+
+        doc = self.generate(10)
+        text = self.all_text(doc)
+
+        for i in range(10):
+            matches = re.findall(rf"Medicine {i}\b", text)
+            self.assertEqual(len(matches), 1, f"Medicine {i}")
+
+    def test_form_labels_survive_a_long_invoice(self):
+        """The overflow used to erase these; that is the whole bug."""
+        text = self.all_text(self.generate(25))
+
+        for label in ("Sr#", "Qty", "Batch", "Expiry", "T.Price", "Disc%",
+                      "Company", "Gross", "Discount", "Net", "Payable"):
+            self.assertIn(label, text, label)
+
+    def test_no_row_crosses_the_table_rule(self):
+        doc = self.generate(12)
+
+        for page in doc:
+            for word in page.get_text("words"):
+                if word[4].startswith("Medicine"):
+                    self.assertLess(word[3], TABLE_RULE_Y, word[4])
+                    self.assertGreater(word[1], TABLE_HEADER_BOTTOM, word[4])
+
+    def test_totals_appear_only_on_the_final_page(self):
+        doc = self.generate(10)          # 10 x 2 x 90 = 1800.00
+        pages = [i for i, p in enumerate(doc) if "1800.00" in p.get_text()]
+
+        self.assertEqual(pages, [doc.page_count - 1])
+
+    def test_earlier_pages_say_continued(self):
+        doc = self.generate(10)
+
+        self.assertIn("Continued on page 2", doc[0].get_text())
+        self.assertNotIn("Continued", doc[-1].get_text())
+
+    def test_pages_are_numbered_when_there_is_more_than_one(self):
+        doc = self.generate(10)
+
+        self.assertIn(f"Page 1 of {doc.page_count}", doc[0].get_text())
+
+    def test_single_page_invoice_is_not_numbered(self):
+        self.assertNotIn("Page 1 of", self.generate(2)[0].get_text())
+
+    def test_item_numbering_continues_across_pages(self):
+        doc = self.generate(7)
+
+        # Sr# runs 1..7 with three per page, so page 2 starts at 4
+        self.assertIn("4", doc[1].get_text())
+        self.assertEqual(Item.objects.count(), 7)
+
+
+class PreviousBalanceOnInvoiceTests(TestCase):
+
+    def setUp(self):
+        User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+    def generate(self, items=1):
+        n = items
+
+        response = self.client.post(reverse("generate"), {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "1", "sales_tax": "2", "license_no": "L",
+            "item_name[]": [f"Medicine {i}" for i in range(n)],
+            "qty[]": ["2"] * n, "price[]": ["100"] * n,
+            "discount[]": ["10"] * n, "batch[]": ["B"] * n,
+            "expiry[]": ["12/26"] * n,
+        })
+
+        import pymupdf
+        return pymupdf.open(stream=response.content, filetype="pdf")[-1].get_text()
+
+    def test_first_invoice_has_no_previous_balance_block(self):
+        self.assertNotIn("PREVIOUS OUTSTANDING", self.generate())
+
+    def test_second_invoice_shows_the_first_as_outstanding(self):
+        self.generate()                      # HHC-9965, 180.00
+        text = self.generate()               # HHC-9966
+
+        self.assertIn("PREVIOUS OUTSTANDING", text)
+        self.assertIn("HHC-9965", text)
+        self.assertIn("180.00", text)
+
+    def test_each_previous_balance_carries_its_invoice_number(self):
+        self.generate()
+        self.generate()
+        text = self.generate()
+
+        self.assertIn("HHC-9965", text)
+        self.assertIn("HHC-9966", text)
+        self.assertNotIn("HHC-9968", text)   # not yet issued
+
+    def test_grand_total_is_previous_plus_this_invoice(self):
+        self.generate()                      # 180.00 outstanding
+        text = self.generate()               # this one is 180.00
+
+        self.assertIn("360.00", text)        # grand total
+
+    def test_part_payment_reduces_the_carried_balance(self):
+        self.generate()
+
+        invoice = Invoice.objects.get()
+        Payment.objects.create(
+            customer=invoice.customer, invoice=invoice, amount=Decimal("100.00")
+        )
+
+        text = self.generate()
+
+        self.assertIn("80.00", text)         # 180 - 100 carried forward
+
+    def test_settled_invoices_are_not_listed(self):
+        self.generate()
+
+        invoice = Invoice.objects.get()
+        Payment.objects.create(
+            customer=invoice.customer, invoice=invoice, amount=invoice.total
+        )
+
+        self.assertNotIn("PREVIOUS OUTSTANDING", self.generate())
+
+    def test_account_payments_are_shown_as_a_credit(self):
+        """A lump sum not tied to an invoice must reconcile the listing."""
+        self.generate()
+
+        invoice = Invoice.objects.get()
+        Payment.objects.create(customer=invoice.customer, amount=Decimal("50.00"))
+
+        text = self.generate()
+
+        self.assertIn("payments on account", text)
+        self.assertIn("130.00", text)        # 180 - 50 actually owed

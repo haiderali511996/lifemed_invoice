@@ -39,24 +39,14 @@ from .models import (
     is_super_admin,
 )
 
-try:
-    # PyMuPDF renamed its module to `pymupdf`; `fitz` is the pre-1.24.3 name.
-    import pymupdf as fitz
-except ImportError:
-    import fitz
+from .pdf import render_invoice
 
-import os
-import io
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 # Column limits, so posted values are clamped rather than rejected by MySQL.
 MAX_PRICE = "99999999.99"
 MAX_DISCOUNT = "100.00"
 MAX_TOTAL = "9999999999.99"
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PDF_PATH = os.path.join(BASE_DIR, "template.pdf")
-
 
 def safe_decimal(value, default="0.00", max_value=None):
     """Parse a posted number, never raising.
@@ -96,6 +86,46 @@ def safe_int(value, default=0, max_value=1_000_000):
     return max(0, min(result, max_value))
 
 
+def previous_balance_breakdown(customer, current_invoice):
+    """What the customer owed before this invoice, itemised by invoice number.
+
+    Returns None when nothing is outstanding, so the block is left off the PDF
+    entirely rather than printing a row of zeroes.
+    """
+    rows = []
+
+    unpaid = (
+        Invoice.objects.filter(customer=customer)
+        .exclude(pk=current_invoice.pk)
+        .order_by("date", "id")
+    )
+
+    for invoice in unpaid:
+        if invoice.balance > ZERO:
+            rows.append({
+                "invoice_no": invoice.invoice_no,
+                "date": invoice.date,
+                "balance": invoice.balance,
+            })
+
+    # Authoritative figure: the account balance less the invoice just raised.
+    # Payments recorded against the account rather than a specific invoice mean
+    # the per-invoice balances can add up to more than is actually owed.
+    total = customer.outstanding_balance - current_invoice.total
+
+    if total <= ZERO and not rows:
+        return None
+
+    credit = sum((row["balance"] for row in rows), ZERO) - total
+
+    return {
+        "rows": rows,
+        "credit": credit if credit > ZERO else None,
+        "total": total,
+        "grand_total": total + current_invoice.total,
+    }
+
+
 def post_column(request, field, length):
     """Read one item column, padded to `length` so a short list can't IndexError.
 
@@ -107,31 +137,6 @@ def post_column(request, field, length):
     return values + [""] * (length - len(values))
 
 
-def wipe_rect(page, rect):
-    r = fitz.Rect(rect)
-    page.add_redact_annot(r, fill=(1, 1, 1))
-
-
-def write_in_rect(page, rect, text, fontsize=9):
-    r = fitz.Rect(rect)
-
-    page.insert_text(
-        (r.x0 + 2, r.y1 - 2),
-        str(text),
-        fontsize=fontsize
-    )
-
-
-def write_in_rect_right(page, rect, text, fontsize=9):
-    r = fitz.Rect(rect)
-
-    text = str(text)
-    text_width = fitz.get_text_length(text, fontsize=fontsize)
-
-    x = r.x1 - text_width - 2
-    y = r.y1 - 3
-
-    page.insert_text((x, y), text, fontsize=fontsize)
 
 
 def login_view(request):
@@ -341,6 +346,8 @@ def generate_invoice(request):
         total_net = Decimal("0")
         total_discount = Decimal("0")
 
+        pdf_rows = []
+
         # ITEMS LOOP
         for i in range(len(names)):
 
@@ -375,7 +382,7 @@ def generate_invoice(request):
 
             total_net += amount
 
-            Item.objects.create(
+            item = Item.objects.create(
                 invoice=invoice,
                 name=clip(names[i], 255),
                 qty=safe_int(qty),
@@ -384,6 +391,16 @@ def generate_invoice(request):
                 price=price,
                 discount=disc
             )
+
+            pdf_rows.append({
+                "name": item.name,
+                "qty": qty,
+                "batch": item.batch,
+                "expiry": item.expiry,
+                "price": price,
+                "discount": disc,
+                "amount": amount,
+            })
 
         # Store the net payable so ledgers never recompute it from line items
         invoice.total = safe_decimal(total_net, max_value=MAX_TOTAL)
@@ -398,128 +415,30 @@ def generate_invoice(request):
             action="Invoice Created"
         )
 
-        doc = fitz.open(PDF_PATH)
-        page = doc[0]
-
-        HEADER_COORDS = {
-            "customer_name": (125.84, 110.15, 272.87, 122.43),
-            "address": (125.84, 124.65, 347.06, 134.70),
-            "invoice_no": (482.60, 110.13, 524.41, 120.18),
-            "date": (479.85, 120.98, 523.99, 131.03),
-            "license_no": (75.06, 181.90, 173.89, 191.95),
-        }
-
-        NTN_VALUE = (95, 158, 200, 168)
-        SALES_TAX_VALUE = (110, 170, 220, 180)
-
-        TABLE_COLS = {
-            "sr": 54.7,
-            "name": 72.1,
-            "qty": 208.5,
-            "batch": 249.7,
-            "expiry": 330.3,
-            "price": 388.6,
-            "discount": 505.6,
-            "amount": 546.0,
-        }
-
-        ROW_START_Y = 221.4
-        ROW_HEIGHT = 9.5
-
-        GROSS_VALUE_RECT = (535, 260, 590, 280)
-        DISCOUNT_VALUE_RECT = (535, 277.58, 590, 287.63)
-        NET_PAYABLE_RECT = (535, 320, 590, 345)
-        COMPANY_TOTAL_RECT = (535, 240, 590, 260)
-
-        data = {
-            "customer_name": customer.name,
-            "address": customer.address,
-            "invoice_no": invoice.invoice_no,
-            "date": now().strftime("%d/%m/%Y"),
-            "license_no": invoice.license_no,
-        }
-
-        for rect in HEADER_COORDS.values():
-            wipe_rect(page, rect)
-
-        wipe_rect(page, NTN_VALUE)
-        wipe_rect(page, SALES_TAX_VALUE)
-
-        page.apply_redactions()
-
-        for key, rect in HEADER_COORDS.items():
-            write_in_rect(page, rect, data.get(key, ""), 9)
-
-        write_in_rect(page, NTN_VALUE, customer.ntn, 9)
-        write_in_rect(page, SALES_TAX_VALUE, customer.sales_tax, 9)
-
-        table_rect = fitz.Rect(
-            50,
-            ROW_START_Y - 2,
-            580,
-            ROW_START_Y + (len(names) * ROW_HEIGHT) + 5
+        pdf_bytes = render_invoice(
+            previous=previous_balance_breakdown(customer, invoice),
+            header={
+                "customer_name": customer.name,
+                "address": customer.address,
+                "invoice_no": invoice.invoice_no,
+                "date": now().strftime("%d/%m/%Y"),
+                "license_no": invoice.license_no,
+                "ntn": customer.ntn or "",
+                "sales_tax": customer.sales_tax or "",
+            },
+            rows=pdf_rows,
+            totals={
+                "gross": total_gross,
+                "discount": total_discount,
+                "net": total_net,
+            },
         )
-
-        wipe_rect(page, table_rect)
-
-        page.apply_redactions()
-
-        for i in range(len(names)):
-
-            if not names[i]:
-                continue
-
-            y = ROW_START_Y + i * ROW_HEIGHT
-
-            qty = safe_decimal(qtys[i])
-            price = safe_decimal(prices[i])
-            disc = safe_decimal(discounts[i])
-
-            discounted_price = (
-                Decimal(price) -
-                (
-                    Decimal(price) *
-                    Decimal(disc) /
-                    Decimal("100")
-                )
-            )
-
-            amount = discounted_price * Decimal(qty)
-
-            page.insert_text((TABLE_COLS["sr"], y), str(i + 1), fontsize=8)
-            page.insert_text((TABLE_COLS["name"], y), names[i], fontsize=8)
-            page.insert_text((TABLE_COLS["qty"], y), str(qty), fontsize=8)
-            page.insert_text((TABLE_COLS["batch"], y), batches[i], fontsize=8)
-            page.insert_text((TABLE_COLS["expiry"], y), expiries[i], fontsize=8)
-            page.insert_text((TABLE_COLS["price"], y), f"{price:.2f}", fontsize=8)
-            page.insert_text((TABLE_COLS["discount"], y), f"{disc}%", fontsize=8)
-            page.insert_text((TABLE_COLS["amount"], y), f"{amount:.2f}", fontsize=8)
-
-        wipe_rect(page, GROSS_VALUE_RECT)
-        wipe_rect(page, DISCOUNT_VALUE_RECT)
-        wipe_rect(page, NET_PAYABLE_RECT)
-        wipe_rect(page, COMPANY_TOTAL_RECT)
-
-        page.apply_redactions()
-
-        write_in_rect_right(page, GROSS_VALUE_RECT, f"{total_gross:.2f}", 9)
-        write_in_rect_right(page, DISCOUNT_VALUE_RECT, f"-{abs(total_discount):.2f}", 9)
-        write_in_rect_right(page, NET_PAYABLE_RECT, f"{total_net:.2f}", 9)
-        write_in_rect_right(page, COMPANY_TOTAL_RECT, f"{total_net:.2f}", 9)
-
-        pdf_bytes = io.BytesIO()
-
-        doc.save(pdf_bytes)
-        doc.close()
 
         # Deliberately not FileResponse: it hands the object to the server's
         # wsgi.file_wrapper, and Passenger's implementation calls fileno() on
         # it. BytesIO has no file descriptor, so that raises
         # "io.UnsupportedOperation: fileno" and the download 500s under cPanel.
-        response = HttpResponse(
-            pdf_bytes.getvalue(),
-            content_type="application/pdf",
-        )
+        response = HttpResponse(pdf_bytes, content_type="application/pdf")
 
         response["Content-Disposition"] = (
             f'attachment; filename="{invoice.invoice_no}.pdf"'
