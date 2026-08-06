@@ -31,7 +31,7 @@ cPanel → **Setup Python App** → *Create Application*:
 
 | Field | Value |
 |---|---|
-| Python version | 3.11 (or the closest available — 3.9+ works) |
+| Python version | any 3.9+ (3.11 and 3.13 both tested) |
 | Application root | `lifemed_invoice` |
 | Application URL | `invoice.lifemedpharmaceutical.com` |
 | Application startup file | `passenger_wsgi.py` |
@@ -163,7 +163,8 @@ count as super admins.
 | `DisallowedHost` | Hostname missing from `ALLOWED_HOSTS` |
 | 403 CSRF on *Generate PDF* | Origin missing from `CSRF_TRUSTED_ORIGINS`, or `SECURE_COOKIES=True` on http |
 | Login form reloads with no error | `SECURE_COOKIES=True` while the site is on http |
-| `No module named 'MySQLdb'` | `pip install -r requirements.txt` did not run in the app's virtualenv |
+| `No module named 'django'` / `'MySQLdb'` | `pip install -r requirements.txt` did not run in the app's virtualenv — check the prompt shows `(appname:version)` |
+| PyMuPDF tries to compile from source | The pinned version has no wheel for your Python; upgrade the `PyMuPDF` pin |
 | Admin pages unstyled | `collectstatic` was not run |
 | Changes not taking effect | App not restarted |
 | `FileNotFoundError: template.pdf` | `template.pdf` missing from the project root |

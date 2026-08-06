@@ -7,7 +7,12 @@ from django.contrib import messages
 
 from .models import Customer, Invoice, Item, InvoiceLog, UserRolls, is_super_admin
 
-import fitz
+try:
+    # PyMuPDF renamed its module to `pymupdf`; `fitz` is the pre-1.24.3 name.
+    import pymupdf as fitz
+except ImportError:
+    import fitz
+
 import os
 import io
 from decimal import Decimal
