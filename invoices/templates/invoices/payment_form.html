@@ -1,0 +1,125 @@
+{% extends "invoices/base.html" %}
+
+{% block title %}LifeMed Pharma - Record Payment{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Record Payment</h1>
+</div>
+
+<div class="card" style="max-width: 640px">
+  <p style="margin-top: 0">
+    <strong>{{ customer.name }}</strong><br />
+    <span style="color: #8595a8; font-size: 14px">
+      Current balance:
+      <strong style="color: {% if balance > 0 %}#a71d2a{% else %}#1e7b24{% endif %}">
+        {{ balance|floatformat:2 }}
+      </strong>
+    </span>
+  </p>
+
+  <form method="POST" novalidate>
+    {% csrf_token %}
+
+    {% if form.non_field_errors %}
+    <div class="alert alert-error">
+      {% for error in form.non_field_errors %}{{ error }}{% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="field">
+      <label for="{{ form.amount.id_for_label }}">Amount Received</label>
+      {{ form.amount }}
+      {{ form.amount.errors }}
+    </div>
+
+    <div class="field">
+      <label for="{{ form.invoice.id_for_label }}">Apply To</label>
+      {{ form.invoice }}
+      {{ form.invoice.errors }}
+      <p class="help">
+        Part payments are fine - pick an invoice to settle it partly, or leave
+        it against the account for a lump sum.
+      </p>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="{{ form.method.id_for_label }}">Method</label>
+        {{ form.method }}
+        {{ form.method.errors }}
+      </div>
+
+      <div class="field">
+        <label for="{{ form.paid_on.id_for_label }}">Date Received</label>
+        {{ form.paid_on }}
+        {{ form.paid_on.errors }}
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="{{ form.reference.id_for_label }}">Reference</label>
+      {{ form.reference }}
+      {{ form.reference.errors }}
+    </div>
+
+    <div class="field">
+      <label for="{{ form.note.id_for_label }}">Note</label>
+      {{ form.note }}
+      {{ form.note.errors }}
+    </div>
+
+    <div style="display: flex; gap: 10px; margin-top: 20px">
+      <button type="submit" class="btn btn-green">Save Payment</button>
+      <a href="{% url 'customer_ledger' customer.id %}" class="btn btn-grey">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .field {
+    margin-bottom: 15px;
+  }
+
+  .field label {
+    display: block;
+    margin-bottom: 5px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #55657a;
+  }
+
+  .field input,
+  .field select,
+  .field textarea {
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid #dbe2ea;
+    border-radius: 7px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+
+  .help {
+    font-size: 12px;
+    color: #8595a8;
+    margin: 5px 0 0;
+  }
+
+  .errorlist {
+    color: #dc3545;
+    font-size: 12px;
+    font-weight: 600;
+    margin: 5px 0 0;
+    padding-left: 16px;
+  }
+</style>
+{% endblock %}

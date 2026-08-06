@@ -1,0 +1,84 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Weekly Plans{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>MR Weekly Plans</h1>
+  <span style="color:#8595a8">Current week starts {{ current_week|date:"d M Y" }}</span>
+</div>
+
+<div class="card" style="margin-bottom:18px">
+  <h3 style="margin-top:0">Generate a Plan</h3>
+  <p style="color:#8595a8;font-size:13px;margin-top:0">
+    Fills the week from the MR's territory, visiting the longest-neglected
+    call points first and spreading them evenly across Monday to Saturday.
+  </p>
+
+  <form method="POST" action="{% url 'plan_generate' %}" class="gen-form">
+    {% csrf_token %}
+    <div class="field">
+      <label for="{{ form.employee.id_for_label }}">Medical Representative</label>
+      {{ form.employee }}
+    </div>
+    <div class="field">
+      <label for="{{ form.week_start.id_for_label }}">Week</label>
+      {{ form.week_start }}
+    </div>
+    <div class="field">
+      <label for="{{ form.calls_per_day.id_for_label }}">Calls / day</label>
+      {{ form.calls_per_day }}
+    </div>
+    <button type="submit" class="btn btn-green">Generate</button>
+  </form>
+</div>
+
+<div class="card">
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>MR</th><th>Territory</th><th>Week Of</th>
+          <th class="num">Visits</th><th class="num">Coverage</th>
+          <th>Status</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for plan in plans %}
+        <tr>
+          <td><strong>{{ plan.employee.full_name }}</strong></td>
+          <td>{{ plan.employee.territory.name|default:"—" }}</td>
+          <td>{{ plan.week_start|date:"d M Y" }}</td>
+          <td class="num">{{ plan.visit_count }}</td>
+          <td class="num">{{ plan.coverage_percent }}%</td>
+          <td>
+            {% if plan.status == "approved" %}<span class="pill pill-paid">approved</span>
+            {% elif plan.status == "rejected" %}<span class="pill pill-overdue">rejected</span>
+            {% elif plan.status == "submitted" %}<span class="pill pill-due">submitted</span>
+            {% else %}<span class="pill">draft</span>{% endif %}
+          </td>
+          <td><a href="{% url 'plan_detail' plan.id %}" class="btn btn-sm">Open</a></td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" style="text-align:center;padding:26px">
+          No plans yet. Generate one above.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .gen-form { display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap; }
+  .gen-form .field { margin:0; }
+  .gen-form label {
+    display:block; margin-bottom:5px; font-size:13px;
+    font-weight:600; color:#55657a;
+  }
+  .gen-form input, .gen-form select {
+    padding:9px 12px; border:1px solid #dbe2ea; border-radius:7px;
+    font-size:14px; font-family:inherit;
+  }
+</style>
+{% endblock %}

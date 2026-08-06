@@ -110,6 +110,7 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
+                'invoices.context_processors.erp_shell',
             ],
         },
     },
@@ -190,6 +191,12 @@ STATICFILES_DIRS = [BASE_DIR / 'static'] if (BASE_DIR / 'static').is_dir() else 
 # Non-manifest storage on purpose: the manifest variant raises a 500 on every
 # page if collectstatic has not been run, which is easy to hit on shared hosting.
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedStaticFilesStorage'
+
+# Uploaded files (profile pictures). Whitenoise only serves STATIC_ROOT, so
+# these are served by a Django URL pattern - fine at this scale, and it keeps
+# cPanel out of the picture.
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field

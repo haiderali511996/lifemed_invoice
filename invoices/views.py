@@ -1,11 +1,43 @@
 from django.shortcuts import render, redirect, get_object_or_404
-from django.http import FileResponse, JsonResponse
+from django.http import HttpResponse, JsonResponse
+from django.urls import reverse
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth import authenticate, login, logout
 from django.utils.timezone import now
 from django.contrib import messages
 
-from .models import Customer, Invoice, Item, InvoiceLog, UserRolls, is_super_admin
+from django.db.models import Count, DecimalField, F, OuterRef, Q, Subquery, Sum
+from django.db.models.functions import Coalesce
+from django.utils import timezone
+
+from datetime import timedelta
+
+from .forms import (
+    CallPointForm,
+    CustomerForm,
+    EmployeeForm,
+    PaymentForm,
+    PlanGenerateForm,
+    ProfileForm,
+    TerritoryForm,
+)
+from .planning import current_week_start, generate_plan
+from .models import (
+    CallPoint,
+    Customer,
+    Employee,
+    Invoice,
+    Item,
+    InvoiceLog,
+    Payment,
+    PlanVisit,
+    Territory,
+    UserRolls,
+    WeeklyPlan,
+    ZERO,
+    OVERDUE_DAYS,
+    is_super_admin,
+)
 
 try:
     # PyMuPDF renamed its module to `pymupdf`; `fitz` is the pre-1.24.3 name.
@@ -15,23 +47,53 @@ except ImportError:
 
 import os
 import io
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+
+# Column limits, so posted values are clamped rather than rejected by MySQL.
+MAX_PRICE = "99999999.99"
+MAX_DISCOUNT = "100.00"
+MAX_TOTAL = "9999999999.99"
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PDF_PATH = os.path.join(BASE_DIR, "template.pdf")
 
 
-def safe_decimal(value, default="0.00"):
-    try:
-        value = str(value).strip()
+def safe_decimal(value, default="0.00", max_value=None):
+    """Parse a posted number, never raising.
 
-        if value == "":
+    MySQL runs in STRICT_TRANS_TABLES, so a value wider than its column is a
+    hard error rather than a silent truncation. Everything written to the
+    database is clamped here instead of failing the whole invoice.
+    """
+    try:
+        text = str(value).strip()
+
+        result = Decimal(default) if text == "" else Decimal(text)
+
+        if not result.is_finite():
             return Decimal(default)
 
-        return Decimal(value)
-
-    except Exception:
+    except (InvalidOperation, ValueError, TypeError):
         return Decimal(default)
+
+    if max_value is not None and result > Decimal(max_value):
+        result = Decimal(max_value)
+
+    return result.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def clip(value, length):
+    """Trim a posted string to what its column can hold."""
+    return str(value or "")[:length]
+
+
+def safe_int(value, default=0, max_value=1_000_000):
+    try:
+        result = int(float(str(value).strip() or default))
+    except (ValueError, TypeError, OverflowError):
+        return default
+
+    return max(0, min(result, max_value))
 
 
 def post_column(request, field, length):
@@ -129,6 +191,56 @@ def index(request):
 
 
 @login_required
+def customer_list(request):
+    query = request.GET.get("q", "").strip()
+
+    customers = Customer.objects.annotate(invoice_count=Count("invoice"))
+
+    if query:
+        customers = customers.filter(
+            Q(name__icontains=query)
+            | Q(contact_person__icontains=query)
+            | Q(contact_number__icontains=query)
+        )
+
+    return render(
+        request,
+        "invoices/customers.html",
+        {
+            "customers": customers,
+            "query": query,
+        }
+    )
+
+
+@login_required
+def customer_edit(request, customer_id):
+    customer = get_object_or_404(Customer, pk=customer_id)
+
+    if request.method == "POST":
+        form = CustomerForm(request.POST, instance=customer)
+
+        if form.is_valid():
+            form.save()
+
+            messages.success(request, f"Saved {customer.name}.")
+
+            return redirect("customer_list")
+
+    else:
+        form = CustomerForm(instance=customer)
+
+    return render(
+        request,
+        "invoices/customer_form.html",
+        {
+            "form": form,
+            "customer": customer,
+        }
+    )
+
+
+@login_required
 def customer_last_invoice(request, customer_id):
     """Customer details plus the line items of their most recent invoice.
 
@@ -153,14 +265,25 @@ def customer_last_invoice(request, customer_id):
             for item in invoice.items.all()
         ]
 
+    overdue = customer.overdue_invoices()
+
     return JsonResponse({
         "customer_name": customer.name,
         "address": customer.address or "",
         "ntn": customer.ntn or "",
         "sales_tax": customer.sales_tax or "",
         "license_no": customer.license_no or "",
+        "contact_person": customer.contact_person or "",
+        "contact_number": customer.contact_number or "",
         "last_invoice_no": invoice.invoice_no if invoice else None,
         "items": items,
+
+        # Shown on the form so the operator sees what is already owed before
+        # adding another invoice to the pile.
+        "previous_balance": f"{customer.outstanding_balance:.2f}",
+        "overdue_count": len(overdue),
+        "overdue_amount": f"{sum((i.balance for i in overdue), ZERO):.2f}",
+        "ledger_url": reverse("customer_ledger", args=[customer.pk]),
     })
 
 
@@ -173,17 +296,24 @@ def generate_invoice(request):
 
     if request.method == "POST":
 
-        license_no = request.POST.get("license_no", "")
+        license_no = clip(request.POST.get("license_no", ""), 100)
+
+        customer_name = clip(request.POST.get("customer_name", ""), 255).strip()
+
+        if not customer_name:
+            messages.error(request, "Customer name is required.")
+
+            return redirect("index")
 
         customer_fields = {
             "address": request.POST.get("address", ""),
-            "ntn": request.POST.get("ntn", ""),
-            "sales_tax": request.POST.get("sales_tax", ""),
+            "ntn": clip(request.POST.get("ntn", ""), 50),
+            "sales_tax": clip(request.POST.get("sales_tax", ""), 50),
             "license_no": license_no,
         }
 
         customer, created = Customer.objects.get_or_create(
-            name=request.POST.get("customer_name"),
+            name=customer_name,
             defaults=customer_fields
         )
 
@@ -217,9 +347,9 @@ def generate_invoice(request):
             if not names[i]:
                 continue
 
-            qty = safe_decimal(qtys[i])
-            price = safe_decimal(prices[i])
-            disc = safe_decimal(discounts[i])
+            qty = safe_decimal(qtys[i], max_value=MAX_PRICE)
+            price = safe_decimal(prices[i], max_value=MAX_PRICE)
+            disc = safe_decimal(discounts[i], max_value=MAX_DISCOUNT)
 
             gross = Decimal(price) * Decimal(qty)
 
@@ -247,20 +377,24 @@ def generate_invoice(request):
 
             Item.objects.create(
                 invoice=invoice,
-                name=names[i],
-                qty=int(float(qty)),
-                batch=batches[i],
-                expiry=expiries[i],
+                name=clip(names[i], 255),
+                qty=safe_int(qty),
+                batch=clip(batches[i], 100),
+                expiry=clip(expiries[i], 20),
                 price=price,
                 discount=disc
             )
+
+        # Store the net payable so ledgers never recompute it from line items
+        invoice.total = safe_decimal(total_net, max_value=MAX_TOTAL)
+        invoice.save(update_fields=["total"])
 
         # LOG ENTRY
         InvoiceLog.objects.create(
             invoice=invoice,
             user=request.user,
-            customer_name=customer.name,
-            amount=total_net,
+            customer_name=clip(customer.name, 255),
+            amount=invoice.total,
             action="Invoice Created"
         )
 
@@ -378,14 +512,20 @@ def generate_invoice(request):
         doc.save(pdf_bytes)
         doc.close()
 
-        pdf_bytes.seek(0)
-
-        return FileResponse(
-            pdf_bytes,
-            as_attachment=True,
-            filename=f"{invoice.invoice_no}.pdf",
-            content_type="application/pdf"
+        # Deliberately not FileResponse: it hands the object to the server's
+        # wsgi.file_wrapper, and Passenger's implementation calls fileno() on
+        # it. BytesIO has no file descriptor, so that raises
+        # "io.UnsupportedOperation: fileno" and the download 500s under cPanel.
+        response = HttpResponse(
+            pdf_bytes.getvalue(),
+            content_type="application/pdf",
         )
+
+        response["Content-Disposition"] = (
+            f'attachment; filename="{invoice.invoice_no}.pdf"'
+        )
+
+        return response
 
     return redirect("index")
 
@@ -413,5 +553,585 @@ def invoice_logs_view(request):
         "invoices/invoice_logs.html",
         {
             "logs": logs
+        }
+    )
+
+# ---------------------------------------------------------------- LEDGERS
+
+MONEY = DecimalField(max_digits=14, decimal_places=2)
+
+
+def _sum_subquery(model, field):
+    """Per-customer SUM as a correlated subquery.
+
+    Two aggregates over different joins in one query multiply each other out,
+    and Sum(distinct=True) is not a fix - it drops genuinely repeated amounts
+    (two invoices of the same value would count once). Subqueries keep each
+    total independent.
+    """
+    return Subquery(
+        model.objects.filter(customer=OuterRef("pk"))
+        .values("customer")
+        .annotate(total=Sum(field))
+        .values("total"),
+        output_field=MONEY,
+    )
+
+
+def customers_with_balances(queryset=None):
+    """Annotate customers with invoiced and paid totals."""
+    customers = queryset if queryset is not None else Customer.objects.all()
+
+    return customers.annotate(
+        invoiced=Coalesce(_sum_subquery(Invoice, "total"), ZERO, output_field=MONEY),
+        paid=Coalesce(_sum_subquery(Payment, "amount"), ZERO, output_field=MONEY),
+    )
+
+
+def overdue_invoices():
+    cutoff = timezone.localdate() - timedelta(days=OVERDUE_DAYS)
+
+    return (
+        Invoice.objects.filter(date__lte=cutoff)
+        .annotate(received=Coalesce(Sum("payments__amount"), ZERO))
+        .filter(total__gt=F("received"))
+        .select_related("customer")
+        .order_by("date")
+    )
+
+
+@login_required
+def dashboard(request):
+    overdue = list(overdue_invoices())
+
+    totals = Invoice.objects.aggregate(t=Sum("total"))["t"] or ZERO
+    received = Payment.objects.aggregate(t=Sum("amount"))["t"] or ZERO
+
+    return render(
+        request,
+        "invoices/dashboard.html",
+        {
+            "total_invoiced": totals,
+            "total_received": received,
+            "total_outstanding": totals - received,
+            "overdue_invoices": overdue,
+            "overdue_total": sum((i.balance for i in overdue), ZERO),
+            "overdue_days": OVERDUE_DAYS,
+            "customer_count": Customer.objects.count(),
+            "invoice_count": Invoice.objects.count(),
+        }
+    )
+
+
+@login_required
+def ledger_list(request):
+    query = request.GET.get("q", "").strip()
+
+    customers = customers_with_balances()
+
+    if query:
+        customers = customers.filter(
+            Q(name__icontains=query)
+            | Q(address__icontains=query)
+            | Q(license_no__icontains=query)
+            | Q(contact_person__icontains=query)
+        )
+
+    rows = [
+        {"customer": c, "invoiced": c.invoiced, "paid": c.paid,
+         "balance": c.invoiced - c.paid}
+        for c in customers
+    ]
+
+    # Biggest debtors first - that is what the page is for.
+    rows.sort(key=lambda r: r["balance"], reverse=True)
+
+    return render(
+        request,
+        "invoices/ledger_list.html",
+        {
+            "rows": rows,
+            "query": query,
+            "total_outstanding": sum((r["balance"] for r in rows), ZERO),
+        }
+    )
+
+
+@login_required
+def customer_ledger(request, customer_id):
+    """A running statement: invoices as debits, payments as credits."""
+    customer = get_object_or_404(Customer, pk=customer_id)
+
+    entries = []
+
+    for invoice in customer.invoice_set.all():
+        entries.append({
+            "date": invoice.date,
+            "kind": "invoice",
+            "reference": invoice.invoice_no,
+            "detail": f"{invoice.items.count()} item(s)",
+            "debit": invoice.total,
+            "credit": ZERO,
+            "object": invoice,
+        })
+
+    for payment in customer.payments.all():
+        entries.append({
+            "date": payment.paid_on,
+            "kind": "payment",
+            "reference": payment.reference or payment.get_method_display(),
+            "detail": (
+                f"Against {payment.invoice.invoice_no}"
+                if payment.invoice else "Against account"
+            ),
+            "debit": ZERO,
+            "credit": payment.amount,
+            "object": payment,
+        })
+
+    entries.sort(key=lambda e: (e["date"], e["kind"] == "payment"))
+
+    running = ZERO
+
+    for entry in entries:
+        running += entry["debit"] - entry["credit"]
+        entry["balance"] = running
+
+    return render(
+        request,
+        "invoices/customer_ledger.html",
+        {
+            "customer": customer,
+            "entries": entries,
+            "balance": running,
+            "overdue": [i for i in customer.overdue_invoices()],
+            "overdue_days": OVERDUE_DAYS,
+        }
+    )
+
+
+@login_required
+def payment_create(request, customer_id):
+    customer = get_object_or_404(Customer, pk=customer_id)
+
+    if request.method == "POST":
+        form = PaymentForm(request.POST, customer=customer)
+
+        if form.is_valid():
+            payment = form.save(commit=False)
+            payment.customer = customer
+            payment.recorded_by = request.user
+            payment.save()
+
+            messages.success(
+                request, f"Recorded {payment.amount} against {customer.name}."
+            )
+
+            return redirect("customer_ledger", customer_id=customer.pk)
+
+    else:
+        form = PaymentForm(customer=customer)
+
+    return render(
+        request,
+        "invoices/payment_form.html",
+        {
+            "form": form,
+            "customer": customer,
+            "balance": customer.outstanding_balance,
+        }
+    )
+
+
+@login_required
+def payment_list(request):
+    payments = Payment.objects.select_related("customer", "invoice", "recorded_by")
+
+    return render(
+        request,
+        "invoices/payment_list.html",
+        {
+            "payments": payments,
+            "total": payments.aggregate(t=Sum("amount"))["t"] or ZERO,
+        }
+    )
+
+
+# ---------------------------------------------------------------- PROFILE / SEARCH
+
+@login_required
+def profile(request):
+    profile_obj, _ = UserRolls.objects.get_or_create(user=request.user)
+
+    if request.method == "POST":
+        form = ProfileForm(request.POST, request.FILES, instance=profile_obj)
+
+        if form.is_valid():
+            form.save()
+            messages.success(request, "Profile updated.")
+
+            return redirect("profile")
+
+    else:
+        form = ProfileForm(instance=profile_obj)
+
+    return render(
+        request,
+        "invoices/profile.html",
+        {"form": form, "profile": profile_obj}
+    )
+
+
+@login_required
+def global_search(request):
+    """Header search across customer name, pharmacy address and licence."""
+    query = request.GET.get("q", "").strip()
+
+    customers = []
+    invoices = []
+
+    if query:
+        customers = list(
+            customers_with_balances(
+                Customer.objects.filter(
+                    Q(name__icontains=query)
+                    | Q(address__icontains=query)
+                    | Q(license_no__icontains=query)
+                    | Q(contact_person__icontains=query)
+                    | Q(contact_number__icontains=query)
+                    | Q(ntn__icontains=query)
+                )
+            )
+        )
+
+        invoices = list(
+            Invoice.objects.filter(
+                Q(invoice_no__icontains=query)
+                | Q(license_no__icontains=query)
+                | Q(customer__name__icontains=query)
+            ).select_related("customer")[:25]
+        )
+
+    return render(
+        request,
+        "invoices/search.html",
+        {
+            "query": query,
+            "customers": customers,
+            "invoices": invoices,
+            "result_count": len(customers) + len(invoices),
+        }
+    )
+
+
+# ---------------------------------------------------------------- TEAM & TERRITORY
+
+@login_required
+def territory_list(request):
+    territories = Territory.objects.annotate(
+        customer_count=Count("customers", distinct=True),
+        call_point_count=Count("call_points", distinct=True),
+        staff_count=Count("employees", distinct=True),
+    )
+
+    return render(
+        request,
+        "invoices/territory_list.html",
+        {"territories": territories}
+    )
+
+
+@login_required
+def territory_edit(request, territory_id=None):
+    territory = get_object_or_404(Territory, pk=territory_id) if territory_id else None
+
+    if request.method == "POST":
+        form = TerritoryForm(request.POST, instance=territory)
+
+        if form.is_valid():
+            saved = form.save()
+            messages.success(request, f"Saved territory {saved.name}.")
+
+            return redirect("territory_list")
+
+    else:
+        form = TerritoryForm(instance=territory)
+
+    return render(
+        request,
+        "invoices/simple_form.html",
+        {
+            "form": form,
+            "heading": "Edit Territory" if territory else "New Territory",
+            "cancel_url": reverse("territory_list"),
+        }
+    )
+
+
+@login_required
+def team_list(request):
+    employees = Employee.objects.select_related(
+        "territory", "reports_to", "user"
+    )
+
+    query = request.GET.get("q", "").strip()
+
+    if query:
+        employees = employees.filter(
+            Q(full_name__icontains=query)
+            | Q(employee_code__icontains=query)
+            | Q(territory__name__icontains=query)
+            | Q(territory__city__icontains=query)
+        )
+
+    return render(
+        request,
+        "invoices/team_list.html",
+        {
+            "employees": employees,
+            "query": query,
+        }
+    )
+
+
+@login_required
+def employee_edit(request, employee_id=None):
+    employee = get_object_or_404(Employee, pk=employee_id) if employee_id else None
+
+    if request.method == "POST":
+        form = EmployeeForm(request.POST, instance=employee)
+
+        if form.is_valid():
+            saved = form.save()
+            messages.success(request, f"Saved {saved.full_name}.")
+
+            return redirect("team_list")
+
+    else:
+        form = EmployeeForm(instance=employee)
+
+    return render(
+        request,
+        "invoices/simple_form.html",
+        {
+            "form": form,
+            "heading": "Edit Employee" if employee else "New Employee",
+            "cancel_url": reverse("team_list"),
+        }
+    )
+
+
+@login_required
+def call_point_list(request):
+    call_points = CallPoint.objects.select_related("territory", "customer")
+
+    query = request.GET.get("q", "").strip()
+
+    if query:
+        call_points = call_points.filter(
+            Q(name__icontains=query)
+            | Q(speciality__icontains=query)
+            | Q(address__icontains=query)
+            | Q(territory__name__icontains=query)
+        )
+
+    return render(
+        request,
+        "invoices/call_point_list.html",
+        {
+            "call_points": call_points,
+            "query": query,
+        }
+    )
+
+
+@login_required
+def call_point_edit(request, call_point_id=None):
+    call_point = (
+        get_object_or_404(CallPoint, pk=call_point_id) if call_point_id else None
+    )
+
+    if request.method == "POST":
+        form = CallPointForm(request.POST, instance=call_point)
+
+        if form.is_valid():
+            saved = form.save()
+            messages.success(request, f"Saved {saved.name}.")
+
+            return redirect("call_point_list")
+
+    else:
+        form = CallPointForm(instance=call_point)
+
+    return render(
+        request,
+        "invoices/simple_form.html",
+        {
+            "form": form,
+            "heading": "Edit Call Point" if call_point else "New Call Point",
+            "cancel_url": reverse("call_point_list"),
+        }
+    )
+
+
+# ---------------------------------------------------------------- WEEKLY PLANS
+
+@login_required
+def plan_list(request):
+    plans = WeeklyPlan.objects.select_related("employee", "employee__territory")
+
+    return render(
+        request,
+        "invoices/plan_list.html",
+        {
+            "plans": plans,
+            "form": PlanGenerateForm(initial={"week_start": current_week_start()}),
+            "current_week": current_week_start(),
+        }
+    )
+
+
+@login_required
+def plan_generate(request):
+    if request.method != "POST":
+        return redirect("plan_list")
+
+    form = PlanGenerateForm(request.POST)
+
+    if not form.is_valid():
+        messages.error(request, "Pick an employee and a week.")
+
+        return redirect("plan_list")
+
+    plan, created = generate_plan(
+        employee=form.cleaned_data["employee"],
+        week_start=form.cleaned_data["week_start"],
+        calls_per_day=form.cleaned_data["calls_per_day"],
+        created_by=request.user,
+    )
+
+    if not created:
+        if not plan.is_editable:
+            messages.error(
+                request,
+                f"That week is already {plan.get_status_display().lower()} - "
+                f"it was left untouched.",
+            )
+        elif plan.employee.territory is None:
+            messages.error(
+                request,
+                f"{plan.employee.full_name} has no territory assigned.",
+            )
+        else:
+            messages.error(
+                request,
+                f"No active call points in {plan.employee.territory.name}.",
+            )
+    else:
+        messages.success(request, f"Generated {created} visit(s).")
+
+    return redirect("plan_detail", plan_id=plan.pk)
+
+
+@login_required
+def plan_detail(request, plan_id):
+    plan = get_object_or_404(
+        WeeklyPlan.objects.select_related("employee", "employee__territory"),
+        pk=plan_id,
+    )
+
+    return render(
+        request,
+        "invoices/plan_detail.html",
+        {
+            "plan": plan,
+            "days": plan.visits_by_day(),
+        }
+    )
+
+
+@login_required
+def plan_status(request, plan_id, action):
+    plan = get_object_or_404(WeeklyPlan, pk=plan_id)
+
+    transitions = {
+        "submit": WeeklyPlan.STATUS_SUBMITTED,
+        "approve": WeeklyPlan.STATUS_APPROVED,
+        "reject": WeeklyPlan.STATUS_REJECTED,
+    }
+
+    if action not in transitions:
+        messages.error(request, "Unknown action.")
+
+        return redirect("plan_detail", plan_id=plan.pk)
+
+    plan.status = transitions[action]
+
+    if action in ("approve", "reject"):
+        plan.reviewed_by = request.user
+        plan.reviewed_at = timezone.now()
+        plan.review_note = request.POST.get("review_note", "")
+
+    plan.save()
+
+    messages.success(request, f"Plan {plan.get_status_display().lower()}.")
+
+    return redirect("plan_detail", plan_id=plan.pk)
+
+
+@login_required
+def visit_status(request, visit_id, action):
+    """Field reporting: mark a planned call as done or missed."""
+    visit = get_object_or_404(PlanVisit, pk=visit_id)
+
+    if action in ("done", "missed", "planned"):
+        visit.status = action
+        visit.remarks = request.POST.get("remarks", visit.remarks)
+        visit.save()
+
+    return redirect("plan_detail", plan_id=visit.plan_id)
+
+
+# ---------------------------------------------------------------- LOCATION REPORT
+
+@login_required
+def territory_report(request):
+    """Sales, receivables and field coverage broken down by territory."""
+    rows = []
+
+    for territory in Territory.objects.all():
+        customers = Customer.objects.filter(territory=territory)
+
+        invoiced = (
+            Invoice.objects.filter(customer__territory=territory)
+            .aggregate(t=Sum("total"))["t"] or ZERO
+        )
+        received = (
+            Payment.objects.filter(customer__territory=territory)
+            .aggregate(t=Sum("amount"))["t"] or ZERO
+        )
+
+        rows.append({
+            "territory": territory,
+            "customers": customers.count(),
+            "call_points": territory.call_points.filter(is_active=True).count(),
+            "staff": territory.employees.filter(is_active=True).count(),
+            "invoiced": invoiced,
+            "received": received,
+            "balance": invoiced - received,
+        })
+
+    rows.sort(key=lambda r: r["invoiced"], reverse=True)
+
+    unassigned = Customer.objects.filter(territory__isnull=True).count()
+
+    return render(
+        request,
+        "invoices/territory_report.html",
+        {
+            "rows": rows,
+            "unassigned_customers": unassigned,
+            "total_invoiced": sum((r["invoiced"] for r in rows), ZERO),
+            "total_balance": sum((r["balance"] for r in rows), ZERO),
         }
     )

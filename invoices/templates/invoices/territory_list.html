@@ -1,0 +1,47 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Territories{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Territories</h1>
+  <div style="display:flex;gap:9px">
+    <a href="{% url 'territory_report' %}" class="btn btn-grey">📍 Location Report</a>
+    <a href="{% url 'territory_new' %}" class="btn">＋ New Territory</a>
+  </div>
+</div>
+
+<div class="card">
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Territory</th><th>City</th><th>Region</th>
+          <th class="num">Customers</th><th class="num">Call Points</th>
+          <th class="num">Staff</th><th>Status</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in territories %}
+        <tr>
+          <td><strong>{{ t.name }}</strong></td>
+          <td>{{ t.city }}</td>
+          <td>{{ t.region|default:"-" }}</td>
+          <td class="num">{{ t.customer_count }}</td>
+          <td class="num">{{ t.call_point_count }}</td>
+          <td class="num">{{ t.staff_count }}</td>
+          <td>
+            {% if t.is_active %}<span class="pill pill-paid">active</span>
+            {% else %}<span class="pill pill-overdue">inactive</span>{% endif %}
+          </td>
+          <td><a href="{% url 'territory_edit' t.id %}" class="btn btn-sm">Edit</a></td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="8" style="text-align:center;padding:26px">
+          No territories yet. Create one to start assigning customers, call
+          points and field staff by location.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

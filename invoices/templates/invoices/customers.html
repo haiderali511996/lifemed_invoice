@@ -1,0 +1,82 @@
+{% extends "invoices/base.html" %}
+
+{% block title %}LifeMed Pharma - Customers{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Customers</h1>
+  {% if not is_super_admin %}
+  <a href="{% url 'index' %}" class="btn">＋ New Invoice</a>
+  {% endif %}
+</div>
+
+<div class="card">
+  <form method="GET" style="display: flex; gap: 10px; margin-bottom: 16px">
+    <input
+      type="text"
+      name="q"
+      value="{{ query }}"
+      placeholder="Search by name, contact person or number..."
+      style="
+        flex: 1;
+        padding: 9px 12px;
+        border: 1px solid #dbe2ea;
+        border-radius: 7px;
+        font-size: 14px;
+      "
+    />
+    <button type="submit" class="btn">Search</button>
+    {% if query %}
+    <a href="{% url 'customer_list' %}" class="btn btn-grey">Clear</a>
+    {% endif %}
+  </form>
+
+  <div style="overflow-x: auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Customer</th>
+          <th>Contact Person</th>
+          <th>Contact Number</th>
+          <th>Licence #</th>
+          <th class="num">Invoices</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for customer in customers %}
+        <tr>
+          <td><strong>{{ customer.name }}</strong></td>
+          <td>
+            {% if customer.contact_person %}{{ customer.contact_person }}
+            {% else %}<span class="muted">not set</span>{% endif %}
+          </td>
+          <td>
+            {% if customer.contact_number %}{{ customer.contact_number }}
+            {% else %}<span class="muted">not set</span>{% endif %}
+          </td>
+          <td>{{ customer.license_no|default:"-" }}</td>
+          <td class="num">{{ customer.invoice_count }}</td>
+          <td style="white-space: nowrap">
+            <a href="{% url 'customer_edit' customer.id %}" class="btn btn-sm">Edit</a>
+            <a
+              href="{% url 'customer_ledger' customer.id %}"
+              class="btn btn-sm btn-grey"
+              >Ledger</a
+            >
+          </td>
+        </tr>
+        {% empty %}
+        <tr>
+          <td colspan="6" style="text-align: center; padding: 26px">
+            {% if query %} No customers match "{{ query }}". {% else %} No
+            customers yet - they are created automatically when you generate an
+            invoice. {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

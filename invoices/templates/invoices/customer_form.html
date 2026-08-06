@@ -1,0 +1,141 @@
+{% extends "invoices/base.html" %}
+
+{% block title %}LifeMed Pharma - Edit {{ customer.name }}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Edit Customer</h1>
+  <a href="{% url 'customer_ledger' customer.id %}" class="btn btn-grey">
+    View Ledger
+  </a>
+</div>
+
+<div class="card" style="max-width: 700px">
+  <form method="POST" novalidate>
+    {% csrf_token %}
+
+    {% if form.non_field_errors %}
+    <div class="alert alert-error">
+      {% for error in form.non_field_errors %}{{ error }}{% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="field">
+      <label for="{{ form.name.id_for_label }}">Customer Name</label>
+      {{ form.name }} {{ form.name.errors }}
+      <p class="help">Renaming here also renames the customer on future invoices.</p>
+    </div>
+
+    <div class="field">
+      <label for="{{ form.address.id_for_label }}">Address</label>
+      {{ form.address }} {{ form.address.errors }}
+    </div>
+
+    <div class="section-title">Contact Person</div>
+
+    <div class="row">
+      <div class="field">
+        <label for="{{ form.contact_person.id_for_label }}">Name</label>
+        {{ form.contact_person }} {{ form.contact_person.errors }}
+      </div>
+
+      <div class="field">
+        <label for="{{ form.contact_number.id_for_label }}">Phone</label>
+        {{ form.contact_number }} {{ form.contact_number.errors }}
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="{{ form.contact_email.id_for_label }}">Email</label>
+      {{ form.contact_email }} {{ form.contact_email.errors }}
+    </div>
+
+    <div class="field">
+      <label for="{{ form.territory.id_for_label }}">Territory</label>
+      {{ form.territory }} {{ form.territory.errors }}
+      <p class="help">Drives the location-wise sales report.</p>
+    </div>
+
+    <div class="section-title">Registration Details</div>
+
+    <div class="row">
+      <div class="field">
+        <label for="{{ form.license_no.id_for_label }}">Pharmacy Licence #</label>
+        {{ form.license_no }} {{ form.license_no.errors }}
+      </div>
+
+      <div class="field">
+        <label for="{{ form.ntn.id_for_label }}">CNIC / NTN #</label>
+        {{ form.ntn }} {{ form.ntn.errors }}
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="{{ form.sales_tax.id_for_label }}">Sales Tax Reg #</label>
+      {{ form.sales_tax }} {{ form.sales_tax.errors }}
+    </div>
+
+    <div style="display: flex; gap: 10px; margin-top: 22px">
+      <button type="submit" class="btn">Save Changes</button>
+      <a href="{% url 'customer_list' %}" class="btn btn-grey">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .field {
+    margin-bottom: 15px;
+  }
+
+  .field label {
+    display: block;
+    margin-bottom: 5px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #55657a;
+  }
+
+  .field input[type="text"],
+  .field input[type="email"],
+  .field textarea {
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid #dbe2ea;
+    border-radius: 7px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+
+  .section-title {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--brand);
+    border-bottom: 1px solid #eef2f6;
+    padding-bottom: 6px;
+    margin: 24px 0 16px;
+  }
+
+  .help {
+    font-size: 12px;
+    color: #8595a8;
+    margin: 5px 0 0;
+  }
+
+  .errorlist {
+    color: #dc3545;
+    font-size: 12px;
+    font-weight: 600;
+    margin: 5px 0 0;
+    padding-left: 16px;
+  }
+</style>
+{% endblock %}

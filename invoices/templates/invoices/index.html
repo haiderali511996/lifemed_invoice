@@ -1,405 +1,356 @@
-<!DOCTYPE html>
-<html>
-  <head>
-    <title>Invoice System</title>
+{% extends "invoices/base.html" %}
 
-    <style>
-      body {
-        font-family: "Segoe UI", sans-serif;
-        background: #f8f9fa;
-        padding: 30px;
-      }
+{% block title %}LifeMed Pharma - New Invoice{% endblock %}
 
-      .container {
-        background: white;
-        padding: 30px;
-        border-radius: 12px;
-        max-width: 1100px;
-        margin: auto;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
-      }
+{% block content %}
+<div class="page-head">
+  <h1>New Invoice</h1>
+  <a href="{% url 'customer_list' %}" class="btn btn-grey">👥 Customers</a>
+</div>
 
-      h2 {
-        margin-bottom: 20px;
-      }
+<form method="POST" action="{% url 'generate' %}">
+  {% csrf_token %}
 
-      .top-bar {
-        display: flex;
-        justify-content: space-between;
-        margin-bottom: 20px;
-      }
-
-      /* 📋 Logs aur Logout buttons ka container */
-      .top-bar-actions {
-        display: flex;
-        gap: 10px;
-        align-items: center;
-      }
-
-      .btn-logs {
-        text-decoration: none;
-        color: white;
-        background: #007bff;
-        padding: 8px 15px;
-        border-radius: 6px;
-        font-size: 14px;
-        font-weight: bold;
-        transition: background 0.2s;
-      }
-
-      .btn-logs:hover {
-        background: #0056b3;
-      }
-
-      .logout {
-        text-decoration: none;
-        color: white;
-        background: #dc3545;
-        padding: 8px 15px;
-        border-radius: 6px;
-      }
-
-      .prefill-note {
-        min-height: 18px;
-        margin: -8px 0 12px;
-        font-size: 13px;
-        color: #0056b3;
-      }
-
-      .header-grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 15px;
-        margin-bottom: 20px;
-      }
-
-      label {
-        font-weight: bold;
-        font-size: 14px;
-      }
-
-      input,
-      select,
-      textarea {
-        padding: 10px;
-        border: 1px solid #ced4da;
-        border-radius: 6px;
-        width: 100%;
-      }
-
-      textarea {
-        height: 70px;
-        resize: none;
-      }
-
-      table {
-        width: 100%;
-        border-collapse: collapse;
-        margin-top: 15px;
-      }
-
-      th {
-        background: #343a40;
-        color: white;
-        padding: 10px;
-      }
-
-      td {
-        padding: 8px;
-      }
-
-      .btn {
-        padding: 10px 20px;
-        border: none;
-        border-radius: 6px;
-        cursor: pointer;
-      }
-
-      .add-btn {
-        background: #28a745;
-        color: white;
-        margin-top: 10px;
-      }
-
-      .generate-btn {
-        background: #007bff;
-        color: white;
-        width: 100%;
-        margin-top: 20px;
-        font-size: 16px;
-      }
-
-      .delete-btn {
-        background: #dc3545;
-        color: white;
-      }
-
-      select option {
-        padding: 8px;
-      }
-
-      /* 🚫 CUSTOM ACCESSIBLE WARNING NOTIFICATION STYLE */
-      .custom-alert {
-        background-color: #f8d7da;
-        color: #842029;
-        border: 1px solid #f5c2c7;
-        padding: 15px;
-        border-radius: 6px;
-        margin-bottom: 20px;
-        font-weight: 600;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
-        animation: fadeIn 0.3s ease-in-out;
-      }
-
-      .custom-alert .close-alert-btn {
-        background: none;
-        border: none;
-        color: #842029;
-        font-size: 18px;
-        cursor: pointer;
-        font-weight: bold;
-      }
-
-      @keyframes fadeIn {
-        from {
-          opacity: 0;
-          transform: translateY(-10px);
-        }
-        to {
-          opacity: 1;
-          transform: translateY(0);
-        }
-      }
-    </style>
-  </head>
-
-  <body>
-    <div class="container">
-      <!-- DJANGO MESSAGES FRAMEWORK DISPLAYER FOR MANAGER REDIRECT WARNINGS -->
-      {% if messages %}
-      <div id="django-custom-messages">
-        {% for message in messages %}
-        <div class="custom-alert">
-          <span>{{ message }}</span>
-          <button class="close-alert-btn" onclick="this.parentElement.remove()">
-            ×
-          </button>
-        </div>
+  <div class="card" style="margin-bottom: 16px">
+    <div class="field">
+      <label>Select Existing Customer</label>
+      <select id="customerDropdown" onchange="fillCustomer()">
+        <option value="">-- Search &amp; select customer --</option>
+        {% for c in customers %}
+        <option
+          value="{{ c.id }}"
+          data-name="{{ c.name }}"
+          data-ntn="{{ c.ntn|default_if_none:'' }}"
+          data-sale="{{ c.sales_tax|default_if_none:'' }}"
+          data-address="{{ c.address|default_if_none:'' }}"
+          data-license="{{ c.license_no|default_if_none:'' }}"
+        >
+          {{ c.name }}
+        </option>
         {% endfor %}
-      </div>
-      {% endif %}
-
-      <div class="top-bar">
-        <h2>Invoice Form</h2>
-        <div class="top-bar-actions">
-          <a href="{% url 'invoice_logs' %}" class="btn-logs"
-            >📋 View Activity Logs</a
-          >
-          <a href="/logout/" class="logout">Logout</a>
-        </div>
-      </div>
-
-      <form method="POST" action="{% url 'generate' %}">
-        {% csrf_token %}
-
-        <label>Select Customer</label>
-        <select id="customerDropdown" onchange="fillCustomer()">
-          <option value="">-- Search & Select Customer --</option>
-          {% for c in customers %}
-          <option
-            value="{{ c.id }}"
-            data-name="{{ c.name }}"
-            data-ntn="{{ c.ntn }}"
-            data-sale="{{ c.sales_tax }}"
-            data-address="{{ c.address }}"
-            data-license="{{ c.license_no }}"
-          >
-            {{ c.name }}
-          </option>
-          {% endfor %}
-        </select>
-
-        <div id="prefill-note" class="prefill-note"></div>
-
-        <div class="header-grid">
-          <div>
-            <label>Customer Name</label>
-            <input type="text" name="customer_name" id="customer_name" />
-          </div>
-
-          <div>
-            <label>License #</label>
-            <input type="text" name="license_no" id="license_no" />
-          </div>
-
-          <div>
-            <label>CNIC/NTN #</label>
-            <input type="text" name="ntn" id="ntn" />
-          </div>
-
-          <div>
-            <label>Sale Tax Reg #</label>
-            <input type="text" name="sales_tax" id="sales_tax" />
-          </div>
-
-          <div style="grid-column: span 2">
-            <label>Address</label>
-            <textarea name="address" id="address"></textarea>
-          </div>
-        </div>
-
-        <table>
-          <thead>
-            <tr>
-              <th>Item</th>
-              <th>Qty</th>
-              <th>T.Price</th>
-              <th>Disc %</th>
-              <th>Batch</th>
-              <th>Expiry</th>
-              <th>Amount</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-
-          <tbody id="items"></tbody>
-        </table>
-
-        <button type="button" class="btn add-btn" onclick="addRow()">
-          + Add Row
-        </button>
-
-        <button type="submit" class="btn generate-btn">Generate PDF</button>
-      </form>
+      </select>
     </div>
 
-    <script>
-      /* ---------------- CUSTOMER AUTO FILL ---------------- */
-      const LAST_INVOICE_URL = "{% url 'customer_last_invoice' 0 %}";
+    <!-- Outstanding balance before this invoice is added -->
+    <div id="balance-panel" class="balance-panel" style="display: none">
+      <div>
+        <span class="k">Previous Balance</span>
+        <span class="v" id="prev-balance">0.00</span>
+      </div>
+      <div>
+        <span class="k">Overdue</span>
+        <span class="v" id="overdue-amount">0.00</span>
+        <span class="sub" id="overdue-note"></span>
+      </div>
+      <div style="margin-left: auto; align-self: center">
+        <a href="#" id="ledger-link" class="btn btn-sm btn-grey">View Ledger</a>
+      </div>
+    </div>
 
-      function fillCustomer() {
-        let sel = document.getElementById("customerDropdown");
-        let opt = sel.options[sel.selectedIndex];
+    <div id="prefill-note" class="prefill-note"></div>
 
-        let note = document.getElementById("prefill-note");
-        note.textContent = "";
+    <div class="header-grid">
+      <div class="field">
+        <label>Customer Name</label>
+        <input type="text" name="customer_name" id="customer_name" required />
+      </div>
 
-        if (!opt.value) return;
+      <div class="field">
+        <label>Pharmacy Licence #</label>
+        <input type="text" name="license_no" id="license_no" />
+      </div>
 
-        document.getElementById("customer_name").value = opt.dataset.name || "";
-        document.getElementById("ntn").value = opt.dataset.ntn || "";
-        document.getElementById("sales_tax").value = opt.dataset.sale || "";
-        document.getElementById("address").value = opt.dataset.address || "";
-        document.getElementById("license_no").value = opt.dataset.license || "";
+      <div class="field">
+        <label>CNIC / NTN #</label>
+        <input type="text" name="ntn" id="ntn" />
+      </div>
 
-        loadLastInvoice(opt.value, note);
-      }
+      <div class="field">
+        <label>Sales Tax Reg #</label>
+        <input type="text" name="sales_tax" id="sales_tax" />
+      </div>
 
-      /* Pull the customer's previous order so a repeat invoice needs no retyping */
-      function loadLastInvoice(customerId, note) {
-        note.textContent = "Loading previous invoice...";
+      <div class="field" style="grid-column: 1 / -1">
+        <label>Address</label>
+        <textarea name="address" id="address" rows="2"></textarea>
+      </div>
+    </div>
+  </div>
 
-        fetch(LAST_INVOICE_URL.replace("/0/", "/" + customerId + "/"), {
-          headers: { "X-Requested-With": "XMLHttpRequest" },
-        })
-          .then(function (response) {
-            if (!response.ok) throw new Error(response.status);
-            return response.json();
-          })
-          .then(function (data) {
-            /* The saved customer record is newer than the dropdown's snapshot */
-            document.getElementById("ntn").value = data.ntn;
-            document.getElementById("sales_tax").value = data.sales_tax;
-            document.getElementById("address").value = data.address;
-            document.getElementById("license_no").value = data.license_no;
+  <div class="card">
+    <h3 style="margin-top: 0">Items</h3>
 
-            let tbody = document.getElementById("items");
-            tbody.innerHTML = "";
+    <div style="overflow-x: auto">
+      <table>
+        <thead>
+          <tr>
+            <th>Item</th>
+            <th>Qty</th>
+            <th>T.Price</th>
+            <th>Disc %</th>
+            <th>Batch</th>
+            <th>Expiry</th>
+            <th>Amount</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="items"></tbody>
+      </table>
+    </div>
 
-            if (!data.items.length) {
-              addRow();
-              note.textContent = "No previous invoice for this customer.";
-              return;
-            }
+    <div style="display: flex; gap: 10px; margin-top: 16px; align-items: center">
+      <button type="button" class="btn btn-grey" onclick="addRow()">
+        ＋ Add Row
+      </button>
 
-            data.items.forEach(function (item) {
-              addRow(item);
-            });
+      <span style="margin-left: auto; font-size: 15px">
+        Invoice Total:
+        <strong id="grand-total" style="font-size: 19px">0.00</strong>
+      </span>
+    </div>
 
-            note.textContent =
-              "Items prefilled from invoice " +
-              data.last_invoice_no +
-              " - edit or remove any row.";
-          })
-          .catch(function () {
-            note.textContent = "Could not load the previous invoice.";
-          });
-      }
+    <div style="margin-top: 16px">
+      <button type="submit" class="btn btn-green">Generate PDF</button>
+    </div>
+  </div>
+</form>
+{% endblock %}
 
-      /* ---------------- ITEMS ---------------- */
-      function addRow(item) {
-        let tr = document.createElement("tr");
+{% block extra_head %}
+<style>
+  .field {
+    margin-bottom: 14px;
+  }
 
-        tr.innerHTML = `
-        <td><input name="item_name[]" required></td>
-        <td><input name="qty[]" type="number" value="1" oninput="calculate(this)"></td>
-        <td><input name="price[]" type="number" value="0" oninput="calculate(this)"></td>
-        <td><input name="discount[]" type="number" value="0" oninput="calculate(this)"></td>
-        <td><input name="batch[]" placeholder="Batch"></td>
-        <td><input name="expiry[]" type="text"></td>
-        <td><input name="amount[]" readonly></td>
-        <td><button type="button" class="delete-btn" onclick="this.parentElement.parentElement.remove()">X</button></td>
+  .field label {
+    display: block;
+    margin-bottom: 5px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #55657a;
+  }
+
+  .field input,
+  .field select,
+  .field textarea {
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid #dbe2ea;
+    border-radius: 7px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+
+  .header-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0 14px;
+  }
+
+  .balance-panel {
+    display: flex;
+    gap: 30px;
+    background: #fff8e6;
+    border: 1px solid #f5dfa8;
+    border-radius: 9px;
+    padding: 13px 16px;
+    margin-bottom: 14px;
+  }
+
+  .balance-panel .k {
+    display: block;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #8a6100;
+  }
+
+  .balance-panel .v {
+    font-size: 20px;
+    font-weight: 700;
+    color: #8a6100;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .balance-panel .sub {
+    display: block;
+    font-size: 11px;
+    color: #a08040;
+  }
+
+  .prefill-note {
+    min-height: 17px;
+    font-size: 13px;
+    color: var(--brand);
+    margin-bottom: 10px;
+  }
+
+  #items input {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid #dbe2ea;
+    border-radius: 5px;
+    font-size: 13px;
+    font-family: inherit;
+  }
+
+  #items td {
+    padding: 5px;
+  }
+
+  .delete-btn {
+    background: #dc3545;
+    color: #fff;
+    border: none;
+    border-radius: 5px;
+    padding: 6px 10px;
+    cursor: pointer;
+  }
+</style>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+  const LAST_INVOICE_URL = "{% url 'customer_last_invoice' 0 %}";
+
+  /* ---------------- CUSTOMER AUTO FILL ---------------- */
+  function fillCustomer() {
+    const sel = document.getElementById("customerDropdown");
+    const opt = sel.options[sel.selectedIndex];
+    const note = document.getElementById("prefill-note");
+
+    note.textContent = "";
+    document.getElementById("balance-panel").style.display = "none";
+
+    if (!opt.value) return;
+
+    document.getElementById("customer_name").value = opt.dataset.name || "";
+    document.getElementById("ntn").value = opt.dataset.ntn || "";
+    document.getElementById("sales_tax").value = opt.dataset.sale || "";
+    document.getElementById("address").value = opt.dataset.address || "";
+    document.getElementById("license_no").value = opt.dataset.license || "";
+
+    loadCustomer(opt.value, note);
+  }
+
+  /* Previous balance + last order, so a repeat invoice needs no retyping */
+  function loadCustomer(customerId, note) {
+    note.textContent = "Loading customer history...";
+
+    fetch(LAST_INVOICE_URL.replace("/0/", "/" + customerId + "/"), {
+      headers: { "X-Requested-With": "XMLHttpRequest" },
+    })
+      .then(function (response) {
+        if (!response.ok) throw new Error(response.status);
+        return response.json();
+      })
+      .then(function (data) {
+        document.getElementById("ntn").value = data.ntn;
+        document.getElementById("sales_tax").value = data.sales_tax;
+        document.getElementById("address").value = data.address;
+        document.getElementById("license_no").value = data.license_no;
+
+        showBalance(data);
+
+        const tbody = document.getElementById("items");
+        tbody.innerHTML = "";
+
+        if (!data.items.length) {
+          addRow();
+          note.textContent = "No previous invoice for this customer.";
+          return;
+        }
+
+        data.items.forEach(function (item) {
+          addRow(item);
+        });
+
+        note.textContent =
+          "Items prefilled from invoice " +
+          data.last_invoice_no +
+          " - edit or remove any row.";
+      })
+      .catch(function () {
+        note.textContent = "Could not load the customer's history.";
+      });
+  }
+
+  function showBalance(data) {
+    const panel = document.getElementById("balance-panel");
+
+    document.getElementById("prev-balance").textContent = data.previous_balance;
+    document.getElementById("overdue-amount").textContent = data.overdue_amount;
+    document.getElementById("ledger-link").href = data.ledger_url;
+
+    const overdueNote = document.getElementById("overdue-note");
+    overdueNote.textContent = data.overdue_count
+      ? data.overdue_count + " invoice(s) past due"
+      : "nothing past due";
+
+    panel.style.display = "flex";
+  }
+
+  /* ---------------- ITEMS ---------------- */
+  function addRow(item) {
+    const tr = document.createElement("tr");
+
+    tr.innerHTML = `
+      <td><input name="item_name[]" required></td>
+      <td><input name="qty[]" type="number" value="1" oninput="calculate(this)"></td>
+      <td><input name="price[]" type="number" value="0" oninput="calculate(this)"></td>
+      <td><input name="discount[]" type="number" value="0" oninput="calculate(this)"></td>
+      <td><input name="batch[]" placeholder="Batch"></td>
+      <td><input name="expiry[]" type="text" placeholder="MM/YY"></td>
+      <td><input name="amount[]" readonly></td>
+      <td><button type="button" class="delete-btn" onclick="removeRow(this)">✕</button></td>
     `;
 
-        document.getElementById("items").appendChild(tr);
+    document.getElementById("items").appendChild(tr);
 
-        if (!item) return;
+    if (item) {
+      /* Assigned as values, never as markup, so item names can't inject HTML */
+      tr.querySelector('[name="item_name[]"]').value = item.name;
+      tr.querySelector('[name="qty[]"]').value = item.qty;
+      tr.querySelector('[name="price[]"]').value = item.price;
+      tr.querySelector('[name="discount[]"]').value = item.discount;
+      tr.querySelector('[name="batch[]"]').value = item.batch;
+      tr.querySelector('[name="expiry[]"]').value = item.expiry;
+    }
 
-        /* Assigned as values, never as markup, so item names can't inject HTML */
-        tr.querySelector('[name="item_name[]"]').value = item.name;
-        tr.querySelector('[name="qty[]"]').value = item.qty;
-        tr.querySelector('[name="price[]"]').value = item.price;
-        tr.querySelector('[name="discount[]"]').value = item.discount;
-        tr.querySelector('[name="batch[]"]').value = item.batch;
-        tr.querySelector('[name="expiry[]"]').value = item.expiry;
+    calculate(tr.querySelector('[name="qty[]"]'));
+  }
 
-        calculate(tr.querySelector('[name="qty[]"]'));
-      }
+  function removeRow(button) {
+    button.closest("tr").remove();
+    updateGrandTotal();
+  }
 
-      function calculate(el) {
-        let row = el.parentElement.parentElement;
+  function calculate(el) {
+    const row = el.closest("tr");
 
-        let qty = parseFloat(row.querySelector('[name="qty[]"]').value) || 0;
-        let price =
-          parseFloat(row.querySelector('[name="price[]"]').value) || 0;
-        let disc =
-          parseFloat(row.querySelector('[name="discount[]"]').value) || 0;
+    const qty = parseFloat(row.querySelector('[name="qty[]"]').value) || 0;
+    const price = parseFloat(row.querySelector('[name="price[]"]').value) || 0;
+    const disc = parseFloat(row.querySelector('[name="discount[]"]').value) || 0;
 
-        let discounted = price - (price * disc) / 100;
-        let amount = qty * discounted;
+    const discounted = price - (price * disc) / 100;
 
-        row.querySelector('[name="amount[]"]').value = amount.toFixed(2);
-      }
+    row.querySelector('[name="amount[]"]').value = (qty * discounted).toFixed(2);
 
-      /* ---------------- TIMER TO DISMISS NOTIFICATION AUTO ---------------- */
-      window.onload = function () {
-        addRow();
+    updateGrandTotal();
+  }
 
-        // Agar koi alert warning screen par ho to usay 4 seconds baad auto close kar do
-        let alertBox = document.getElementById("django-custom-messages");
-        if (alertBox) {
-          setTimeout(function () {
-            alertBox.style.transition = "opacity 0.5s ease";
-            alertBox.style.opacity = "0";
-            setTimeout(function () {
-              alertBox.remove();
-            }, 500);
-          }, 4000); // 4000ms = 4 seconds
-        }
-      };
-    </script>
-  </body>
-</html>
+  function updateGrandTotal() {
+    let total = 0;
+
+    document.querySelectorAll('#items [name="amount[]"]').forEach(function (el) {
+      total += parseFloat(el.value) || 0;
+    });
+
+    document.getElementById("grand-total").textContent = total.toFixed(2);
+  }
+
+  window.addEventListener("load", function () {
+    addRow();
+  });
+</script>
+{% endblock %}

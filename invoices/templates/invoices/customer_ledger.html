@@ -1,0 +1,140 @@
+{% extends "invoices/base.html" %}
+
+{% block title %}LifeMed Pharma - {{ customer.name }} Ledger{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>{{ customer.name }}</h1>
+  <div style="display: flex; gap: 9px" class="no-print">
+    <a href="{% url 'payment_create' customer.id %}" class="btn btn-green"
+      >＋ Record Payment</a
+    >
+    <a href="{% url 'customer_edit' customer.id %}" class="btn btn-grey">Edit</a>
+    <button onclick="window.print()" class="btn btn-grey">Print</button>
+  </div>
+</div>
+
+{% if overdue %}
+<div class="alert alert-warn">
+  <strong>⚠️ {{ overdue|length }} invoice(s) unpaid for over
+  {{ overdue_days }} days.</strong>
+  {% for invoice in overdue %}{{ invoice.invoice_no }} ({{ invoice.balance|floatformat:2 }}){% if not forloop.last %}, {% endif %}{% endfor %}
+</div>
+{% endif %}
+
+<div class="card" style="margin-bottom: 18px">
+  <div class="summary">
+    <div>
+      <span class="k">Contact</span>
+      <span class="v">
+        {{ customer.contact_person|default:"—" }}
+        {% if customer.contact_number %}<br />{{ customer.contact_number }}{% endif %}
+      </span>
+    </div>
+    <div>
+      <span class="k">Address</span>
+      <span class="v">{{ customer.address|default:"—" }}</span>
+    </div>
+    <div>
+      <span class="k">Pharmacy Licence</span>
+      <span class="v">{{ customer.license_no|default:"—" }}</span>
+    </div>
+    <div>
+      <span class="k">Closing Balance</span>
+      <span class="v total {% if balance > 0 %}owing{% endif %}">
+        {{ balance|floatformat:2 }}
+      </span>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top: 0">Statement</h3>
+
+  <div style="overflow-x: auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Type</th>
+          <th>Reference</th>
+          <th>Detail</th>
+          <th class="num">Debit</th>
+          <th class="num">Credit</th>
+          <th class="num">Balance</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for entry in entries %}
+        <tr>
+          <td>{{ entry.date|date:"d-m-Y" }}</td>
+          <td>
+            {% if entry.kind == "invoice" %}
+            <span class="pill pill-due">Invoice</span>
+            {% else %}
+            <span class="pill pill-paid">Payment</span>
+            {% endif %}
+          </td>
+          <td><strong>{{ entry.reference }}</strong></td>
+          <td style="color: #55657a">{{ entry.detail }}</td>
+          <td class="num">
+            {% if entry.debit %}{{ entry.debit|floatformat:2 }}{% endif %}
+          </td>
+          <td class="num" style="color: #1e7b24">
+            {% if entry.credit %}{{ entry.credit|floatformat:2 }}{% endif %}
+          </td>
+          <td class="num"><strong>{{ entry.balance|floatformat:2 }}</strong></td>
+        </tr>
+        {% empty %}
+        <tr>
+          <td colspan="7" style="text-align: center; padding: 26px">
+            No invoices or payments yet for this customer.
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      {% if entries %}
+      <tfoot>
+        <tr>
+          <th colspan="6" style="text-align: right">Closing Balance</th>
+          <th class="num" style="font-size: 15px">{{ balance|floatformat:2 }}</th>
+        </tr>
+      </tfoot>
+      {% endif %}
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+  }
+
+  .summary .k {
+    display: block;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #8595a8;
+    margin-bottom: 4px;
+  }
+
+  .summary .v {
+    font-size: 14px;
+  }
+
+  .summary .total {
+    font-size: 22px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .summary .owing {
+    color: #a71d2a;
+  }
+</style>
+{% endblock %}
