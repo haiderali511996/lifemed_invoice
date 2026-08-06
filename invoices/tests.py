@@ -1008,3 +1008,166 @@ class WeeklyPlanTests(TestCase):
         ):
             with self.subTest(url=url):
                 self.assertEqual(self.client.get(url).status_code, 200)
+
+
+class OverlongInputTests(TestCase):
+    """MySQL runs STRICT_TRANS_TABLES: oversized values error instead of truncating.
+
+    SQLite truncates silently, so these assert the clamping explicitly rather
+    than relying on the database to be forgiving.
+    """
+
+    def setUp(self):
+        User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+    def post(self, **overrides):
+        payload = {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "1234567-8", "sales_tax": "ST-9", "license_no": "LIC-1",
+            "item_name[]": ["Panadol"], "qty[]": ["10"], "price[]": ["100.00"],
+            "discount[]": ["10"], "batch[]": ["B1"], "expiry[]": ["12/26"],
+        }
+        payload.update(overrides)
+
+        return self.client.post(reverse("generate"), payload)
+
+    def test_overlong_registration_fields_are_clipped(self):
+        response = self.post(
+            ntn="N" * 200, sales_tax="S" * 200, license_no="L" * 400
+        )
+
+        self.assertEqual(response.status_code, 200)
+        customer = Customer.objects.get()
+        self.assertEqual(len(customer.ntn), 50)
+        self.assertEqual(len(customer.sales_tax), 50)
+        self.assertEqual(len(customer.license_no), 100)
+
+    def test_overlong_item_fields_are_clipped(self):
+        response = self.post(**{
+            "item_name[]": ["X" * 500], "batch[]": ["B" * 300],
+            "expiry[]": ["12/2026 or thereabouts"],
+        })
+
+        self.assertEqual(response.status_code, 200)
+        item = Item.objects.get()
+        self.assertEqual(len(item.name), 255)
+        self.assertEqual(len(item.batch), 100)
+        self.assertEqual(len(item.expiry), 20)
+
+    def test_overlong_customer_name_is_clipped(self):
+        self.post(customer_name="P" * 500)
+
+        self.assertEqual(len(Customer.objects.get().name), 255)
+
+    def test_blank_customer_name_is_rejected_not_crashed(self):
+        response = self.post(customer_name="   ")
+
+        self.assertRedirects(response, reverse("index"))
+        self.assertEqual(Customer.objects.count(), 0)
+        self.assertEqual(Invoice.objects.count(), 0)
+
+    def test_absurd_price_is_capped_within_the_column(self):
+        response = self.post(**{"price[]": ["9" * 20], "qty[]": ["1"]})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertLessEqual(Item.objects.get().price, Decimal("99999999.99"))
+
+    def test_discount_above_100_percent_is_capped(self):
+        self.post(**{"discount[]": ["999999"]})
+
+        self.assertEqual(Item.objects.get().discount, Decimal("100.00"))
+
+    def test_junk_numbers_do_not_crash(self):
+        response = self.post(**{
+            "qty[]": ["abc"], "price[]": ["not-a-number"], "discount[]": ["--"],
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Item.objects.get().qty, 0)
+
+    def test_invoice_total_is_rounded_to_two_places(self):
+        """A repeating discount produced more decimals than the column holds."""
+        self.post(**{"price[]": ["33.33"], "qty[]": ["3"], "discount[]": ["7"]})
+
+        invoice = Invoice.objects.get()
+        self.assertEqual(invoice.total.as_tuple().exponent, -2)
+        self.assertEqual(invoice.total, InvoiceLog.objects.get().amount)
+
+    def test_negative_quantity_does_not_become_negative_stock(self):
+        self.post(**{"qty[]": ["-5"]})
+
+        self.assertEqual(Item.objects.get().qty, 0)
+
+
+class PdfResponseTests(TestCase):
+    """Passenger (cPanel) streams responses through wsgi.file_wrapper.
+
+    Its wrapper calls fileno() on whatever it is given. FileResponse hands over
+    the raw object, and a BytesIO has no file descriptor, so the download died
+    with "io.UnsupportedOperation: fileno" in production while passing every
+    test here. These assert the response is a plain in-memory body.
+    """
+
+    def setUp(self):
+        User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+    def generate(self):
+        return self.client.post(reverse("generate"), {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "1", "sales_tax": "2", "license_no": "LIC-1",
+            "item_name[]": ["Panadol"], "qty[]": ["10"], "price[]": ["100.00"],
+            "discount[]": ["10"], "batch[]": ["B1"], "expiry[]": ["12/26"],
+        })
+
+    def test_response_is_not_streaming(self):
+        response = self.generate()
+
+        self.assertFalse(response.streaming)
+        self.assertTrue(hasattr(response, "content"))
+
+    def test_response_carries_no_file_object(self):
+        """file_to_stream is what makes a server reach for file_wrapper."""
+        response = self.generate()
+
+        self.assertIsNone(getattr(response, "file_to_stream", None))
+
+    def test_body_survives_a_file_wrapper_that_demands_fileno(self):
+        """Reproduces Passenger: wrap the body the way its server would."""
+        response = self.generate()
+
+        class PassengerFileWrapper:
+            def __init__(self, filelike, blksize=8192):
+                # Passenger asks for the descriptor before streaming.
+                filelike.fileno()
+
+        body = response.content
+
+        # A streaming response would hand file_to_stream to this and blow up.
+        streamed = getattr(response, "file_to_stream", None)
+
+        if streamed is not None:
+            with self.assertRaises(Exception):
+                PassengerFileWrapper(streamed)
+
+        self.assertTrue(body.startswith(b"%PDF"))
+
+    def test_download_is_named_after_the_invoice(self):
+        response = self.generate()
+        invoice = Invoice.objects.get()
+
+        self.assertEqual(
+            response["Content-Disposition"],
+            f'attachment; filename="{invoice.invoice_no}.pdf"',
+        )
+
+    def test_pdf_contains_the_invoice_details(self):
+        response = self.generate()
+
+        import pymupdf
+        text = pymupdf.open(stream=response.content, filetype="pdf")[0].get_text()
+
+        self.assertIn("Shifa Pharmacy", text)
+        self.assertIn("Panadol", text)
+        self.assertIn("900.00", text)

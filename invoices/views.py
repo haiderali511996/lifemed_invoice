@@ -1,5 +1,5 @@
 from django.shortcuts import render, redirect, get_object_or_404
-from django.http import FileResponse, JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.urls import reverse
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth import authenticate, login, logout
@@ -47,23 +47,53 @@ except ImportError:
 
 import os
 import io
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+
+# Column limits, so posted values are clamped rather than rejected by MySQL.
+MAX_PRICE = "99999999.99"
+MAX_DISCOUNT = "100.00"
+MAX_TOTAL = "9999999999.99"
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PDF_PATH = os.path.join(BASE_DIR, "template.pdf")
 
 
-def safe_decimal(value, default="0.00"):
-    try:
-        value = str(value).strip()
+def safe_decimal(value, default="0.00", max_value=None):
+    """Parse a posted number, never raising.
 
-        if value == "":
+    MySQL runs in STRICT_TRANS_TABLES, so a value wider than its column is a
+    hard error rather than a silent truncation. Everything written to the
+    database is clamped here instead of failing the whole invoice.
+    """
+    try:
+        text = str(value).strip()
+
+        result = Decimal(default) if text == "" else Decimal(text)
+
+        if not result.is_finite():
             return Decimal(default)
 
-        return Decimal(value)
-
-    except Exception:
+    except (InvalidOperation, ValueError, TypeError):
         return Decimal(default)
+
+    if max_value is not None and result > Decimal(max_value):
+        result = Decimal(max_value)
+
+    return result.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def clip(value, length):
+    """Trim a posted string to what its column can hold."""
+    return str(value or "")[:length]
+
+
+def safe_int(value, default=0, max_value=1_000_000):
+    try:
+        result = int(float(str(value).strip() or default))
+    except (ValueError, TypeError, OverflowError):
+        return default
+
+    return max(0, min(result, max_value))
 
 
 def post_column(request, field, length):
@@ -266,17 +296,24 @@ def generate_invoice(request):
 
     if request.method == "POST":
 
-        license_no = request.POST.get("license_no", "")
+        license_no = clip(request.POST.get("license_no", ""), 100)
+
+        customer_name = clip(request.POST.get("customer_name", ""), 255).strip()
+
+        if not customer_name:
+            messages.error(request, "Customer name is required.")
+
+            return redirect("index")
 
         customer_fields = {
             "address": request.POST.get("address", ""),
-            "ntn": request.POST.get("ntn", ""),
-            "sales_tax": request.POST.get("sales_tax", ""),
+            "ntn": clip(request.POST.get("ntn", ""), 50),
+            "sales_tax": clip(request.POST.get("sales_tax", ""), 50),
             "license_no": license_no,
         }
 
         customer, created = Customer.objects.get_or_create(
-            name=request.POST.get("customer_name"),
+            name=customer_name,
             defaults=customer_fields
         )
 
@@ -310,9 +347,9 @@ def generate_invoice(request):
             if not names[i]:
                 continue
 
-            qty = safe_decimal(qtys[i])
-            price = safe_decimal(prices[i])
-            disc = safe_decimal(discounts[i])
+            qty = safe_decimal(qtys[i], max_value=MAX_PRICE)
+            price = safe_decimal(prices[i], max_value=MAX_PRICE)
+            disc = safe_decimal(discounts[i], max_value=MAX_DISCOUNT)
 
             gross = Decimal(price) * Decimal(qty)
 
@@ -340,24 +377,24 @@ def generate_invoice(request):
 
             Item.objects.create(
                 invoice=invoice,
-                name=names[i],
-                qty=int(float(qty)),
-                batch=batches[i],
-                expiry=expiries[i],
+                name=clip(names[i], 255),
+                qty=safe_int(qty),
+                batch=clip(batches[i], 100),
+                expiry=clip(expiries[i], 20),
                 price=price,
                 discount=disc
             )
 
         # Store the net payable so ledgers never recompute it from line items
-        invoice.total = total_net
+        invoice.total = safe_decimal(total_net, max_value=MAX_TOTAL)
         invoice.save(update_fields=["total"])
 
         # LOG ENTRY
         InvoiceLog.objects.create(
             invoice=invoice,
             user=request.user,
-            customer_name=customer.name,
-            amount=total_net,
+            customer_name=clip(customer.name, 255),
+            amount=invoice.total,
             action="Invoice Created"
         )
 
@@ -475,14 +512,20 @@ def generate_invoice(request):
         doc.save(pdf_bytes)
         doc.close()
 
-        pdf_bytes.seek(0)
-
-        return FileResponse(
-            pdf_bytes,
-            as_attachment=True,
-            filename=f"{invoice.invoice_no}.pdf",
-            content_type="application/pdf"
+        # Deliberately not FileResponse: it hands the object to the server's
+        # wsgi.file_wrapper, and Passenger's implementation calls fileno() on
+        # it. BytesIO has no file descriptor, so that raises
+        # "io.UnsupportedOperation: fileno" and the download 500s under cPanel.
+        response = HttpResponse(
+            pdf_bytes.getvalue(),
+            content_type="application/pdf",
         )
+
+        response["Content-Disposition"] = (
+            f'attachment; filename="{invoice.invoice_no}.pdf"'
+        )
+
+        return response
 
     return redirect("index")
 
