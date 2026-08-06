@@ -154,6 +154,52 @@ Passenger caches the loaded code, so **every code or `.env` change needs a
 restart**. From the shell, `touch tmp/restart.txt` in the app root does the same
 thing.
 
+## 7b. Schedule database backups
+
+Everything lives in one MySQL database. Set this up before the ledgers hold
+real money.
+
+cPanel → **Cron Jobs** → add a job. Common Settings: **Once Per Day**
+(or twice daily), and this command — one line, with your own paths:
+
+```
+/home/<cpuser>/virtualenv/lifemed_invoice/3.13/bin/python /home/<cpuser>/lifemed_invoice/manage.py backup_db --quiet
+```
+
+Use the same interpreter path cPanel gave you in step 3, with `/python`
+appended in place of `/activate`.
+
+Dumps land in `~/lifemed_invoice/backups/` as gzipped SQL, named
+`backup-YYYYMMDD-HHMMSS.sql.gz`, owned 0600 in a 0700 directory. Anything
+older than 14 days is pruned automatically.
+
+Tune it in `.env`:
+
+```ini
+BACKUP_DIR=/home/<cpuser>/backups
+BACKUP_KEEP_DAYS=30
+```
+
+Test it once by hand before trusting the schedule:
+
+```bash
+python manage.py backup_db
+```
+
+`--quiet` in the cron command suppresses success output so cPanel does not
+email you daily; failures still report, which is what you want to hear about.
+
+**Restoring:**
+
+```bash
+gunzip -c backups/backup-20260806-020000.sql.gz | mysql -u cpuser_dbuser -p cpuser_dbname
+```
+
+⚠️ A backup you have never restored is not a backup. Try one restore into a
+scratch database now, while nothing depends on it. Backups sitting on the same
+server as the database also die with the server — download a copy periodically,
+or point `BACKUP_DIR` somewhere that is included in your host's off-site backup.
+
 ## 8. Enable SSL (recommended)
 
 cPanel → **SSL/TLS Status** → select the subdomain → **Run AutoSSL**.

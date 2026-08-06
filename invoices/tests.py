@@ -1,12 +1,20 @@
+import gzip
 import json
+import os
+import shutil
+import sqlite3
+import stat
+import subprocess
 import tempfile
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -1348,3 +1356,134 @@ class PreviousBalanceOnInvoiceTests(TestCase):
 
         self.assertIn("payments on account", text)
         self.assertIn("130.00", text)        # 180 - 50 actually owed
+
+
+class BackupCommandTests(TestCase):
+    """Backups hold every customer record and password hash, so this checks
+    both that a dump is usable and that it is not left world-readable."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.out = Path(self.tmp) / "backups"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_backup(self, **kwargs):
+        call_command("backup_db", output_dir=str(self.out), quiet=True, **kwargs)
+
+        return sorted(self.out.glob("backup-*"))
+
+    def test_creates_a_compressed_dump(self):
+        files = self.run_backup()
+
+        self.assertEqual(len(files), 1)
+        self.assertGreater(files[0].stat().st_size, 0)
+
+    def test_dump_is_a_readable_database(self):
+        Customer.objects.create(name="Shifa Pharmacy", address="Lahore")
+
+        dump = self.run_backup()[0]
+
+        with gzip.open(dump, "rt", encoding="utf-8") as src:
+            script = src.read()
+
+        restored = sqlite3.connect(":memory:")
+        restored.executescript(script)
+        names = [
+            row[0] for row in restored.execute("SELECT name FROM invoices_customer")
+        ]
+        restored.close()
+
+        self.assertIn("Shifa Pharmacy", names)
+
+    def test_dump_is_not_readable_by_others(self):
+        dump = self.run_backup()[0]
+
+        self.assertEqual(stat.S_IMODE(dump.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.out.stat().st_mode), 0o700)
+
+    def test_old_dumps_are_pruned(self):
+        self.run_backup()
+
+        stale = self.out / "backup-20200101-000000.sql.gz"
+        stale.write_bytes(b"old")
+        old = (datetime.now() - timedelta(days=90)).timestamp()
+        os.utime(stale, (old, old))
+
+        self.run_backup(keep_days=14)
+
+        self.assertFalse(stale.exists())
+
+    def test_recent_dumps_are_kept(self):
+        self.run_backup()
+        self.run_backup()
+
+        self.assertEqual(len(sorted(self.out.glob("backup-*"))), 2)
+
+    def test_keep_days_zero_disables_pruning(self):
+        stale = self.out
+        stale.mkdir(parents=True, exist_ok=True)
+        keeper = stale / "backup-20200101-000000.sql.gz"
+        keeper.write_bytes(b"old")
+        old = (datetime.now() - timedelta(days=900)).timestamp()
+        os.utime(keeper, (old, old))
+
+        self.run_backup(keep_days=0)
+
+        self.assertTrue(keeper.exists())
+
+    def test_mysql_without_mysqldump_fails_loudly(self):
+        """A silent failure here means discovering there are no backups too late."""
+        mysql = {
+            "ENGINE": "django.db.backends.mysql", "NAME": "db",
+            "USER": "u", "PASSWORD": "p", "HOST": "localhost", "PORT": "3306",
+        }
+
+        with mock.patch.dict(settings.DATABASES, {"default": mysql}):
+            with mock.patch("shutil.which", return_value=None):
+                with self.assertRaises(CommandError) as caught:
+                    self.run_backup()
+
+        self.assertIn("mysqldump", str(caught.exception))
+
+    def test_mysql_password_is_not_passed_on_the_command_line(self):
+        """`ps` is readable by other accounts on shared hosting."""
+        mysql = {
+            "ENGINE": "django.db.backends.mysql", "NAME": "db",
+            "USER": "u", "PASSWORD": "s3cret", "HOST": "localhost", "PORT": "",
+        }
+        seen = {}
+
+        def fake_run(command, **kwargs):
+            seen["command"] = command
+            defaults = [a for a in command if a.startswith("--defaults-extra-file=")]
+            seen["cnf"] = Path(defaults[0].split("=", 1)[1]).read_text()
+            kwargs["stdout"].write(b"-- dump")
+
+            return subprocess.CompletedProcess(command, 0, stderr=b"")
+
+        with mock.patch.dict(settings.DATABASES, {"default": mysql}):
+            with mock.patch("shutil.which", return_value="/usr/bin/mysqldump"):
+                with mock.patch("subprocess.run", side_effect=fake_run):
+                    self.run_backup()
+
+        self.assertNotIn("s3cret", " ".join(seen["command"]))
+        self.assertIn("password=s3cret", seen["cnf"])
+
+    def test_failed_mysqldump_does_not_leave_a_broken_file(self):
+        mysql = {
+            "ENGINE": "django.db.backends.mysql", "NAME": "db",
+            "USER": "u", "PASSWORD": "p", "HOST": "localhost", "PORT": "",
+        }
+
+        def failing_run(command, **kwargs):
+            return subprocess.CompletedProcess(command, 2, stderr=b"access denied")
+
+        with mock.patch.dict(settings.DATABASES, {"default": mysql}):
+            with mock.patch("shutil.which", return_value="/usr/bin/mysqldump"):
+                with mock.patch("subprocess.run", side_effect=failing_run):
+                    with self.assertRaises(CommandError):
+                        self.run_backup()
+
+        self.assertEqual(sorted(self.out.glob("backup-*")), [])
