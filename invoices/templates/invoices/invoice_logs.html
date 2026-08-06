@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Invoice Logs Report</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <style>
+      body {
+        font-family: "Segoe UI", sans-serif;
+        background: #f8f9fa;
+        padding: 20px;
+      }
+      .container {
+        background: white;
+        padding: 25px;
+        border-radius: 12px;
+        max-width: 1200px;
+        margin: auto;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+      }
+      .top-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 15px;
+      }
+      th {
+        background: #212529;
+        color: white;
+        padding: 12px;
+        text-align: left;
+        font-size: 13px;
+      }
+      td {
+        padding: 10px;
+        border-bottom: 1px solid #dee2e6;
+        font-size: 14px;
+        color: #333;
+      }
+
+      .badge-id {
+        background: #f1f1f1;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-weight: bold;
+      }
+      .amount-text {
+        font-weight: bold;
+        color: #28a745;
+      }
+      .btn-print {
+        background: #007bff;
+        color: white;
+        padding: 8px 15px;
+        border-radius: 5px;
+        border: none;
+        cursor: pointer;
+      }
+
+      @media print {
+        .no-print {
+          display: none;
+        }
+        .container {
+          box-shadow: none;
+          width: 100%;
+          max-width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="top-bar">
+        <h2>📋 Invoice History </h2>
+        <div class="no-print">
+          <a href="{% url 'index' %}" style="margin-right: 15px; color: #666"
+            >Back to Form</a
+          >
+          <button onclick="downloadPDF()" class="btn-print">
+            Download Report (PDF)
+          </button>
+        </div>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>User Name</th>
+            <th>Invoice #</th>
+            <th>Customer Name</th>
+            <th>Amount (Net)</th>
+            <th>Date</th>
+            <th>Time</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for log in logs %}
+          <tr>
+            <td><span class="badge-id">#{{ log.id }}</span></td>
+            <td><strong>{{ log.user.username }}</strong></td>
+            <td>{{ log.invoice.invoice_no }}</td>
+            <td>{{ log.customer_name }}</td>
+            <td class="amount-text">{{ log.amount }}</td>
+            <td>{{ log.timestamp|date:"d-m-Y" }}</td>
+            <td>{{ log.timestamp|date:"H:i:s" }}</td>
+          </tr>
+          {% empty %}
+          <tr>
+            <td colspan="7" style="text-align: center">No records found.</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <script>
+      function downloadPDF() {
+        const element = document.querySelector(".container");
+
+        const options = {
+          margin: 0.3,
+          filename: "invoice_logs_report.pdf",
+          image: { type: "jpeg", quality: 1 },
+          html2canvas: { scale: 2 },
+          jsPDF: {
+            unit: "in",
+            format: "a4",
+            orientation: "portrait",
+          },
+        };
+
+        html2pdf().set(options).from(element).save();
+      }
+    </script>
+  </body>
+</html>
