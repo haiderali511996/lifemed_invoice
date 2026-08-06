@@ -1,7 +1,11 @@
-from django.db import models
+from django.db import models, transaction, IntegrityError
 from django.contrib.auth.models import User
 from django.db.models.signals import post_save
-from django.dispatch import receiver 
+from django.dispatch import receiver
+
+INVOICE_PREFIX = "HHC"
+INVOICE_START_NUMBER = 9965
+INVOICE_NUMBER_ATTEMPTS = 5
 
 class Customer(models.Model):
     name = models.CharField(max_length=255)
@@ -23,19 +27,45 @@ class Invoice(models.Model):
     date = models.DateField(auto_now_add=True)
     license_no = models.CharField(max_length=100)
 
+    @classmethod
+    def next_invoice_no(cls):
+        """Highest existing number + 1, compared numerically rather than as text."""
+        numbers = []
+
+        for value in cls.objects.filter(
+            invoice_no__startswith=f"{INVOICE_PREFIX}-"
+        ).values_list("invoice_no", flat=True):
+
+            suffix = value.rsplit("-", 1)[-1]
+
+            if suffix.isdigit():
+                numbers.append(int(suffix))
+
+        new_num = max(numbers) + 1 if numbers else INVOICE_START_NUMBER
+
+        return f"{INVOICE_PREFIX}-{new_num:04d}"
+
     def save(self, *args, **kwargs):
-        if not self.invoice_no:
-            last = Invoice.objects.order_by('-id').first()
+        if self.invoice_no:
+            return super().save(*args, **kwargs)
 
-            if last and last.invoice_no:
-                last_num = int(last.invoice_no.split("-")[-1])
-                new_num = last_num + 1
-            else:
-                new_num = 9965   # ✅ START
+        # Two people submitting at the same time can pick the same number, so
+        # retry against the unique constraint instead of failing the request.
+        original_pk = self.pk
 
-            self.invoice_no = f"HHC-{str(new_num).zfill(4)}"
+        for attempt in range(INVOICE_NUMBER_ATTEMPTS):
 
-        super().save(*args, **kwargs)
+            self.invoice_no = self.next_invoice_no()
+
+            try:
+                with transaction.atomic():
+                    return super().save(*args, **kwargs)
+
+            except IntegrityError:
+                if attempt == INVOICE_NUMBER_ATTEMPTS - 1:
+                    raise
+
+                self.pk = original_pk
 
 
 class Item(models.Model):
@@ -50,21 +80,40 @@ class Item(models.Model):
 
 # 1. User Role Model
 class UserRolls(models.Model):
+    ROLE_SUPER_ADMIN = 'super_admin'
+    ROLE_MANAGER = 'manager'
+
     ROLE_CHOICES = (
-        ('super_admin', 'Super Admin'),
-        ('manager', 'Manager'),
+        (ROLE_SUPER_ADMIN, 'Super Admin'),
+        (ROLE_MANAGER, 'Manager'),
     )
     user = models.OneToOneField(User, on_delete=models.CASCADE)
-    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='manager')
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=ROLE_MANAGER)
 
     def __str__(self):
         return f"{self.user.username} - {self.role}"
 
+
+def is_super_admin(user):
+    """Role lives in UserRolls; Django superusers always qualify."""
+    if not user.is_authenticated:
+        return False
+
+    if user.is_superuser:
+        return True
+
+    role = getattr(user, 'userrolls', None)
+
+    return role is not None and role.role == UserRolls.ROLE_SUPER_ADMIN
+
+
 # Signal: Jab bhi naya user banay, uska profile khud ban jaye
 @receiver(post_save, sender=User)
-def create_user_profile(sender, instance, created, **kwargs):
-    if created:
-        UserRolls.objects.create(user=instance)
+def create_user_profile(sender, instance, created, raw=False, **kwargs):
+    # `raw` means loaddata is restoring a fixture, which carries its own
+    # UserRolls rows. Creating one here would collide with them.
+    if created and not raw:
+        UserRolls.objects.get_or_create(user=instance)
 
 # 2. Invoice Log Model
 class InvoiceLog(models.Model):

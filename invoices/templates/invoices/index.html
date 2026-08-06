@@ -59,6 +59,13 @@
         border-radius: 6px;
       }
 
+      .prefill-note {
+        min-height: 18px;
+        margin: -8px 0 12px;
+        font-size: 13px;
+        color: #0056b3;
+      }
+
       .header-grid {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -215,6 +222,8 @@
           {% endfor %}
         </select>
 
+        <div id="prefill-note" class="prefill-note"></div>
+
         <div class="header-grid">
           <div>
             <label>Customer Name</label>
@@ -269,9 +278,14 @@
 
     <script>
       /* ---------------- CUSTOMER AUTO FILL ---------------- */
+      const LAST_INVOICE_URL = "{% url 'customer_last_invoice' 0 %}";
+
       function fillCustomer() {
         let sel = document.getElementById("customerDropdown");
         let opt = sel.options[sel.selectedIndex];
+
+        let note = document.getElementById("prefill-note");
+        note.textContent = "";
 
         if (!opt.value) return;
 
@@ -280,10 +294,53 @@
         document.getElementById("sales_tax").value = opt.dataset.sale || "";
         document.getElementById("address").value = opt.dataset.address || "";
         document.getElementById("license_no").value = opt.dataset.license || "";
+
+        loadLastInvoice(opt.value, note);
+      }
+
+      /* Pull the customer's previous order so a repeat invoice needs no retyping */
+      function loadLastInvoice(customerId, note) {
+        note.textContent = "Loading previous invoice...";
+
+        fetch(LAST_INVOICE_URL.replace("/0/", "/" + customerId + "/"), {
+          headers: { "X-Requested-With": "XMLHttpRequest" },
+        })
+          .then(function (response) {
+            if (!response.ok) throw new Error(response.status);
+            return response.json();
+          })
+          .then(function (data) {
+            /* The saved customer record is newer than the dropdown's snapshot */
+            document.getElementById("ntn").value = data.ntn;
+            document.getElementById("sales_tax").value = data.sales_tax;
+            document.getElementById("address").value = data.address;
+            document.getElementById("license_no").value = data.license_no;
+
+            let tbody = document.getElementById("items");
+            tbody.innerHTML = "";
+
+            if (!data.items.length) {
+              addRow();
+              note.textContent = "No previous invoice for this customer.";
+              return;
+            }
+
+            data.items.forEach(function (item) {
+              addRow(item);
+            });
+
+            note.textContent =
+              "Items prefilled from invoice " +
+              data.last_invoice_no +
+              " - edit or remove any row.";
+          })
+          .catch(function () {
+            note.textContent = "Could not load the previous invoice.";
+          });
       }
 
       /* ---------------- ITEMS ---------------- */
-      function addRow() {
+      function addRow(item) {
         let tr = document.createElement("tr");
 
         tr.innerHTML = `
@@ -298,6 +355,18 @@
     `;
 
         document.getElementById("items").appendChild(tr);
+
+        if (!item) return;
+
+        /* Assigned as values, never as markup, so item names can't inject HTML */
+        tr.querySelector('[name="item_name[]"]').value = item.name;
+        tr.querySelector('[name="qty[]"]').value = item.qty;
+        tr.querySelector('[name="price[]"]').value = item.price;
+        tr.querySelector('[name="discount[]"]').value = item.discount;
+        tr.querySelector('[name="batch[]"]').value = item.batch;
+        tr.querySelector('[name="expiry[]"]').value = item.expiry;
+
+        calculate(tr.querySelector('[name="qty[]"]'));
       }
 
       function calculate(el) {

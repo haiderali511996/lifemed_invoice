@@ -1,11 +1,9 @@
 asgiref==3.11.1
 dj-database-url==3.0.1
 Django==4.2.30
-gunicorn==23.0.0
 packaging==26.1
-psycopg2-binary==2.9.12
-PyMuPDF==1.24.1
-PyMuPDFb==1.24.1
+PyMuPDF==1.26.7
+PyMySQL==1.1.1
 python-dotenv==1.2.1
 sqlparse==0.5.5
 typing_extensions==4.15.0
