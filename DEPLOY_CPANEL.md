@@ -42,21 +42,31 @@ command at the top of the page — copy it, you need it in step 5.
 
 ## 4. Upload the code
 
-Either clone it (cPanel → Terminal, if enabled):
+Creating the app already put a stub `passenger_wsgi.py` and a `tmp/` folder in
+`~/lifemed_invoice`, so `git clone <url> .` fails there with *"destination path
+already exists and is not an empty directory"*. Clone next to it and move the
+files in, overwriting the stub:
 
 ```bash
-cd ~/lifemed_invoice
-git clone https://github.com/haiderali511996/lifemed_invoice.git .
+cd ~
+git clone https://github.com/haiderali511996/lifemed_invoice.git invoice_src
+cp -rf invoice_src/. lifemed_invoice/
+rm -rf invoice_src
 ```
 
-or upload a zip through **File Manager** and extract into `~/lifemed_invoice`.
+No Terminal on your plan? Download the repo zip from GitHub, upload it through
+**File Manager**, extract it, and move the contents into `~/lifemed_invoice`,
+replacing `passenger_wsgi.py` when asked.
 
-`template.pdf` must end up in the project root next to `manage.py` — the PDF
-generator reads it from there, and the app returns a 500 without it.
+Check that `manage.py`, `passenger_wsgi.py` and `template.pdf` all sit directly
+in `~/lifemed_invoice`. The PDF generator reads `template.pdf` from the project
+root and returns a 500 without it.
 
 ## 5. Create the `.env` file
 
-In `~/lifemed_invoice`, copy `.env.example` to `.env` and fill it in:
+In `~/lifemed_invoice`, copy `.env.example` to `.env` and fill it in. In **File
+Manager** you must turn on *Settings → Show Hidden Files (dotfiles)* first,
+otherwise `.env` and `.env.example` are invisible.
 
 ```ini
 SECRET_KEY=<paste a generated key>
@@ -95,6 +105,18 @@ python manage.py createsuperuser
 
 `migrate` also backfills user roles: the previous hardcoded super-admin account
 and any Django superuser are promoted to the `super_admin` role automatically.
+
+**Without Terminal access**, do the same from the *Setup Python App* page:
+put `requirements.txt` in the **Configuration files** field and click *Run Pip
+Install*, then use the **Execute python script** box for `manage.py migrate` and
+`manage.py collectstatic --noinput`. That box cannot answer the interactive
+prompts of `createsuperuser`, so create the first account with:
+
+```
+manage.py shell -c "from django.contrib.auth.models import User; User.objects.create_superuser('admin', 'you@example.com', 'a-strong-password')"
+```
+
+Then sign in at `/admin/` and change that password immediately.
 
 ## 7. Restart
 
