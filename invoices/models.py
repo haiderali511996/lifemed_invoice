@@ -656,11 +656,66 @@ class Supplier(models.Model):
         return self.name
 
 
+class Manufacturer(models.Model):
+    """Who makes a product. Distinct from Supplier, who sells it to us.
+
+    The same manufacturer is often reached through several suppliers, and
+    recalls and quality queries go to the manufacturer, so they are tracked
+    separately.
+    """
+
+    name = models.CharField(max_length=200, unique=True)
+    code = models.CharField(max_length=20, blank=True)
+
+    contact_person = models.CharField(max_length=150, blank=True)
+    phone = models.CharField(max_length=50, blank=True)
+    email = models.EmailField(blank=True)
+    website = models.URLField(blank=True)
+
+    address = models.TextField(blank=True)
+    country = models.CharField(max_length=80, blank=True, default="Pakistan")
+
+    drug_licence = models.CharField(
+        "Drug manufacturing licence", max_length=100, blank=True
+    )
+    ntn = models.CharField(max_length=50, blank=True)
+
+    is_active = models.BooleanField(default=True)
+    note = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+    @property
+    def product_count(self):
+        return self.products.count()
+
+    @property
+    def stock_on_hand(self):
+        return sum(product.stock_on_hand for product in self.products.all())
+
+
 class Product(models.Model):
     """A sellable item. Stock is tracked per batch, not on the product."""
 
     code = models.CharField(max_length=50, unique=True)
     name = models.CharField(max_length=255)
+
+    manufacturer = models.ForeignKey(
+        Manufacturer, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="products",
+    )
+    generic_name = models.CharField(
+        max_length=255, blank=True,
+        help_text="Active ingredient, e.g. Paracetamol 500mg.",
+    )
+    registration_no = models.CharField(
+        "DRAP registration", max_length=100, blank=True
+    )
+
     pack_size = models.CharField(max_length=50, blank=True)
     trade_price = models.DecimalField(max_digits=10, decimal_places=2, default=ZERO)
     is_active = models.BooleanField(default=True)

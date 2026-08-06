@@ -16,12 +16,13 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db.models import ProtectedError
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
 from . import models
-from .forms import DistributorForm, EmployeeForm
+from .forms import DistributorForm, EmployeeForm, ManufacturerForm
 from .layout import LayoutError, detect_layout
 from .models import (
     Batch,
@@ -32,6 +33,7 @@ from .models import (
     Invoice,
     InvoiceLog,
     Item,
+    Manufacturer,
     OVERDUE_DAYS,
     Payment,
     PlanVisit,
@@ -2134,3 +2136,134 @@ class TerritoryImportTests(TestCase):
 
         self.assertEqual(created, 3)
         self.assertEqual(plan.visit_count, 3)
+
+
+class ManufacturerTests(TestCase):
+    """Manufacturers are who makes a product, distinct from the supplier who
+    sells it to us - the same maker often arrives via several suppliers."""
+
+    def setUp(self):
+        User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.maker = Manufacturer.objects.create(
+            name="Getz Pharma", code="GETZ", country="Pakistan",
+            drug_licence="DML-0099", contact_person="Mr Khan",
+            phone="021-1234567",
+        )
+
+    def test_product_records_its_manufacturer(self):
+        product = Product.objects.create(
+            code="PAN500", name="Panadol", manufacturer=self.maker,
+            generic_name="Paracetamol 500mg", registration_no="DRAP-123",
+        )
+
+        self.assertEqual(product.manufacturer, self.maker)
+        self.assertEqual(self.maker.product_count, 1)
+
+    def test_manufacturer_is_optional(self):
+        """Products imported before manufacturers were tracked must still save."""
+        product = Product.objects.create(code="X1", name="Unknown Origin")
+
+        self.assertIsNone(product.manufacturer)
+
+    def test_stock_rolls_up_to_the_manufacturer(self):
+        product = Product.objects.create(
+            code="PAN500", name="Panadol", manufacturer=self.maker
+        )
+        Batch.objects.create(
+            product=product, batch_no="B1", quantity=40,
+            expiry_date=timezone.localdate() + timedelta(days=300),
+        )
+        other = Product.objects.create(
+            code="BRU400", name="Brufen", manufacturer=self.maker
+        )
+        Batch.objects.create(
+            product=other, batch_no="B2", quantity=10,
+            expiry_date=timezone.localdate() + timedelta(days=300),
+        )
+
+        self.assertEqual(self.maker.stock_on_hand, 50)
+
+    def test_a_manufacturer_with_products_cannot_be_deleted(self):
+        """Deleting one would orphan its products' provenance."""
+        Product.objects.create(code="P1", name="P", manufacturer=self.maker)
+
+        with self.assertRaises(ProtectedError):
+            self.maker.delete()
+
+    def test_duplicate_name_is_rejected(self):
+        form = ManufacturerForm(data={
+            "name": "getz pharma", "code": "G2", "contact_person": "",
+            "phone": "", "email": "", "website": "", "address": "",
+            "country": "Pakistan", "drug_licence": "", "ntn": "",
+            "note": "", "is_active": True,
+        })
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("name", form.errors)
+
+    def test_detail_page_lists_the_products(self):
+        Product.objects.create(
+            code="PAN500", name="Panadol", manufacturer=self.maker
+        )
+
+        html = self.client.get(
+            reverse("manufacturer_detail", args=[self.maker.pk])
+        ).content.decode()
+
+        self.assertIn("Panadol", html)
+        self.assertIn("DML-0099", html)
+
+    def test_product_list_can_filter_by_manufacturer(self):
+        other = Manufacturer.objects.create(name="Abbott")
+        Product.objects.create(code="A", name="Getz Product", manufacturer=self.maker)
+        Product.objects.create(code="B", name="Abbott Product", manufacturer=other)
+
+        html = self.client.get(
+            reverse("product_list"), {"manufacturer": self.maker.pk}
+        ).content.decode()
+
+        self.assertIn("Getz Product", html)
+        self.assertNotIn("Abbott Product", html)
+
+    def test_products_are_searchable_by_manufacturer_name(self):
+        Product.objects.create(code="A", name="Some Tablet", manufacturer=self.maker)
+
+        html = self.client.get(
+            reverse("product_list"), {"q": "Getz"}
+        ).content.decode()
+
+        self.assertIn("Some Tablet", html)
+
+    def test_global_search_finds_products_by_generic_name(self):
+        Product.objects.create(
+            code="PAN500", name="Panadol", generic_name="Paracetamol 500mg",
+            manufacturer=self.maker,
+        )
+
+        html = self.client.get(
+            reverse("search"), {"q": "Paracetamol"}
+        ).content.decode()
+
+        self.assertIn("Panadol", html)
+
+    def test_creating_one_redirects_to_its_page(self):
+        response = self.client.post(reverse("manufacturer_new"), {
+            "name": "Searle", "code": "SRL", "contact_person": "",
+            "phone": "", "email": "", "website": "", "address": "",
+            "country": "Pakistan", "drug_licence": "", "ntn": "",
+            "note": "", "is_active": True,
+        })
+
+        created = Manufacturer.objects.get(name="Searle")
+        self.assertRedirects(
+            response, reverse("manufacturer_detail", args=[created.pk])
+        )
+
+    def test_manufacturer_pages_render(self):
+        for url in (reverse("manufacturer_list"), reverse("manufacturer_new"),
+                    reverse("manufacturer_detail", args=[self.maker.pk]),
+                    reverse("manufacturer_edit", args=[self.maker.pk])):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, 200)

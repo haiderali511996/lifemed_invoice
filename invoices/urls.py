@@ -112,6 +112,19 @@ urlpatterns = [
         name='product_batches',
     ),
 
+    path('manufacturers/', views.manufacturer_list, name='manufacturer_list'),
+    path('manufacturers/new/', views.manufacturer_edit, name='manufacturer_new'),
+    path(
+        'manufacturers/<int:manufacturer_id>/',
+        views.manufacturer_detail,
+        name='manufacturer_detail',
+    ),
+    path(
+        'manufacturers/<int:manufacturer_id>/edit/',
+        views.manufacturer_edit,
+        name='manufacturer_edit',
+    ),
+
     path('suppliers/', views.supplier_list, name='supplier_list'),
     path('suppliers/new/', views.supplier_edit, name='supplier_new'),
     path(

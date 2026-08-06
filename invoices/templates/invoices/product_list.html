@@ -7,15 +7,27 @@
 </div>
 <div class="card">
   <form method="GET" style="display:flex;gap:10px;margin-bottom:16px">
-    <input type="text" name="q" value="{{ query }}" placeholder="Search name or code..."
+    <input type="text" name="q" value="{{ query }}"
+      placeholder="Search name, code, generic or manufacturer..."
       style="flex:1;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px" />
+    <select name="manufacturer"
+      style="padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
+      <option value="">All manufacturers</option>
+      {% for m in manufacturers %}
+      <option value="{{ m.id }}"
+        {% if selected_manufacturer == m.id|stringformat:"s" %}selected{% endif %}>
+        {{ m.name }}
+      </option>
+      {% endfor %}
+    </select>
     <button type="submit" class="btn">Search</button>
     {% if query %}<a href="{% url 'product_list' %}" class="btn btn-grey">Clear</a>{% endif %}
   </form>
   <div style="overflow-x:auto">
     <table>
       <thead><tr>
-        <th>Code</th><th>Product</th><th>Pack</th><th class="num">Trade Price</th>
+        <th>Code</th><th>Product</th><th>Manufacturer</th><th>Pack</th>
+        <th class="num">Trade Price</th>
         <th class="num">On Hand</th><th class="num">Sellable</th><th></th>
       </tr></thead>
       <tbody>
@@ -26,6 +38,15 @@
             <strong>{{ row.product.name }}</strong>
             {% if row.needs_reorder %}<span class="pill pill-overdue">reorder</span>{% endif %}
             {% if not row.product.is_active %}<span class="pill">inactive</span>{% endif %}
+            {% if row.product.generic_name %}
+            <br /><span style="font-size:12px;color:#8595a8">{{ row.product.generic_name }}</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if row.product.manufacturer %}
+            <a href="{% url 'manufacturer_detail' row.product.manufacturer.id %}">
+              {{ row.product.manufacturer.name }}</a>
+            {% else %}<span class="muted">not set</span>{% endif %}
           </td>
           <td>{{ row.product.pack_size|default:"-" }}</td>
           <td class="num">{{ row.product.trade_price|floatformat:2 }}</td>
@@ -34,7 +55,7 @@
           <td><a href="{% url 'product_edit' row.product.id %}" class="btn btn-sm">Edit</a></td>
         </tr>
         {% empty %}
-        <tr><td colspan="7" style="text-align:center;padding:26px">
+        <tr><td colspan="8" style="text-align:center;padding:26px">
           No products yet. Add products before receiving stock.
         </td></tr>
         {% endfor %}

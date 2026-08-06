@@ -19,6 +19,7 @@ from .forms import (
     CustomerForm,
     DistributorForm,
     EmployeeForm,
+    ManufacturerForm,
     PaymentForm,
     PlanGenerateForm,
     ProductForm,
@@ -41,6 +42,7 @@ from .models import (
     Invoice,
     Item,
     InvoiceLog,
+    Manufacturer,
     Payment,
     PlanVisit,
     Product,
@@ -771,6 +773,7 @@ def global_search(request):
 
     customers = []
     invoices = []
+    products = []
 
     if query:
         customers = list(
@@ -794,6 +797,15 @@ def global_search(request):
             ).select_related("customer")[:25]
         )
 
+        products = list(
+            Product.objects.filter(
+                Q(name__icontains=query)
+                | Q(code__icontains=query)
+                | Q(generic_name__icontains=query)
+                | Q(manufacturer__name__icontains=query)
+            ).select_related("manufacturer")[:25]
+        )
+
     return render(
         request,
         "invoices/search.html",
@@ -801,7 +813,8 @@ def global_search(request):
             "query": query,
             "customers": customers,
             "invoices": invoices,
-            "result_count": len(customers) + len(invoices),
+            "products": products,
+            "result_count": len(customers) + len(invoices) + len(products),
         }
     )
 
@@ -1281,11 +1294,19 @@ def distributor_preview(request, distributor_id):
 def product_list(request):
     query = request.GET.get("q", "").strip()
 
-    products = Product.objects.all()
+    products = Product.objects.select_related("manufacturer")
+
+    maker = request.GET.get("manufacturer", "").strip()
+
+    if maker:
+        products = products.filter(manufacturer_id=maker)
 
     if query:
         products = products.filter(
-            Q(name__icontains=query) | Q(code__icontains=query)
+            Q(name__icontains=query)
+            | Q(code__icontains=query)
+            | Q(generic_name__icontains=query)
+            | Q(manufacturer__name__icontains=query)
         )
 
     rows = [
@@ -1301,7 +1322,12 @@ def product_list(request):
     return render(
         request,
         "invoices/product_list.html",
-        {"rows": rows, "query": query}
+        {
+            "rows": rows,
+            "query": query,
+            "manufacturers": Manufacturer.objects.filter(is_active=True),
+            "selected_manufacturer": maker,
+        }
     )
 
 
@@ -1622,3 +1648,88 @@ def product_batches(request, product_id):
             for batch in batches
         ],
     })
+
+
+# ---------------------------------------------------------------- MANUFACTURERS
+
+@login_required
+def manufacturer_list(request):
+    query = request.GET.get("q", "").strip()
+
+    # Not "products": that name is already taken by the reverse relation.
+    manufacturers = Manufacturer.objects.annotate(
+        product_total=Count("products", distinct=True)
+    )
+
+    if query:
+        manufacturers = manufacturers.filter(
+            Q(name__icontains=query)
+            | Q(code__icontains=query)
+            | Q(contact_person__icontains=query)
+            | Q(country__icontains=query)
+        )
+
+    return render(
+        request,
+        "invoices/manufacturer_list.html",
+        {"manufacturers": manufacturers, "query": query}
+    )
+
+
+@login_required
+def manufacturer_edit(request, manufacturer_id=None):
+    manufacturer = (
+        get_object_or_404(Manufacturer, pk=manufacturer_id)
+        if manufacturer_id else None
+    )
+
+    if request.method == "POST":
+        form = ManufacturerForm(request.POST, instance=manufacturer)
+
+        if form.is_valid():
+            saved = form.save()
+            messages.success(request, f"Saved {saved.name}.")
+
+            return redirect("manufacturer_detail", manufacturer_id=saved.pk)
+
+    else:
+        form = ManufacturerForm(instance=manufacturer)
+
+    return render(
+        request,
+        "invoices/simple_form.html",
+        {
+            "form": form,
+            "heading": (
+                f"Edit {manufacturer.name}" if manufacturer
+                else "New Manufacturer"
+            ),
+            "cancel_url": reverse("manufacturer_list"),
+        }
+    )
+
+
+@login_required
+def manufacturer_detail(request, manufacturer_id):
+    """Everything this manufacturer makes, and what is on hand."""
+    manufacturer = get_object_or_404(Manufacturer, pk=manufacturer_id)
+
+    rows = [
+        {
+            "product": product,
+            "stock": product.stock_on_hand,
+            "sellable": product.sellable_stock,
+            "needs_reorder": product.needs_reorder,
+        }
+        for product in manufacturer.products.all()
+    ]
+
+    return render(
+        request,
+        "invoices/manufacturer_detail.html",
+        {
+            "manufacturer": manufacturer,
+            "rows": rows,
+            "total_stock": sum(row["stock"] for row in rows),
+        }
+    )

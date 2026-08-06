@@ -502,8 +502,11 @@
         <a href="{% url 'product_list' %}" class="{% if active == 'products' %}active{% endif %}">
           💊 <span>Products</span>
         </a>
+        <a href="{% url 'manufacturer_list' %}" class="{% if active == 'manufacturers' %}active{% endif %}">
+          🏭 <span>Manufacturers</span>
+        </a>
         <a href="{% url 'supplier_list' %}" class="{% if active == 'suppliers' %}active{% endif %}">
-          🏭 <span>Suppliers</span>
+          🤝 <span>Suppliers</span>
         </a>
 
         <div class="nav-section">Field Force</div>

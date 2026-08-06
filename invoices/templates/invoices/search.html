@@ -64,6 +64,40 @@
   </div>
 </div>
 
+<div class="card" style="margin-bottom: 18px">
+  <h3 style="margin-top: 0">Products ({{ products|length }})</h3>
+
+  <div style="overflow-x: auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Code</th><th>Product</th><th>Generic</th><th>Manufacturer</th>
+          <th class="num">Sellable</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in products %}
+        <tr>
+          <td>{{ p.code }}</td>
+          <td><strong>{{ p.name }}</strong></td>
+          <td>{{ p.generic_name|default:"—" }}</td>
+          <td>
+            {% if p.manufacturer %}{{ p.manufacturer.name }}
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+          <td class="num">{{ p.sellable_stock }}</td>
+          <td><a href="{% url 'product_edit' p.id %}" class="btn btn-sm">Edit</a></td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6" style="text-align: center; padding: 20px">
+          No matching products.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
 <div class="card">
   <h3 style="margin-top: 0">Invoices ({{ invoices|length }})</h3>
 

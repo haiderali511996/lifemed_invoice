@@ -8,6 +8,7 @@ from .models import (
     Distributor,
     Employee,
     Invoice,
+    Manufacturer,
     Payment,
     Product,
     Purchase,
@@ -294,13 +295,53 @@ class SupplierForm(forms.ModelForm):
         widgets = {"address": forms.Textarea(attrs={"rows": 2})}
 
 
+class ManufacturerForm(forms.ModelForm):
+    class Meta:
+        model = Manufacturer
+        fields = [
+            "name", "code", "contact_person", "phone", "email", "website",
+            "address", "country", "drug_licence", "ntn", "note", "is_active",
+        ]
+        widgets = {
+            "address": forms.Textarea(attrs={"rows": 2}),
+            "note": forms.Textarea(attrs={"rows": 2}),
+        }
+
+    def clean_name(self):
+        name = self.cleaned_data["name"].strip()
+
+        if not name:
+            raise forms.ValidationError("Manufacturer name cannot be blank.")
+
+        clash = Manufacturer.objects.filter(name__iexact=name)
+
+        if self.instance.pk:
+            clash = clash.exclude(pk=self.instance.pk)
+
+        if clash.exists():
+            raise forms.ValidationError(
+                "Another manufacturer already uses this name."
+            )
+
+        return name
+
+
 class ProductForm(forms.ModelForm):
     class Meta:
         model = Product
         fields = [
-            "code", "name", "pack_size", "trade_price", "reorder_level",
-            "is_active",
+            "code", "name", "generic_name", "manufacturer", "registration_no",
+            "pack_size", "trade_price", "reorder_level", "is_active",
         ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.fields["manufacturer"].queryset = Manufacturer.objects.filter(
+            is_active=True
+        )
+        self.fields["manufacturer"].required = False
+        self.fields["manufacturer"].empty_label = "— Not recorded —"
 
 
 class PurchaseForm(forms.ModelForm):
