@@ -1,10 +1,17 @@
+import os
+
 from django.db import models, transaction, IntegrityError
 from django.contrib.auth.models import User
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
 INVOICE_PREFIX = "HHC"
-INVOICE_START_NUMBER = 9965
+
+# Where numbering begins when the Invoice table is empty. Override in .env when
+# starting on a fresh database so new invoices continue past the last number
+# already issued to customers instead of reusing it.
+INVOICE_START_NUMBER = int(os.getenv("INVOICE_START_NUMBER", "9965"))
+
 INVOICE_NUMBER_ATTEMPTS = 5
 
 class Customer(models.Model):

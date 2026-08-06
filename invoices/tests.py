@@ -1,12 +1,14 @@
 import json
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.test import TestCase
 from django.urls import reverse
 
+from . import models
 from .models import Customer, Invoice, InvoiceLog, Item, UserRolls, is_super_admin
 
 
@@ -32,6 +34,17 @@ class InvoiceNumberTests(TestCase):
         )
 
         self.assertEqual(self.create_invoice().invoice_no, "HHC-10000")
+
+    def test_start_number_is_configurable(self):
+        """Lets a fresh database continue past invoices already issued."""
+        with mock.patch.object(models, "INVOICE_START_NUMBER", 9973):
+            self.assertEqual(self.create_invoice().invoice_no, "HHC-9973")
+
+    def test_start_number_ignored_once_invoices_exist(self):
+        self.create_invoice()
+
+        with mock.patch.object(models, "INVOICE_START_NUMBER", 5000):
+            self.assertEqual(self.create_invoice().invoice_no, "HHC-9966")
 
     def test_explicit_invoice_no_is_preserved(self):
         invoice = Invoice.objects.create(
