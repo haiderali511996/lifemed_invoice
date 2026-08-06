@@ -15,11 +15,24 @@ INVOICE_START_NUMBER = int(os.getenv("INVOICE_START_NUMBER", "9965"))
 INVOICE_NUMBER_ATTEMPTS = 5
 
 class Customer(models.Model):
-    name = models.CharField(max_length=255)
-    address = models.TextField()
-    ntn = models.CharField(max_length=50, blank=True, null=True)
-    sales_tax = models.CharField(max_length=50, blank=True, null=True)
-    license_no = models.CharField(max_length=100, blank=True, null=True)
+    # Unique because invoicing looks customers up by name; duplicates would
+    # make get_or_create ambiguous and raise MultipleObjectsReturned.
+    name = models.CharField(max_length=255, unique=True)
+    address = models.TextField(blank=True)
+    ntn = models.CharField("CNIC / NTN", max_length=50, blank=True, null=True)
+    sales_tax = models.CharField(
+        "Sales tax registration", max_length=50, blank=True, null=True
+    )
+    license_no = models.CharField(
+        "Pharmacy licence", max_length=100, blank=True, null=True
+    )
+
+    contact_person = models.CharField(max_length=255, blank=True)
+    contact_number = models.CharField(max_length=50, blank=True)
+    contact_email = models.EmailField(blank=True)
+
+    class Meta:
+        ordering = ["name"]
 
     def __str__(self):
         return self.name

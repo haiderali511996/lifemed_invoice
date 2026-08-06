@@ -1,0 +1,218 @@
+{% load static %}
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>LifeMed Pharma - Customers</title>
+
+    <link rel="icon" href="{% static 'invoices/favicon-32.png' %}" sizes="32x32" />
+    <link rel="icon" href="{% static 'invoices/favicon-64.png' %}" sizes="64x64" />
+    <link rel="apple-touch-icon" href="{% static 'invoices/apple-touch-icon.png' %}" />
+
+    <style>
+      body {
+        font-family: "Segoe UI", sans-serif;
+        background: #f8f9fa;
+        padding: 30px;
+      }
+
+      .container {
+        background: white;
+        padding: 30px;
+        border-radius: 12px;
+        max-width: 1100px;
+        margin: auto;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+      }
+
+      .top-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-bottom: 20px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+
+      .brand h2 {
+        margin: 0;
+        padding-left: 14px;
+        border-left: 3px solid #0065ad;
+        font-size: 20px;
+        color: #14304d;
+      }
+
+      .brand-logo {
+        height: 46px;
+        width: auto;
+      }
+
+      .top-bar-actions {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .btn {
+        text-decoration: none;
+        color: white;
+        background: #0065ad;
+        padding: 8px 15px;
+        border-radius: 6px;
+        font-size: 14px;
+        border: none;
+        cursor: pointer;
+      }
+
+      .logout {
+        text-decoration: none;
+        color: white;
+        background: #dc3545;
+        padding: 8px 15px;
+        border-radius: 6px;
+        font-size: 14px;
+      }
+
+      .search-row {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 18px;
+      }
+
+      .search-row input {
+        flex: 1;
+        padding: 9px 12px;
+        border: 1px solid #ced4da;
+        border-radius: 6px;
+        font-size: 14px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      th {
+        background: #212529;
+        color: white;
+        padding: 11px;
+        text-align: left;
+        font-size: 13px;
+      }
+
+      td {
+        padding: 10px 11px;
+        border-bottom: 1px solid #dee2e6;
+        font-size: 14px;
+        color: #333;
+      }
+
+      .muted {
+        color: #999;
+        font-style: italic;
+      }
+
+      .count-badge {
+        background: #e7f1f8;
+        color: #0065ad;
+        padding: 3px 9px;
+        border-radius: 10px;
+        font-weight: bold;
+        font-size: 13px;
+      }
+
+      .msg {
+        background: #d4edda;
+        color: #155724;
+        padding: 10px 14px;
+        border-radius: 6px;
+        margin-bottom: 16px;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="container">
+      <div class="top-bar">
+        <div class="brand">
+          <img
+            src="{% static 'invoices/lifemed-logo.png' %}"
+            alt="LifeMed Pharma"
+            class="brand-logo"
+          />
+          <h2>Customers</h2>
+        </div>
+
+        <div class="top-bar-actions">
+          <a href="{% url 'index' %}" class="btn">← Invoice Form</a>
+          <a href="{% url 'logout' %}" class="logout">Logout</a>
+        </div>
+      </div>
+
+      {% for message in messages %}
+      <div class="msg">{{ message }}</div>
+      {% endfor %}
+
+      <form method="GET" class="search-row">
+        <input
+          type="text"
+          name="q"
+          value="{{ query }}"
+          placeholder="Search by name, contact person or number..."
+        />
+        <button type="submit" class="btn">Search</button>
+        {% if query %}
+        <a href="{% url 'customer_list' %}" class="btn" style="background: #6c757d"
+          >Clear</a
+        >
+        {% endif %}
+      </form>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Customer</th>
+            <th>Contact Person</th>
+            <th>Contact Number</th>
+            <th>Licence #</th>
+            <th>Invoices</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for customer in customers %}
+          <tr>
+            <td><strong>{{ customer.name }}</strong></td>
+            <td>
+              {% if customer.contact_person %} {{ customer.contact_person }}
+              {% else %}<span class="muted">not set</span>{% endif %}
+            </td>
+            <td>
+              {% if customer.contact_number %} {{ customer.contact_number }}
+              {% else %}<span class="muted">not set</span>{% endif %}
+            </td>
+            <td>{{ customer.license_no|default:"-" }}</td>
+            <td><span class="count-badge">{{ customer.invoice_count }}</span></td>
+            <td>
+              <a href="{% url 'customer_edit' customer.id %}" class="btn">Edit</a>
+            </td>
+          </tr>
+          {% empty %}
+          <tr>
+            <td colspan="6" style="text-align: center; padding: 25px">
+              {% if query %} No customers match "{{ query }}". {% else %} No
+              customers yet - they are created automatically when you generate an
+              invoice. {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </body>
+</html>

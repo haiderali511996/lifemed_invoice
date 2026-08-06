@@ -287,6 +287,115 @@ class GenerateInvoiceTests(TestCase):
         self.assertIn("/login/", response["Location"])
 
 
+class CustomerEditTests(TestCase):
+
+    def setUp(self):
+        User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.customer = Customer.objects.create(name="Shifa Pharmacy", address="Lahore")
+
+    def payload(self, **overrides):
+        data = {
+            "name": "Shifa Pharmacy",
+            "address": "Lahore",
+            "contact_person": "Dr. Ahmed Khan",
+            "contact_number": "0300-1234567",
+            "contact_email": "ahmed@example.com",
+            "license_no": "LIC-1",
+            "ntn": "1234567-8",
+            "sales_tax": "ST-9",
+        }
+        data.update(overrides)
+
+        return data
+
+    def url(self):
+        return reverse("customer_edit", args=[self.customer.pk])
+
+    def test_contact_details_are_saved(self):
+        response = self.client.post(self.url(), self.payload())
+
+        self.assertRedirects(response, reverse("customer_list"))
+
+        self.customer.refresh_from_db()
+        self.assertEqual(self.customer.contact_person, "Dr. Ahmed Khan")
+        self.assertEqual(self.customer.contact_number, "0300-1234567")
+        self.assertEqual(self.customer.contact_email, "ahmed@example.com")
+
+    def test_customer_can_be_renamed(self):
+        self.client.post(self.url(), self.payload(name="Shifa Medical Store"))
+
+        self.customer.refresh_from_db()
+        self.assertEqual(self.customer.name, "Shifa Medical Store")
+
+    def test_rename_onto_an_existing_name_is_rejected(self):
+        Customer.objects.create(name="Al-Noor Pharmacy", address="Karachi")
+
+        response = self.client.post(self.url(), self.payload(name="Al-Noor Pharmacy"))
+
+        self.assertEqual(response.status_code, 200)
+        self.customer.refresh_from_db()
+        self.assertEqual(self.customer.name, "Shifa Pharmacy")
+
+    def test_case_insensitive_duplicate_is_rejected(self):
+        """Invoicing matches names exactly, so near-duplicates split a customer."""
+        Customer.objects.create(name="Al-Noor Pharmacy", address="Karachi")
+
+        response = self.client.post(self.url(), self.payload(name="AL-NOOR PHARMACY"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Customer.objects.filter(name="AL-NOOR PHARMACY").count(), 0)
+
+    def test_blank_name_is_rejected(self):
+        response = self.client.post(self.url(), self.payload(name="   "))
+
+        self.assertEqual(response.status_code, 200)
+        self.customer.refresh_from_db()
+        self.assertEqual(self.customer.name, "Shifa Pharmacy")
+
+    def test_list_shows_customers_with_invoice_counts(self):
+        Invoice.objects.create(customer=self.customer, license_no="L")
+
+        html = self.client.get(reverse("customer_list")).content.decode()
+
+        self.assertIn("Shifa Pharmacy", html)
+        self.assertIn(">1<", html)
+
+    def test_list_search_filters_by_contact_person(self):
+        self.customer.contact_person = "Dr. Ahmed Khan"
+        self.customer.save()
+        Customer.objects.create(name="Al-Noor Pharmacy", address="Karachi")
+
+        html = self.client.get(
+            reverse("customer_list"), {"q": "Ahmed"}
+        ).content.decode()
+
+        self.assertIn("Shifa Pharmacy", html)
+        self.assertNotIn("Al-Noor Pharmacy", html)
+
+    def test_login_is_required(self):
+        self.client.logout()
+
+        response = self.client.get(reverse("customer_list"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login/", response["Location"])
+
+    def test_invoicing_still_auto_creates_customers(self):
+        """The edit screen supplements auto-creation, it does not replace it."""
+        self.client.post(reverse("generate"), {
+            "customer_name": "Brand New Pharmacy",
+            "address": "Multan", "ntn": "", "sales_tax": "", "license_no": "LIC-77",
+            "item_name[]": ["Panadol"], "qty[]": ["1"], "price[]": ["10"],
+            "discount[]": ["0"], "batch[]": ["B"], "expiry[]": ["12/26"],
+        })
+
+        created = Customer.objects.get(name="Brand New Pharmacy")
+        self.assertEqual(created.address, "Multan")
+        self.assertEqual(created.license_no, "LIC-77")
+
+
 class CustomerLastInvoiceTests(TestCase):
 
     def setUp(self):

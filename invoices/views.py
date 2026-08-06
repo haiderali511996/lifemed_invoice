@@ -5,6 +5,9 @@ from django.contrib.auth import authenticate, login, logout
 from django.utils.timezone import now
 from django.contrib import messages
 
+from django.db.models import Count, Q
+
+from .forms import CustomerForm
 from .models import Customer, Invoice, Item, InvoiceLog, UserRolls, is_super_admin
 
 try:
@@ -124,6 +127,56 @@ def index(request):
         "invoices/index.html",
         {
             "customers": customers
+        }
+    )
+
+
+@login_required
+def customer_list(request):
+    query = request.GET.get("q", "").strip()
+
+    customers = Customer.objects.annotate(invoice_count=Count("invoice"))
+
+    if query:
+        customers = customers.filter(
+            Q(name__icontains=query)
+            | Q(contact_person__icontains=query)
+            | Q(contact_number__icontains=query)
+        )
+
+    return render(
+        request,
+        "invoices/customers.html",
+        {
+            "customers": customers,
+            "query": query,
+        }
+    )
+
+
+@login_required
+def customer_edit(request, customer_id):
+    customer = get_object_or_404(Customer, pk=customer_id)
+
+    if request.method == "POST":
+        form = CustomerForm(request.POST, instance=customer)
+
+        if form.is_valid():
+            form.save()
+
+            messages.success(request, f"Saved {customer.name}.")
+
+            return redirect("customer_list")
+
+    else:
+        form = CustomerForm(instance=customer)
+
+    return render(
+        request,
+        "invoices/customer_form.html",
+        {
+            "form": form,
+            "customer": customer,
         }
     )
 
