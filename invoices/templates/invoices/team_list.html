@@ -1,0 +1,55 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Team{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Team</h1>
+  <a href="{% url 'employee_new' %}" class="btn">＋ New Employee</a>
+</div>
+
+<div class="card">
+  <form method="GET" style="display:flex;gap:10px;margin-bottom:16px">
+    <input type="text" name="q" value="{{ query }}"
+      placeholder="Search name, code, territory or city..."
+      style="flex:1;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px" />
+    <button type="submit" class="btn">Search</button>
+    {% if query %}<a href="{% url 'team_list' %}" class="btn btn-grey">Clear</a>{% endif %}
+  </form>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Code</th><th>Name</th><th>Designation</th><th>Territory</th>
+          <th>Reports To</th><th>Contact</th><th>Login</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in employees %}
+        <tr>
+          <td>{{ e.employee_code }}</td>
+          <td>
+            <strong>{{ e.full_name }}</strong>
+            {% if not e.is_active %}<br><span class="pill pill-overdue">inactive</span>{% endif %}
+          </td>
+          <td>{{ e.get_designation_display }}</td>
+          <td>{{ e.territory.name|default:"—" }}</td>
+          <td>{{ e.reports_to.full_name|default:"—" }}</td>
+          <td>{{ e.phone|default:"—" }}</td>
+          <td>
+            {% if e.user %}{{ e.user.username }}
+            {% else %}<span class="muted">none</span>{% endif %}
+          </td>
+          <td><a href="{% url 'employee_edit' e.id %}" class="btn btn-sm">Edit</a></td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="8" style="text-align:center;padding:26px">
+          {% if query %}No staff match "{{ query }}".{% else %}
+          No employees yet. Add your medical representatives and managers here.
+          {% endif %}
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

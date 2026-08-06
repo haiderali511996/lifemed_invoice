@@ -1,0 +1,52 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Call Points{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Call Points</h1>
+  <a href="{% url 'call_point_new' %}" class="btn">＋ New Call Point</a>
+</div>
+
+<div class="card">
+  <form method="GET" style="display:flex;gap:10px;margin-bottom:16px">
+    <input type="text" name="q" value="{{ query }}"
+      placeholder="Search name, speciality, address or territory..."
+      style="flex:1;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px" />
+    <button type="submit" class="btn">Search</button>
+    {% if query %}<a href="{% url 'call_point_list' %}" class="btn btn-grey">Clear</a>{% endif %}
+  </form>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th><th>Type</th><th>Speciality</th><th>Territory</th>
+          <th>Linked Customer</th><th>Phone</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for cp in call_points %}
+        <tr>
+          <td><strong>{{ cp.name }}</strong></td>
+          <td>{{ cp.get_kind_display }}</td>
+          <td>{{ cp.speciality|default:"—" }}</td>
+          <td>{{ cp.territory.name }}</td>
+          <td>
+            {% if cp.customer %}{{ cp.customer.name }}
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+          <td>{{ cp.phone|default:"—" }}</td>
+          <td><a href="{% url 'call_point_edit' cp.id %}" class="btn btn-sm">Edit</a></td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" style="text-align:center;padding:26px">
+          {% if query %}No call points match "{{ query }}".{% else %}
+          No call points yet. Add the doctors and chemists your MRs visit -
+          weekly plans are generated from these.
+          {% endif %}
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

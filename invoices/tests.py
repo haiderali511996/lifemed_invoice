@@ -12,16 +12,23 @@ from django.urls import reverse
 from django.utils import timezone
 
 from . import models
+from .forms import EmployeeForm
 from .models import (
+    CallPoint,
     Customer,
+    Employee,
     Invoice,
     InvoiceLog,
     Item,
     OVERDUE_DAYS,
     Payment,
+    PlanVisit,
+    Territory,
     UserRolls,
+    WeeklyPlan,
     is_super_admin,
 )
+from .planning import generate_plan, monday_of
 from .views import customers_with_balances, overdue_invoices
 
 
@@ -768,3 +775,236 @@ class LedgerAggregateTests(TestCase):
 
         self.assertEqual(row.invoiced, Decimal("0.00"))
         self.assertEqual(row.paid, Decimal("0.00"))
+
+
+class TerritoryAndTeamTests(TestCase):
+
+    def setUp(self):
+        User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.territory = Territory.objects.create(name="Gulberg", city="Lahore")
+
+    def test_employee_can_be_created_without_a_login(self):
+        """Field staff often have no system account."""
+        employee = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza", territory=self.territory
+        )
+
+        self.assertIsNone(employee.user)
+        self.assertTrue(employee.is_field_staff)
+
+    def test_reporting_loop_is_rejected(self):
+        boss = Employee.objects.create(employee_code="SM-01", full_name="Boss")
+        mr = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali", reports_to=boss
+        )
+        boss.reports_to = mr
+        boss.save()
+
+        form = EmployeeForm(
+            data={
+                "employee_code": "MR-01", "full_name": "Ali",
+                "designation": "mr", "phone": "", "email": "",
+                "territory": "", "reports_to": boss.pk, "user": "",
+                "joined_on": "", "is_active": True,
+            },
+            instance=mr,
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("reports_to", form.errors)
+
+    def test_territory_report_totals_sales_by_location(self):
+        customer = Customer.objects.create(
+            name="Shifa", address="x", territory=self.territory
+        )
+        invoice = Invoice.objects.create(customer=customer, license_no="L")
+        Invoice.objects.filter(pk=invoice.pk).update(total=Decimal("1000.00"))
+        Payment.objects.create(customer=customer, amount=Decimal("400.00"))
+
+        response = self.client.get(reverse("territory_report"))
+        row = response.context["rows"][0]
+
+        self.assertEqual(row["invoiced"], Decimal("1000.00"))
+        self.assertEqual(row["received"], Decimal("400.00"))
+        self.assertEqual(row["balance"], Decimal("600.00"))
+
+    def test_report_warns_about_customers_with_no_territory(self):
+        Customer.objects.create(name="Orphan", address="x")
+
+        response = self.client.get(reverse("territory_report"))
+
+        self.assertEqual(response.context["unassigned_customers"], 1)
+
+
+class WeeklyPlanTests(TestCase):
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.territory = Territory.objects.create(name="Gulberg", city="Lahore")
+        self.mr = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza",
+            designation="mr", territory=self.territory,
+        )
+
+        self.week = monday_of(timezone.localdate())
+
+    def make_call_points(self, count):
+        return [
+            CallPoint.objects.create(
+                name=f"Dr. Test {i}", territory=self.territory, kind="doctor"
+            )
+            for i in range(count)
+        ]
+
+    def test_generator_spreads_visits_across_working_days(self):
+        self.make_call_points(12)
+
+        plan, created = generate_plan(self.mr, self.week, calls_per_day=2)
+
+        self.assertEqual(created, 12)
+        for day, _ in PlanVisit.DAY_CHOICES:
+            self.assertEqual(plan.visits.filter(day=day).count(), 2)
+
+    def test_generator_respects_the_daily_capacity(self):
+        self.make_call_points(50)
+
+        plan, created = generate_plan(self.mr, self.week, calls_per_day=3)
+
+        # 3 per day across 6 working days
+        self.assertEqual(created, 18)
+        self.assertEqual(plan.visits.count(), 18)
+
+    def test_never_visited_call_points_are_scheduled_first(self):
+        old, fresh = self.make_call_points(2)
+
+        previous = WeeklyPlan.objects.create(
+            employee=self.mr, week_start=self.week - timedelta(days=7)
+        )
+        PlanVisit.objects.create(
+            plan=previous, call_point=fresh, day=0, status="done"
+        )
+
+        plan, _ = generate_plan(self.mr, self.week, calls_per_day=1)
+
+        first = plan.visits.order_by("day").first()
+        self.assertEqual(first.call_point, old)
+
+    def test_week_start_snaps_to_monday(self):
+        self.make_call_points(1)
+        wednesday = self.week + timedelta(days=2)
+
+        plan, _ = generate_plan(self.mr, wednesday)
+
+        self.assertEqual(plan.week_start, self.week)
+        self.assertEqual(plan.week_start.weekday(), 0)
+
+    def test_approved_plan_is_never_overwritten(self):
+        self.make_call_points(4)
+        plan, _ = generate_plan(self.mr, self.week)
+        plan.status = WeeklyPlan.STATUS_APPROVED
+        plan.save()
+
+        original = plan.visit_count
+        again, created = generate_plan(self.mr, self.week)
+
+        self.assertEqual(created, 0)
+        self.assertEqual(again.visit_count, original)
+
+    def test_regenerating_a_draft_replaces_its_visits(self):
+        self.make_call_points(6)
+
+        generate_plan(self.mr, self.week, calls_per_day=1)
+        plan, _ = generate_plan(self.mr, self.week, calls_per_day=1)
+
+        self.assertEqual(plan.visits.count(), 6)
+
+    def test_employee_without_a_territory_generates_nothing(self):
+        loner = Employee.objects.create(employee_code="MR-99", full_name="No Area")
+
+        plan, created = generate_plan(loner, self.week)
+
+        self.assertEqual(created, 0)
+
+    def test_inactive_call_points_are_skipped(self):
+        points = self.make_call_points(3)
+        points[0].is_active = False
+        points[0].save()
+
+        plan, created = generate_plan(self.mr, self.week)
+
+        self.assertEqual(created, 2)
+
+    def test_coverage_tracks_completed_visits(self):
+        self.make_call_points(4)
+        plan, _ = generate_plan(self.mr, self.week)
+
+        visit = plan.visits.first()
+        visit.status = "done"
+        visit.save()
+
+        self.assertEqual(plan.completed_count, 1)
+        self.assertEqual(plan.coverage_percent, 25)
+
+    def test_plan_can_be_submitted_and_approved(self):
+        self.make_call_points(2)
+        plan, _ = generate_plan(self.mr, self.week)
+
+        self.client.post(reverse("plan_status", args=[plan.pk, "submit"]))
+        plan.refresh_from_db()
+        self.assertEqual(plan.status, WeeklyPlan.STATUS_SUBMITTED)
+        self.assertFalse(plan.is_editable)
+
+        self.client.post(reverse("plan_status", args=[plan.pk, "approve"]))
+        plan.refresh_from_db()
+        self.assertEqual(plan.status, WeeklyPlan.STATUS_APPROVED)
+        self.assertEqual(plan.reviewed_by, self.user)
+
+    def test_visit_can_be_marked_done_from_the_plan_page(self):
+        self.make_call_points(1)
+        plan, _ = generate_plan(self.mr, self.week)
+        visit = plan.visits.first()
+
+        self.client.post(reverse("visit_status", args=[visit.pk, "done"]))
+
+        visit.refresh_from_db()
+        self.assertEqual(visit.status, "done")
+
+    def test_generate_view_creates_a_plan(self):
+        self.make_call_points(3)
+
+        response = self.client.post(reverse("plan_generate"), {
+            "employee": self.mr.pk,
+            "week_start": self.week.isoformat(),
+            "calls_per_day": 6,
+        })
+
+        plan = WeeklyPlan.objects.get(employee=self.mr, week_start=self.week)
+        self.assertRedirects(response, reverse("plan_detail", args=[plan.pk]))
+        self.assertEqual(plan.visit_count, 3)
+
+    def test_visits_by_day_covers_the_whole_week(self):
+        self.make_call_points(1)
+        plan, _ = generate_plan(self.mr, self.week)
+
+        days = plan.visits_by_day()
+
+        self.assertEqual(len(days), 6)
+        self.assertEqual(days[0]["date"], self.week)
+        self.assertEqual(days[5]["date"], self.week + timedelta(days=5))
+
+    def test_field_force_pages_render(self):
+        self.make_call_points(2)
+        plan, _ = generate_plan(self.mr, self.week)
+
+        for url in (
+            reverse("team_list"), reverse("territory_list"),
+            reverse("call_point_list"), reverse("plan_list"),
+            reverse("plan_detail", args=[plan.pk]),
+            reverse("territory_report"),
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, 200)

@@ -1,0 +1,121 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - {{ plan.employee.full_name }} Plan{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>{{ plan.employee.full_name }}</h1>
+  <div style="display:flex;gap:9px;align-items:center" class="no-print">
+    {% if plan.status == "draft" or plan.status == "rejected" %}
+    <form method="POST" action="{% url 'plan_status' plan.id 'submit' %}">
+      {% csrf_token %}
+      <button type="submit" class="btn">Submit for Approval</button>
+    </form>
+    {% elif plan.status == "submitted" %}
+    <form method="POST" action="{% url 'plan_status' plan.id 'approve' %}">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-green">Approve</button>
+    </form>
+    <form method="POST" action="{% url 'plan_status' plan.id 'reject' %}">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-danger">Reject</button>
+    </form>
+    {% endif %}
+    <button onclick="window.print()" class="btn btn-grey">Print</button>
+    <a href="{% url 'plan_list' %}" class="btn btn-grey">All Plans</a>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom:18px">
+  <div class="summary">
+    <div><span class="k">Week</span><span class="v">
+      {{ plan.week_start|date:"d M" }} – {{ plan.week_end|date:"d M Y" }}</span></div>
+    <div><span class="k">Territory</span><span class="v">
+      {{ plan.employee.territory.name|default:"—" }}</span></div>
+    <div><span class="k">Status</span><span class="v">
+      {% if plan.status == "approved" %}<span class="pill pill-paid">approved</span>
+      {% elif plan.status == "rejected" %}<span class="pill pill-overdue">rejected</span>
+      {% elif plan.status == "submitted" %}<span class="pill pill-due">submitted</span>
+      {% else %}<span class="pill">draft</span>{% endif %}</span></div>
+    <div><span class="k">Coverage</span><span class="v">
+      {{ plan.completed_count }} / {{ plan.visit_count }}
+      ({{ plan.coverage_percent }}%)</span></div>
+  </div>
+  {% if plan.reviewed_by %}
+  <p style="margin:14px 0 0;font-size:13px;color:#8595a8">
+    Reviewed by {{ plan.reviewed_by.username }} on
+    {{ plan.reviewed_at|date:"d M Y H:i" }}.
+    {% if plan.review_note %}"{{ plan.review_note }}"{% endif %}
+  </p>
+  {% endif %}
+</div>
+
+<div class="week-grid">
+  {% for day in days %}
+  <div class="card day-card">
+    <h4>{{ day.label }}<span>{{ day.date|date:"d M" }}</span></h4>
+
+    {% for visit in day.visits %}
+    <div class="visit visit-{{ visit.status }}">
+      <strong>{{ visit.call_point.name }}</strong>
+      <span class="meta">
+        {{ visit.call_point.get_kind_display }}
+        {% if visit.call_point.speciality %} · {{ visit.call_point.speciality }}{% endif %}
+      </span>
+      {% if visit.remarks %}<span class="meta">“{{ visit.remarks }}”</span>{% endif %}
+
+      <div class="visit-actions no-print">
+        {% if visit.status != "done" %}
+        <form method="POST" action="{% url 'visit_status' visit.id 'done' %}">
+          {% csrf_token %}<button class="mini ok">✓ Visited</button>
+        </form>
+        {% endif %}
+        {% if visit.status != "missed" %}
+        <form method="POST" action="{% url 'visit_status' visit.id 'missed' %}">
+          {% csrf_token %}<button class="mini no">✕ Missed</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+    {% empty %}
+    <p class="muted" style="font-size:13px">No calls planned.</p>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:16px; }
+  .summary .k {
+    display:block; font-size:11px; text-transform:uppercase;
+    letter-spacing:.5px; color:#8595a8; margin-bottom:4px;
+  }
+  .summary .v { font-size:14px; }
+
+  .week-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; }
+
+  .day-card h4 {
+    margin:0 0 12px; font-size:14px; color:var(--brand-dark);
+    display:flex; justify-content:space-between; padding-bottom:8px;
+    border-bottom:2px solid var(--brand);
+  }
+  .day-card h4 span { color:#8595a8; font-weight:normal; font-size:12px; }
+
+  .visit {
+    border-left:3px solid #dbe2ea; padding:8px 10px; margin-bottom:9px;
+    background:#fafcfe; border-radius:0 6px 6px 0;
+  }
+  .visit strong { display:block; font-size:13px; }
+  .visit .meta { display:block; font-size:11px; color:#8595a8; }
+  .visit-done { border-left-color:#3aaa35; background:#f3fbf3; }
+  .visit-missed { border-left-color:#dc3545; background:#fdf5f6; }
+
+  .visit-actions { display:flex; gap:6px; margin-top:7px; }
+  .mini {
+    border:none; border-radius:4px; padding:3px 8px;
+    font-size:11px; cursor:pointer; font-family:inherit;
+  }
+  .mini.ok { background:#e3f6e5; color:#1e7b24; }
+  .mini.no { background:#fbe0e3; color:#a71d2a; }
+</style>
+{% endblock %}

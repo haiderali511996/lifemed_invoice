@@ -2,7 +2,15 @@ from decimal import Decimal
 
 from django import forms
 
-from .models import Customer, Invoice, Payment, UserRolls
+from .models import (
+    CallPoint,
+    Customer,
+    Employee,
+    Invoice,
+    Payment,
+    Territory,
+    UserRolls,
+)
 
 
 class CustomerForm(forms.ModelForm):
@@ -16,6 +24,7 @@ class CustomerForm(forms.ModelForm):
             "contact_person",
             "contact_number",
             "contact_email",
+            "territory",
             "license_no",
             "ntn",
             "sales_tax",
@@ -144,3 +153,86 @@ class ProfileForm(forms.ModelForm):
             profile.save()
 
         return profile
+
+
+class TerritoryForm(forms.ModelForm):
+    class Meta:
+        model = Territory
+        fields = ["name", "city", "region", "is_active"]
+
+
+class EmployeeForm(forms.ModelForm):
+    class Meta:
+        model = Employee
+        fields = [
+            "employee_code", "full_name", "designation", "phone", "email",
+            "territory", "reports_to", "user", "joined_on", "is_active",
+        ]
+        widgets = {
+            "joined_on": forms.DateInput(attrs={"type": "date"}),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.fields["territory"].required = False
+        self.fields["reports_to"].required = False
+        self.fields["user"].required = False
+        self.fields["user"].empty_label = "— No login account —"
+
+        # An employee cannot report to themselves, nor to their own reports.
+        if self.instance.pk:
+            self.fields["reports_to"].queryset = Employee.objects.exclude(
+                pk=self.instance.pk
+            )
+
+    def clean_reports_to(self):
+        manager = self.cleaned_data.get("reports_to")
+
+        if manager and self.instance.pk:
+            seen = set()
+            current = manager
+
+            while current is not None:
+                if current.pk == self.instance.pk:
+                    raise forms.ValidationError(
+                        "That would create a reporting loop."
+                    )
+
+                if current.pk in seen:
+                    break
+
+                seen.add(current.pk)
+                current = current.reports_to
+
+        return manager
+
+
+class CallPointForm(forms.ModelForm):
+    class Meta:
+        model = CallPoint
+        fields = [
+            "name", "kind", "speciality", "territory", "customer",
+            "address", "phone", "is_active",
+        ]
+        widgets = {"address": forms.Textarea(attrs={"rows": 2})}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.fields["customer"].required = False
+        self.fields["customer"].empty_label = "— Not an invoicing customer —"
+        self.fields["speciality"].required = False
+
+
+class PlanGenerateForm(forms.Form):
+    """Picks who and which week to generate for."""
+
+    employee = forms.ModelChoiceField(
+        queryset=Employee.objects.filter(is_active=True, designation="mr")
+    )
+    week_start = forms.DateField(
+        widget=forms.DateInput(attrs={"type": "date"}),
+        help_text="Any date in the target week; it snaps to that Monday.",
+    )
+    calls_per_day = forms.IntegerField(min_value=1, max_value=20, initial=6)

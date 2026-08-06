@@ -1,0 +1,64 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Location Report{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>📍 Location-wise Report</h1>
+  <button onclick="window.print()" class="btn btn-grey no-print">Print</button>
+</div>
+
+{% if unassigned_customers %}
+<div class="alert alert-warn">
+  <strong>{{ unassigned_customers }} customer(s) have no territory assigned</strong>
+  and are missing from these figures. Set a territory on each customer's edit
+  page to include them.
+</div>
+{% endif %}
+
+<div class="card">
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Territory</th><th>City</th><th>Region</th>
+          <th class="num">Customers</th><th class="num">Call Points</th>
+          <th class="num">Staff</th><th class="num">Invoiced</th>
+          <th class="num">Received</th><th class="num">Outstanding</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td><strong>{{ row.territory.name }}</strong></td>
+          <td>{{ row.territory.city }}</td>
+          <td>{{ row.territory.region|default:"—" }}</td>
+          <td class="num">{{ row.customers }}</td>
+          <td class="num">{{ row.call_points }}</td>
+          <td class="num">{{ row.staff }}</td>
+          <td class="num">{{ row.invoiced|floatformat:2 }}</td>
+          <td class="num" style="color:#1e7b24">{{ row.received|floatformat:2 }}</td>
+          <td class="num">
+            {% if row.balance > 0 %}
+            <strong style="color:#a71d2a">{{ row.balance|floatformat:2 }}</strong>
+            {% else %}<span class="pill pill-paid">settled</span>{% endif %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="9" style="text-align:center;padding:26px">
+          No territories defined yet.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+      {% if rows %}
+      <tfoot>
+        <tr>
+          <th colspan="6" style="text-align:right">Total</th>
+          <th class="num">{{ total_invoiced|floatformat:2 }}</th>
+          <th></th>
+          <th class="num">{{ total_balance|floatformat:2 }}</th>
+        </tr>
+      </tfoot>
+      {% endif %}
+    </table>
+  </div>
+</div>
+{% endblock %}

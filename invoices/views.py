@@ -12,14 +12,28 @@ from django.utils import timezone
 
 from datetime import timedelta
 
-from .forms import CustomerForm, PaymentForm, ProfileForm
+from .forms import (
+    CallPointForm,
+    CustomerForm,
+    EmployeeForm,
+    PaymentForm,
+    PlanGenerateForm,
+    ProfileForm,
+    TerritoryForm,
+)
+from .planning import current_week_start, generate_plan
 from .models import (
+    CallPoint,
     Customer,
+    Employee,
     Invoice,
     Item,
     InvoiceLog,
     Payment,
+    PlanVisit,
+    Territory,
     UserRolls,
+    WeeklyPlan,
     ZERO,
     OVERDUE_DAYS,
     is_super_admin,
@@ -763,5 +777,318 @@ def global_search(request):
             "customers": customers,
             "invoices": invoices,
             "result_count": len(customers) + len(invoices),
+        }
+    )
+
+
+# ---------------------------------------------------------------- TEAM & TERRITORY
+
+@login_required
+def territory_list(request):
+    territories = Territory.objects.annotate(
+        customer_count=Count("customers", distinct=True),
+        call_point_count=Count("call_points", distinct=True),
+        staff_count=Count("employees", distinct=True),
+    )
+
+    return render(
+        request,
+        "invoices/territory_list.html",
+        {"territories": territories}
+    )
+
+
+@login_required
+def territory_edit(request, territory_id=None):
+    territory = get_object_or_404(Territory, pk=territory_id) if territory_id else None
+
+    if request.method == "POST":
+        form = TerritoryForm(request.POST, instance=territory)
+
+        if form.is_valid():
+            saved = form.save()
+            messages.success(request, f"Saved territory {saved.name}.")
+
+            return redirect("territory_list")
+
+    else:
+        form = TerritoryForm(instance=territory)
+
+    return render(
+        request,
+        "invoices/simple_form.html",
+        {
+            "form": form,
+            "heading": "Edit Territory" if territory else "New Territory",
+            "cancel_url": reverse("territory_list"),
+        }
+    )
+
+
+@login_required
+def team_list(request):
+    employees = Employee.objects.select_related(
+        "territory", "reports_to", "user"
+    )
+
+    query = request.GET.get("q", "").strip()
+
+    if query:
+        employees = employees.filter(
+            Q(full_name__icontains=query)
+            | Q(employee_code__icontains=query)
+            | Q(territory__name__icontains=query)
+            | Q(territory__city__icontains=query)
+        )
+
+    return render(
+        request,
+        "invoices/team_list.html",
+        {
+            "employees": employees,
+            "query": query,
+        }
+    )
+
+
+@login_required
+def employee_edit(request, employee_id=None):
+    employee = get_object_or_404(Employee, pk=employee_id) if employee_id else None
+
+    if request.method == "POST":
+        form = EmployeeForm(request.POST, instance=employee)
+
+        if form.is_valid():
+            saved = form.save()
+            messages.success(request, f"Saved {saved.full_name}.")
+
+            return redirect("team_list")
+
+    else:
+        form = EmployeeForm(instance=employee)
+
+    return render(
+        request,
+        "invoices/simple_form.html",
+        {
+            "form": form,
+            "heading": "Edit Employee" if employee else "New Employee",
+            "cancel_url": reverse("team_list"),
+        }
+    )
+
+
+@login_required
+def call_point_list(request):
+    call_points = CallPoint.objects.select_related("territory", "customer")
+
+    query = request.GET.get("q", "").strip()
+
+    if query:
+        call_points = call_points.filter(
+            Q(name__icontains=query)
+            | Q(speciality__icontains=query)
+            | Q(address__icontains=query)
+            | Q(territory__name__icontains=query)
+        )
+
+    return render(
+        request,
+        "invoices/call_point_list.html",
+        {
+            "call_points": call_points,
+            "query": query,
+        }
+    )
+
+
+@login_required
+def call_point_edit(request, call_point_id=None):
+    call_point = (
+        get_object_or_404(CallPoint, pk=call_point_id) if call_point_id else None
+    )
+
+    if request.method == "POST":
+        form = CallPointForm(request.POST, instance=call_point)
+
+        if form.is_valid():
+            saved = form.save()
+            messages.success(request, f"Saved {saved.name}.")
+
+            return redirect("call_point_list")
+
+    else:
+        form = CallPointForm(instance=call_point)
+
+    return render(
+        request,
+        "invoices/simple_form.html",
+        {
+            "form": form,
+            "heading": "Edit Call Point" if call_point else "New Call Point",
+            "cancel_url": reverse("call_point_list"),
+        }
+    )
+
+
+# ---------------------------------------------------------------- WEEKLY PLANS
+
+@login_required
+def plan_list(request):
+    plans = WeeklyPlan.objects.select_related("employee", "employee__territory")
+
+    return render(
+        request,
+        "invoices/plan_list.html",
+        {
+            "plans": plans,
+            "form": PlanGenerateForm(initial={"week_start": current_week_start()}),
+            "current_week": current_week_start(),
+        }
+    )
+
+
+@login_required
+def plan_generate(request):
+    if request.method != "POST":
+        return redirect("plan_list")
+
+    form = PlanGenerateForm(request.POST)
+
+    if not form.is_valid():
+        messages.error(request, "Pick an employee and a week.")
+
+        return redirect("plan_list")
+
+    plan, created = generate_plan(
+        employee=form.cleaned_data["employee"],
+        week_start=form.cleaned_data["week_start"],
+        calls_per_day=form.cleaned_data["calls_per_day"],
+        created_by=request.user,
+    )
+
+    if not created:
+        if not plan.is_editable:
+            messages.error(
+                request,
+                f"That week is already {plan.get_status_display().lower()} - "
+                f"it was left untouched.",
+            )
+        elif plan.employee.territory is None:
+            messages.error(
+                request,
+                f"{plan.employee.full_name} has no territory assigned.",
+            )
+        else:
+            messages.error(
+                request,
+                f"No active call points in {plan.employee.territory.name}.",
+            )
+    else:
+        messages.success(request, f"Generated {created} visit(s).")
+
+    return redirect("plan_detail", plan_id=plan.pk)
+
+
+@login_required
+def plan_detail(request, plan_id):
+    plan = get_object_or_404(
+        WeeklyPlan.objects.select_related("employee", "employee__territory"),
+        pk=plan_id,
+    )
+
+    return render(
+        request,
+        "invoices/plan_detail.html",
+        {
+            "plan": plan,
+            "days": plan.visits_by_day(),
+        }
+    )
+
+
+@login_required
+def plan_status(request, plan_id, action):
+    plan = get_object_or_404(WeeklyPlan, pk=plan_id)
+
+    transitions = {
+        "submit": WeeklyPlan.STATUS_SUBMITTED,
+        "approve": WeeklyPlan.STATUS_APPROVED,
+        "reject": WeeklyPlan.STATUS_REJECTED,
+    }
+
+    if action not in transitions:
+        messages.error(request, "Unknown action.")
+
+        return redirect("plan_detail", plan_id=plan.pk)
+
+    plan.status = transitions[action]
+
+    if action in ("approve", "reject"):
+        plan.reviewed_by = request.user
+        plan.reviewed_at = timezone.now()
+        plan.review_note = request.POST.get("review_note", "")
+
+    plan.save()
+
+    messages.success(request, f"Plan {plan.get_status_display().lower()}.")
+
+    return redirect("plan_detail", plan_id=plan.pk)
+
+
+@login_required
+def visit_status(request, visit_id, action):
+    """Field reporting: mark a planned call as done or missed."""
+    visit = get_object_or_404(PlanVisit, pk=visit_id)
+
+    if action in ("done", "missed", "planned"):
+        visit.status = action
+        visit.remarks = request.POST.get("remarks", visit.remarks)
+        visit.save()
+
+    return redirect("plan_detail", plan_id=visit.plan_id)
+
+
+# ---------------------------------------------------------------- LOCATION REPORT
+
+@login_required
+def territory_report(request):
+    """Sales, receivables and field coverage broken down by territory."""
+    rows = []
+
+    for territory in Territory.objects.all():
+        customers = Customer.objects.filter(territory=territory)
+
+        invoiced = (
+            Invoice.objects.filter(customer__territory=territory)
+            .aggregate(t=Sum("total"))["t"] or ZERO
+        )
+        received = (
+            Payment.objects.filter(customer__territory=territory)
+            .aggregate(t=Sum("amount"))["t"] or ZERO
+        )
+
+        rows.append({
+            "territory": territory,
+            "customers": customers.count(),
+            "call_points": territory.call_points.filter(is_active=True).count(),
+            "staff": territory.employees.filter(is_active=True).count(),
+            "invoiced": invoiced,
+            "received": received,
+            "balance": invoiced - received,
+        })
+
+    rows.sort(key=lambda r: r["invoiced"], reverse=True)
+
+    unassigned = Customer.objects.filter(territory__isnull=True).count()
+
+    return render(
+        request,
+        "invoices/territory_report.html",
+        {
+            "rows": rows,
+            "unassigned_customers": unassigned,
+            "total_invoiced": sum((r["invoiced"] for r in rows), ZERO),
+            "total_balance": sum((r["balance"] for r in rows), ZERO),
         }
     )

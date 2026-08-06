@@ -492,7 +492,24 @@
           💰 <span>Payments</span>
         </a>
 
+        <div class="nav-section">Field Force</div>
+        <a href="{% url 'team_list' %}" class="{% if active == 'team' %}active{% endif %}">
+          🧑‍💼 <span>Team</span>
+        </a>
+        <a href="{% url 'plan_list' %}" class="{% if active == 'plans' %}active{% endif %}">
+          🗓️ <span>Weekly Plans</span>
+        </a>
+        <a href="{% url 'call_point_list' %}" class="{% if active == 'call_points' %}active{% endif %}">
+          🏥 <span>Call Points</span>
+        </a>
+        <a href="{% url 'territory_list' %}" class="{% if active == 'territories' %}active{% endif %}">
+          🗺️ <span>Territories</span>
+        </a>
+
         <div class="nav-section">Reports</div>
+        <a href="{% url 'territory_report' %}" class="{% if active == 'territory_report' %}active{% endif %}">
+          📍 <span>Location-wise</span>
+        </a>
         <a href="{% url 'invoice_logs' %}" class="{% if active == 'logs' %}active{% endif %}">
           📋 <span>Activity Log</span>
         </a>

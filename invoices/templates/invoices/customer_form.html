@@ -50,6 +50,12 @@
       {{ form.contact_email }} {{ form.contact_email.errors }}
     </div>
 
+    <div class="field">
+      <label for="{{ form.territory.id_for_label }}">Territory</label>
+      {{ form.territory }} {{ form.territory.errors }}
+      <p class="help">Drives the location-wise sales report.</p>
+    </div>
+
     <div class="section-title">Registration Details</div>
 
     <div class="row">

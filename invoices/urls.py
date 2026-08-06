@@ -36,4 +36,43 @@ urlpatterns = [
         name='payment_create',
     ),
     path('payments/', views.payment_list, name='payment_list'),
+
+    path('territories/', views.territory_list, name='territory_list'),
+    path('territories/new/', views.territory_edit, name='territory_new'),
+    path(
+        'territories/<int:territory_id>/edit/',
+        views.territory_edit,
+        name='territory_edit',
+    ),
+    path('territories/report/', views.territory_report, name='territory_report'),
+
+    path('team/', views.team_list, name='team_list'),
+    path('team/new/', views.employee_edit, name='employee_new'),
+    path(
+        'team/<int:employee_id>/edit/',
+        views.employee_edit,
+        name='employee_edit',
+    ),
+
+    path('call-points/', views.call_point_list, name='call_point_list'),
+    path('call-points/new/', views.call_point_edit, name='call_point_new'),
+    path(
+        'call-points/<int:call_point_id>/edit/',
+        views.call_point_edit,
+        name='call_point_edit',
+    ),
+
+    path('plans/', views.plan_list, name='plan_list'),
+    path('plans/generate/', views.plan_generate, name='plan_generate'),
+    path('plans/<int:plan_id>/', views.plan_detail, name='plan_detail'),
+    path(
+        'plans/<int:plan_id>/<str:action>/',
+        views.plan_status,
+        name='plan_status',
+    ),
+    path(
+        'visits/<int:visit_id>/<str:action>/',
+        views.visit_status,
+        name='visit_status',
+    ),
 ]
