@@ -7,4 +7,9 @@ urlpatterns = [
     path('login/', views.login_view, name='login'),
     path('logout/', views.logout_view, name='logout'),
     path('logs/', views.invoice_logs_view, name='invoice_logs'),
+    path(
+        'customers/<int:customer_id>/last-invoice/',
+        views.customer_last_invoice,
+        name='customer_last_invoice',
+    ),
 ]

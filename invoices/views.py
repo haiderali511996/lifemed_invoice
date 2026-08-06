@@ -1,11 +1,11 @@
-from django.shortcuts import render, redirect
-from django.http import FileResponse
+from django.shortcuts import render, redirect, get_object_or_404
+from django.http import FileResponse, JsonResponse
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth import authenticate, login, logout
 from django.utils.timezone import now
 from django.contrib import messages
 
-from .models import Customer, Invoice, Item, InvoiceLog
+from .models import Customer, Invoice, Item, InvoiceLog, UserRolls, is_super_admin
 
 import fitz
 import os
@@ -27,6 +27,17 @@ def safe_decimal(value, default="0.00"):
 
     except Exception:
         return Decimal(default)
+
+
+def post_column(request, field, length):
+    """Read one item column, padded to `length` so a short list can't IndexError.
+
+    Browsers omit nothing here, but a hand-built or partially filled POST can
+    send fewer batch/expiry values than item names.
+    """
+    values = request.POST.getlist(field)
+
+    return values + [""] * (length - len(values))
 
 
 def wipe_rect(page, rect):
@@ -73,15 +84,10 @@ def login_view(request):
 
             login(request, user)
 
-            # SUPER ADMIN → LOGS PAGE
-            if user.username == "novamax_super_secure2200":
+            # SUPER ADMIN → LOGS PAGE, EVERYONE ELSE → INVOICE FORM
+            if is_super_admin(user):
                 return redirect("invoice_logs")
 
-            # NORMAL USER → INVOICE FORM
-            if user.username == "novamax_secure9433":
-                return redirect("index")
-
-            # DEFAULT
             return redirect("index")
 
         return render(
@@ -103,7 +109,7 @@ def logout_view(request):
 def index(request):
 
     # SUPER ADMIN KO FORM NA DIKHAYE
-    if request.user.username == "novamax_super_secure2200":
+    if is_super_admin(request.user):
         return redirect("invoice_logs")
 
     customers = Customer.objects.all()
@@ -118,40 +124,83 @@ def index(request):
 
 
 @login_required
+def customer_last_invoice(request, customer_id):
+    """Customer details plus the line items of their most recent invoice.
+
+    Used by the form to prefill a repeat order instead of retyping every row.
+    """
+    customer = get_object_or_404(Customer, pk=customer_id)
+
+    invoice = Invoice.objects.filter(customer=customer).order_by("-id").first()
+
+    items = []
+
+    if invoice is not None:
+        items = [
+            {
+                "name": item.name,
+                "qty": item.qty,
+                "price": f"{item.price:.2f}",
+                "discount": f"{item.discount:.2f}",
+                "batch": item.batch or "",
+                "expiry": item.expiry or "",
+            }
+            for item in invoice.items.all()
+        ]
+
+    return JsonResponse({
+        "customer_name": customer.name,
+        "address": customer.address or "",
+        "ntn": customer.ntn or "",
+        "sales_tax": customer.sales_tax or "",
+        "license_no": customer.license_no or "",
+        "last_invoice_no": invoice.invoice_no if invoice else None,
+        "items": items,
+    })
+
+
+@login_required
 def generate_invoice(request):
 
     # SUPER ADMIN BLOCK
-    if request.user.username == "novamax_super_secure2200":
+    if is_super_admin(request.user):
         return redirect("invoice_logs")
 
     if request.method == "POST":
 
+        license_no = request.POST.get("license_no", "")
+
+        customer_fields = {
+            "address": request.POST.get("address", ""),
+            "ntn": request.POST.get("ntn", ""),
+            "sales_tax": request.POST.get("sales_tax", ""),
+            "license_no": license_no,
+        }
+
         customer, created = Customer.objects.get_or_create(
             name=request.POST.get("customer_name"),
-            defaults={
-                "address": request.POST.get("address", ""),
-                "ntn": request.POST.get("ntn", ""),
-                "sales_tax": request.POST.get("sales_tax", "")
-            }
+            defaults=customer_fields
         )
 
         if not created:
-            customer.address = request.POST.get("address", "")
-            customer.ntn = request.POST.get("ntn", "")
-            customer.sales_tax = request.POST.get("sales_tax", "")
+            for field, value in customer_fields.items():
+                setattr(customer, field, value)
+
             customer.save()
 
         invoice = Invoice.objects.create(
             customer=customer,
-            license_no=request.POST.get("license_no", "")
+            license_no=license_no
         )
 
         names = request.POST.getlist("item_name[]")
-        qtys = request.POST.getlist("qty[]")
-        prices = request.POST.getlist("price[]")
-        discounts = request.POST.getlist("discount[]")
-        batches = request.POST.getlist("batch[]")
-        expiries = request.POST.getlist("expiry[]")
+        row_count = len(names)
+
+        qtys = post_column(request, "qty[]", row_count)
+        prices = post_column(request, "price[]", row_count)
+        discounts = post_column(request, "discount[]", row_count)
+        batches = post_column(request, "batch[]", row_count)
+        expiries = post_column(request, "expiry[]", row_count)
 
         total_gross = Decimal("0")
         total_net = Decimal("0")
@@ -340,44 +389,24 @@ def generate_invoice(request):
 @login_required
 def invoice_logs_view(request):
 
-    # DIRECT SUPER ADMIN ACCESS
-    if request.user.username == "novamax_super_secure2200":
+    if not is_super_admin(request.user):
 
-        logs = InvoiceLog.objects.exclude(
-             user__username="novamax_super_secure2200"
-                ).order_by("-timestamp")
-
-        return render(
+        messages.error(
             request,
-            "invoices/invoice_logs.html",
-            {
-                "logs": logs
-            }
+            "🚫 Access Denied! Just Super Admin accessable."
         )
 
-    # BACKUP ROLE CHECK
-    try:
+        return redirect("index")
 
-        user_role_obj = request.user.userrolls
+    # SUPER ADMINS DON'T GENERATE INVOICES, SO THEIR ROWS ARE NOISE
+    logs = InvoiceLog.objects.exclude(
+        user__userrolls__role=UserRolls.ROLE_SUPER_ADMIN
+    ).select_related("invoice", "user").order_by("-timestamp")
 
-        if user_role_obj.role == "super_admin":
-
-            logs = InvoiceLog.objects.all().order_by("-timestamp")
-
-            return render(
-                request,
-                "invoices/invoice_logs.html",
-                {
-                    "logs": logs
-                }
-            )
-
-    except AttributeError:
-        pass
-
-    messages.error(
+    return render(
         request,
-        "🚫 Access Denied! Just Super Admin accessable."
+        "invoices/invoice_logs.html",
+        {
+            "logs": logs
+        }
     )
-
-    return redirect("index")

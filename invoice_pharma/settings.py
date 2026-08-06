@@ -11,37 +11,61 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 import os
 from pathlib import Path
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 import dj_database_url
 
-load_dotenv()
-
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load .env from the project root explicitly. Passenger (cPanel) does not
+# guarantee the working directory, so a bare load_dotenv() can silently miss it.
+load_dotenv(BASE_DIR / '.env')
+
+
+def env_list(name, default=''):
+    """Read a comma-separated env var into a list of stripped, non-empty values."""
+    return [item.strip() for item in os.getenv(name, default).split(',') if item.strip()]
+
+
+def env_bool(name, default):
+    return os.getenv(name, str(default)).strip().lower() in ('1', 'true', 'yes', 'on')
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
 
+# SECURITY WARNING: don't run with debug turned on in production!
+DEBUG = env_bool('DEBUG', False)
+
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv('SECRET_KEY')
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = 'django-insecure-development-only-key'
+    else:
+        raise ImproperlyConfigured(
+            "SECRET_KEY is not set. Add it to the .env file in the project root "
+            "or to the environment variables of the cPanel Python app."
+        )
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv('DEBUG', 'False') == 'True'
+# Comma-separated, e.g. "invoice.example.com,www.invoice.example.com"
+ALLOWED_HOSTS = env_list('ALLOWED_HOSTS', '127.0.0.1,localhost')
 
-ALLOWED_HOSTS = ["*",  ".vercel.app",]
+# Comma-separated, e.g. "https://invoice.example.com"
+CSRF_TRUSTED_ORIGINS = env_list(
+    'CSRF_TRUSTED_ORIGINS',
+    'http://127.0.0.1:8000,http://localhost:8000',
+)
 
+# Both must be False until the subdomain actually serves HTTPS, otherwise the
+# browser drops the session/CSRF cookies and login fails without any error.
+SESSION_COOKIE_SECURE = env_bool('SECURE_COOKIES', not DEBUG)
+CSRF_COOKIE_SECURE = SESSION_COOKIE_SECURE
 
-CSRF_TRUSTED_ORIGINS = [
-    "http://127.0.0.1:8000",
-    "http://localhost:8000",
-    "https://*.vercel.app",
-    "https://new-invoice-zeta.vercel.app",
-
-]
-
-SESSION_COOKIE_SECURE = True
-CSRF_COOKIE_SECURE = True
+# cPanel terminates SSL upstream; trust its forwarded-proto header.
+if env_bool('USE_X_FORWARDED_PROTO', False):
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 # Application definition
 
@@ -98,11 +122,31 @@ WSGI_APPLICATION = 'invoice_pharma.wsgi.application'
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
 
-DATABASES = {
-    'default': dj_database_url.config(
-        default=os.environ.get("DATABASE_URL")
+# DATABASE_URL example for a cPanel MySQL database:
+#   mysql://cpaneluser_dbuser:password@localhost:3306/cpaneluser_dbname
+# Falls back to a local SQLite file so `manage.py` works without any config.
+DATABASE_URL = os.getenv('DATABASE_URL')
+
+if DATABASE_URL:
+    DATABASES = {
+        'default': dj_database_url.parse(DATABASE_URL, conn_max_age=600),
+    }
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
+
+# MySQL needs strict mode enabled explicitly, otherwise it silently truncates
+# oversized values instead of raising.
+if DATABASES['default']['ENGINE'] == 'django.db.backends.mysql':
+    DATABASES['default'].setdefault('OPTIONS', {})
+    DATABASES['default']['OPTIONS'].setdefault(
+        'init_command', "SET sql_mode='STRICT_TRANS_TABLES'"
     )
-}
+    DATABASES['default']['OPTIONS'].setdefault('charset', 'utf8mb4')
 
 # Password validation
 # https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators
@@ -138,13 +182,14 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/4.2/howto/static-files/
 
 STATIC_URL = '/static/'
-STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-STATICFILES_DIRS = [
-    os.path.join(BASE_DIR, 'static'),
-]
+# Only declare the source dir if it exists; an empty project has no static/.
+STATICFILES_DIRS = [BASE_DIR / 'static'] if (BASE_DIR / 'static').is_dir() else []
 
-STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+# Non-manifest storage on purpose: the manifest variant raises a 500 on every
+# page if collectstatic has not been run, which is easy to hit on shared hosting.
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedStaticFilesStorage'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
