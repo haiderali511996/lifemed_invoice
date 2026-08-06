@@ -120,6 +120,24 @@ class RoleTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
 
+    def test_logs_page_offers_a_way_out(self):
+        """Super admins are blocked from '/', so the log page needs its own exit."""
+        self.make_super_admin("boss4")
+        self.client.login(username="boss4", password="pw")
+
+        html = self.client.get(reverse("invoice_logs")).content.decode()
+
+        self.assertIn(reverse("logout"), html)
+
+    def test_logout_ends_the_session(self):
+        self.make_super_admin("boss5")
+        self.client.login(username="boss5", password="pw")
+
+        response = self.client.get(reverse("logout"))
+
+        self.assertRedirects(response, reverse("login"))
+        self.assertNotIn("_auth_user_id", self.client.session)
+
     def test_super_admin_is_redirected_away_from_the_form(self):
         self.make_super_admin("boss3")
         self.client.login(username="boss3", password="pw")
