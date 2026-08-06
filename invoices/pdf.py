@@ -1,325 +1,340 @@
-"""Renders an invoice onto the pre-printed template.
+"""Render an invoice onto a distributor's pre-printed template.
 
-The template is a fixed A4 form: a header block, an item table bounded by a
-rule at y=240.7, and a totals block immediately beneath that rule. Text is
-written at absolute coordinates because the form's own lines and labels are
-part of the artwork.
+Coordinates come from the layout map detected for that distributor (see
+invoices.layout), so a new distributor is added by uploading their form rather
+than by editing this file.
 
-Only four rows fit between the table header and the closing rule, so invoices
-with more items are split across repeated copies of the template rather than
-overflowing into the totals block - which used to erase the form's own labels.
+Templates are fixed forms: the item table is a band bounded by the column
+headings and the rule beneath them. Invoices with more rows than fit are split
+across repeated copies of the template, because overflowing the band writes
+over the form's own totals labels.
 """
 
 try:
-    # PyMuPDF renamed its module to `pymupdf`; `fitz` is the pre-1.24.3 name.
     import pymupdf as fitz
-except ImportError:
+except ImportError:  # pragma: no cover
     import fitz
 
 import io
 import os
 
+from .layout import DEFAULT_FONT_SIZE, DEFAULT_ROW_HEIGHT, detect_layout
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PDF_PATH = os.path.join(BASE_DIR, "template.pdf")
+FALLBACK_TEMPLATE = os.path.join(BASE_DIR, "template.pdf")
 
-# ----------------------------------------------------------------- GEOMETRY
+# Clearance kept below the last row so glyph descenders stay off the rule.
+ROW_CLEARANCE = 2.5
 
-HEADER_COORDS = {
-    "customer_name": (125.84, 110.15, 272.87, 122.43),
-    "address": (125.84, 124.65, 347.06, 134.70),
-    "invoice_no": (482.60, 110.13, 524.41, 120.18),
-    "date": (479.85, 120.98, 523.99, 131.03),
-    "license_no": (75.06, 181.90, 173.89, 191.95),
-}
+PAGE_LABEL_OFFSET = 30.0
+CONTINUED_GAP = 10.0
 
-NTN_VALUE = (95, 158, 200, 168)
-SALES_TAX_VALUE = (110, 170, 220, 180)
-
-# x positions of the template's own column headers, so values land under the
-# right heading. Batch used to print under "Bonus" and the discount under
-# "FT%" (Further Tax) - misleading on a tax document.
-TABLE_COLS = {
-    "sr": 54.7,          # Sr#       header 49.8
-    "name": 72.1,        # Item Name header 71.8
-    "qty": 208.5,        # Qty       header 204.4
-    "batch": 271.0,      # Batch No  header 269.9
-    "expiry": 336.0,     # Expiry    header 340.3
-    "price": 393.0,      # T.Price   header 396.0
-    "discount": 436.0,   # Disc%     header 434.6
-    "amount": 546.0,     # Value     header 546.5
-}
-
-# Measured from the template: the column header row ends at y=206.15 and the
-# rule closing the table is at y=240.7, leaving a 34.5pt band. At 8pt, a row's
-# glyphs run from baseline-7.6 to baseline+2.4, so three 9.5pt rows fit inside
-# that band and a fourth would cross the rule into the totals block - the exact
-# overflow this pagination exists to prevent.
-TABLE_HEADER_BOTTOM = 206.15
-TABLE_RULE_Y = 240.7
-
-ROW_START_Y = 215.0
-ROW_HEIGHT = 9.5
-ROWS_PER_PAGE = 3
-
-# Clears the template's own sample rows without touching the column headers.
-TABLE_WIPE = (44, TABLE_HEADER_BOTTOM + 0.4, 580, TABLE_RULE_Y - 0.7)
-
-GROSS_VALUE_RECT = (535, 260, 590, 280)
-DISCOUNT_VALUE_RECT = (535, 277.58, 590, 287.63)
-NET_PAYABLE_RECT = (535, 320, 590, 345)
-COMPANY_TOTAL_RECT = (535, 240.9, 590, 260)
-
-TOTALS_RECTS = (
-    GROSS_VALUE_RECT,
-    DISCOUNT_VALUE_RECT,
-    NET_PAYABLE_RECT,
-    COMPANY_TOTAL_RECT,
-)
-
-PAGE_LABEL_POS = (470, 762)
-CONTINUED_POS = (44, 250)
-
-# The template is empty between Net Payable (y=327) and the warranty text
-# (y=628), so the outstanding-balance breakdown goes there on the last page.
-PREV_X = 44.0
-PREV_TITLE_Y = 358.0
-PREV_HEADER_Y = 374.0
-PREV_ROW_START_Y = 387.0
+# Layout of the outstanding-balance block, relative to its free band.
 PREV_ROW_HEIGHT = 10.5
-
-PREV_COL_INVOICE = 48.0
-PREV_COL_DATE = 140.0
-PREV_COL_AMOUNT_RIGHT = 300.0
-PREV_LABEL_RIGHT = 235.0
-
-# Keeps the block clear of the warranty block at y=628.
 PREV_MAX_ROWS = 16
-PREV_BLOCK_RIGHT = 305.0
+PREV_LEFT = 44.0
+PREV_WIDTH = 262.0
 
 
-# ----------------------------------------------------------------- HELPERS
+class TemplateError(Exception):
+    """The template cannot be rendered onto."""
 
-def wipe_rect(page, rect):
+
+# ------------------------------------------------------------------ drawing
+
+def _wipe(page, rect):
     page.add_redact_annot(fitz.Rect(rect), fill=(1, 1, 1))
 
 
-def write_in_rect(page, rect, text, fontsize=9):
-    r = fitz.Rect(rect)
-    page.insert_text((r.x0 + 2, r.y1 - 2), str(text), fontsize=fontsize)
+def _text(page, x, y, value, size):
+    page.insert_text((x, y), str(value), fontsize=size)
 
 
-def write_in_rect_right(page, rect, text, fontsize=9):
-    r = fitz.Rect(rect)
-    text = str(text)
+def _text_right(page, x_right, y, value, size):
+    value = str(value)
+    width = fitz.get_text_length(value, fontsize=size)
 
-    x = r.x1 - fitz.get_text_length(text, fontsize=fontsize) - 2
-
-    page.insert_text((x, r.y1 - 3), text, fontsize=fontsize)
+    page.insert_text((x_right - width, y), value, fontsize=size)
 
 
-def write_right(page, x_right, y, text, fontsize=8):
-    text = str(text)
-    x = x_right - fitz.get_text_length(text, fontsize=fontsize)
+def _fit(value, width, size):
+    """Trim a value to the width its box allows."""
+    value = str(value)
 
-    page.insert_text((x, y), text, fontsize=fontsize)
+    if fitz.get_text_length(value, fontsize=size) <= width:
+        return value
+
+    while value and fitz.get_text_length(value + "…", fontsize=size) > width:
+        value = value[:-1]
+
+    return value + "…" if value else ""
 
 
-def draw_previous_balance(page, previous):
-    """List what the customer owed before this invoice, invoice by invoice.
+# ------------------------------------------------------------------ geometry
 
-    `previous` carries `rows` (invoice_no, date, balance), an optional
-    unallocated `credit`, the `total` brought forward and the `grand_total`
-    including this invoice.
+def rows_per_page(layout):
+    table = layout["table"]
+
+    height = table.get("row_height") or DEFAULT_ROW_HEIGHT
+    band = table["bottom"] - table["header_bottom"] - ROW_CLEARANCE
+
+    return max(1, int(band // height))
+
+
+def row_start_y(layout):
+    """Baseline of the first row.
+
+    Sits one row height below the headings, so ascenders clear them.
     """
-    y = PREV_TITLE_Y
+    table = layout["table"]
+    height = table.get("row_height") or DEFAULT_ROW_HEIGHT
 
-    page.insert_text(
-        (PREV_X, y), "PREVIOUS OUTSTANDING BALANCE", fontsize=8.5
-    )
-
-    page.draw_line(
-        fitz.Point(PREV_X, y + 3.5),
-        fitz.Point(PREV_BLOCK_RIGHT, y + 3.5),
-        width=0.6,
-    )
-
-    page.insert_text((PREV_COL_INVOICE, PREV_HEADER_Y), "Invoice #", fontsize=7.5)
-    page.insert_text((PREV_COL_DATE, PREV_HEADER_Y), "Date", fontsize=7.5)
-    write_right(page, PREV_COL_AMOUNT_RIGHT, PREV_HEADER_Y, "Balance", 7.5)
-
-    page.draw_line(
-        fitz.Point(PREV_X, PREV_HEADER_Y + 3),
-        fitz.Point(PREV_BLOCK_RIGHT, PREV_HEADER_Y + 3),
-        width=0.4,
-    )
-
-    rows = previous["rows"]
-    shown = rows[:PREV_MAX_ROWS]
-
-    y = PREV_ROW_START_Y
-
-    for row in shown:
-        page.insert_text((PREV_COL_INVOICE, y), row["invoice_no"], fontsize=8)
-        page.insert_text(
-            (PREV_COL_DATE, y), row["date"].strftime("%d/%m/%Y"), fontsize=8
-        )
-        write_right(page, PREV_COL_AMOUNT_RIGHT, y, f"{row['balance']:.2f}", 8)
-
-        y += PREV_ROW_HEIGHT
-
-    if len(rows) > PREV_MAX_ROWS:
-        page.insert_text(
-            (PREV_COL_INVOICE, y),
-            f"... and {len(rows) - PREV_MAX_ROWS} older invoice(s)",
-            fontsize=7.5,
-        )
-        y += PREV_ROW_HEIGHT
-
-    credit = previous.get("credit")
-
-    if credit:
-        page.insert_text(
-            (PREV_COL_INVOICE, y), "Less: payments on account", fontsize=8
-        )
-        write_right(page, PREV_COL_AMOUNT_RIGHT, y, f"-{abs(credit):.2f}", 8)
-        y += PREV_ROW_HEIGHT
-
-    page.draw_line(
-        fitz.Point(PREV_X, y - 6),
-        fitz.Point(PREV_BLOCK_RIGHT, y - 6),
-        width=0.4,
-    )
-
-    y += 2
-
-    write_right(page, PREV_LABEL_RIGHT, y, "Total Previous Balance:", 8.5)
-    write_right(page, PREV_COL_AMOUNT_RIGHT, y, f"{previous['total']:.2f}", 8.5)
-
-    y += PREV_ROW_HEIGHT + 2
-
-    write_right(page, PREV_LABEL_RIGHT, y, "Grand Total Payable:", 9)
-    write_right(
-        page, PREV_COL_AMOUNT_RIGHT, y, f"{previous['grand_total']:.2f}", 9
-    )
-
-    page.draw_line(
-        fitz.Point(PREV_X, y + 3),
-        fitz.Point(PREV_BLOCK_RIGHT, y + 3),
-        width=0.8,
-    )
+    return table["header_bottom"] + height
 
 
-def chunk_rows(rows, size=ROWS_PER_PAGE):
-    """Split items into per-page groups, always yielding at least one page."""
+def chunk_rows(rows, size):
     if not rows:
         return [[]]
 
     return [rows[i:i + size] for i in range(0, len(rows), size)]
 
 
-# ----------------------------------------------------------------- RENDERING
+# ------------------------------------------------------------------ page fill
 
-def _fill_page(page, header, rows, totals, first_row_number, page_no, page_count,
-               previous=None):
-    """Draw one page: header on every page, totals only on the last."""
+def _fill_page(page, layout, header, rows, totals, first_row_number,
+               page_no, page_count, previous):
+    table = layout["table"]
+    columns = table["columns"]
+    font = table.get("font_size") or DEFAULT_FONT_SIZE
+    height = table.get("row_height") or DEFAULT_ROW_HEIGHT
 
-    # Clear everything the template pre-prints before writing anything, so a
-    # later redaction cannot erase text written earlier in this pass.
-    for rect in HEADER_COORDS.values():
-        wipe_rect(page, rect)
+    fields = layout.get("fields", {})
+    totals_map = layout.get("totals", {})
 
-    wipe_rect(page, NTN_VALUE)
-    wipe_rect(page, SALES_TAX_VALUE)
-    wipe_rect(page, TABLE_WIPE)
+    # Clear every pre-printed sample before writing, so a later redaction
+    # cannot erase what an earlier step wrote.
+    for spec in fields.values():
+        _wipe(page, (spec["x"] - 1, spec["y"] - spec["size"] - 1,
+                     spec["right"], spec["y"] + 2.5))
 
-    for rect in TOTALS_RECTS:
-        wipe_rect(page, rect)
+    _wipe(page, (
+        table.get("wipe_left", 40),
+        table["header_bottom"] + 0.4,
+        table.get("wipe_right", layout["page"]["width"] - 20),
+        table["bottom"] - 0.7,
+    ))
+
+    for spec in totals_map.values():
+        _wipe(page, (spec["right"] - 70, spec["y"] - spec["size"] - 1,
+                     spec["right"] + 2, spec["y"] + 2.5))
 
     page.apply_redactions()
 
-    for key, rect in HEADER_COORDS.items():
-        write_in_rect(page, rect, header.get(key, ""), 9)
+    # ---- header, repeated on every page so a loose sheet is identifiable
+    for name, spec in fields.items():
+        value = header.get(name)
 
-    write_in_rect(page, NTN_VALUE, header.get("ntn", ""), 9)
-    write_in_rect(page, SALES_TAX_VALUE, header.get("sales_tax", ""), 9)
+        if not value:
+            continue
+
+        _text(
+            page, spec["x"], spec["y"],
+            _fit(value, spec["right"] - spec["x"], spec["size"]),
+            spec["size"],
+        )
+
+    # ---- item rows
+    start_y = row_start_y(layout)
 
     for offset, row in enumerate(rows):
-        y = ROW_START_Y + offset * ROW_HEIGHT
+        y = start_y + offset * height
 
-        page.insert_text(
-            (TABLE_COLS["sr"], y), str(first_row_number + offset), fontsize=8
-        )
-        page.insert_text((TABLE_COLS["name"], y), row["name"], fontsize=8)
-        page.insert_text((TABLE_COLS["qty"], y), str(row["qty"]), fontsize=8)
-        page.insert_text((TABLE_COLS["batch"], y), row["batch"], fontsize=8)
-        page.insert_text((TABLE_COLS["expiry"], y), row["expiry"], fontsize=8)
-        page.insert_text(
-            (TABLE_COLS["price"], y), f"{row['price']:.2f}", fontsize=8
-        )
-        page.insert_text(
-            (TABLE_COLS["discount"], y), f"{row['discount']}%", fontsize=8
-        )
-        page.insert_text(
-            (TABLE_COLS["amount"], y), f"{row['amount']:.2f}", fontsize=8
-        )
+        _column(page, columns, "sr", y, first_row_number + offset, font)
+        _column(page, columns, "name", y, row["name"], font, limit=110)
+        _column(page, columns, "qty", y, row["qty"], font)
+        _column(page, columns, "batch", y, row["batch"], font, limit=60)
+        _column(page, columns, "expiry", y, row["expiry"], font, limit=50)
+        _column(page, columns, "price", y, f"{row['price']:.2f}", font)
+        _column(page, columns, "discount", y, f"{row['discount']}%", font)
+        _column(page, columns, "amount", y, f"{row['amount']:.2f}", font)
 
+    # ---- totals, last page only
     if totals is None:
-        # Totals belong on the final page only; say so rather than leaving the
-        # boxes blank and looking like a zero invoice.
-        page.insert_text(
-            CONTINUED_POS,
-            f"Continued on page {page_no + 1} ...",
-            fontsize=8,
+        _text(
+            page, PREV_LEFT, table["bottom"] + CONTINUED_GAP,
+            f"Continued on page {page_no + 1} ...", 8,
         )
     else:
-        write_in_rect_right(page, GROSS_VALUE_RECT, f"{totals['gross']:.2f}", 9)
-        write_in_rect_right(
-            page, DISCOUNT_VALUE_RECT, f"-{abs(totals['discount']):.2f}", 9
-        )
-        write_in_rect_right(page, NET_PAYABLE_RECT, f"{totals['net']:.2f}", 9)
-        write_in_rect_right(page, COMPANY_TOTAL_RECT, f"{totals['net']:.2f}", 9)
+        for name, value in (
+            ("gross", totals["gross"]),
+            ("discount", -abs(totals["discount"])),
+            ("net", totals["net"]),
+            ("company_total", totals["net"]),
+        ):
+            spec = totals_map.get(name)
+
+            if spec:
+                _text_right(page, spec["right"], spec["y"], f"{value:.2f}",
+                            spec["size"])
 
         if previous:
-            draw_previous_balance(page, previous)
+            _draw_previous(page, layout, previous)
 
     if page_count > 1:
-        page.insert_text(
-            PAGE_LABEL_POS, f"Page {page_no} of {page_count}", fontsize=8
+        _text(
+            page,
+            layout["page"]["width"] - 140,
+            layout["page"]["height"] - PAGE_LABEL_OFFSET,
+            f"Page {page_no} of {page_count}",
+            8,
         )
 
 
-def render_invoice(header, rows, totals, previous=None):
-    """Return the finished PDF as bytes.
+def _column(page, columns, key, y, value, size, limit=None):
+    spec = columns.get(key)
 
-    `rows` is a list of dicts (name, qty, batch, expiry, price, discount,
-    amount); `totals` has gross, discount and net. `previous`, when given,
-    adds the outstanding-balance breakdown to the final page.
+    if spec is None:
+        return
+
+    value = str(value)
+
+    if limit:
+        value = _fit(value, limit, size)
+
+    if spec.get("align") == "right":
+        _text_right(page, spec["x"], y, value, size)
+    else:
+        _text(page, spec["x"], y, value, size)
+
+
+def _draw_previous(page, layout, previous):
+    """Outstanding balance, itemised by invoice, in the form's free space."""
+    band = layout.get("previous_balance")
+
+    if not band:
+        return
+
+    right = PREV_LEFT + PREV_WIDTH
+    y = band["top"]
+
+    _text(page, PREV_LEFT, y, "PREVIOUS OUTSTANDING BALANCE", 8.5)
+    page.draw_line(fitz.Point(PREV_LEFT, y + 3.5), fitz.Point(right, y + 3.5),
+                   width=0.6)
+
+    y += 16
+
+    _text(page, PREV_LEFT + 4, y, "Invoice #", 7.5)
+    _text(page, PREV_LEFT + 96, y, "Date", 7.5)
+    _text_right(page, right, y, "Balance", 7.5)
+
+    page.draw_line(fitz.Point(PREV_LEFT, y + 3), fitz.Point(right, y + 3),
+                   width=0.4)
+
+    y += 13
+
+    rows = previous["rows"]
+    room = max(1, int((band["bottom"] - y - 40) // PREV_ROW_HEIGHT))
+    shown = rows[:min(PREV_MAX_ROWS, room)]
+
+    for row in shown:
+        _text(page, PREV_LEFT + 4, y, row["invoice_no"], 8)
+        _text(page, PREV_LEFT + 96, y, row["date"].strftime("%d/%m/%Y"), 8)
+        _text_right(page, right, y, f"{row['balance']:.2f}", 8)
+
+        y += PREV_ROW_HEIGHT
+
+    if len(rows) > len(shown):
+        _text(page, PREV_LEFT + 4, y,
+              f"... and {len(rows) - len(shown)} older invoice(s)", 7.5)
+        y += PREV_ROW_HEIGHT
+
+    if previous.get("credit"):
+        _text(page, PREV_LEFT + 4, y, "Less: payments on account", 8)
+        _text_right(page, right, y, f"-{abs(previous['credit']):.2f}", 8)
+        y += PREV_ROW_HEIGHT
+
+    page.draw_line(fitz.Point(PREV_LEFT, y - 6), fitz.Point(right, y - 6),
+                   width=0.4)
+
+    y += 2
+    _text_right(page, right - 66, y, "Total Previous Balance:", 8.5)
+    _text_right(page, right, y, f"{previous['total']:.2f}", 8.5)
+
+    y += PREV_ROW_HEIGHT + 2
+    _text_right(page, right - 66, y, "Grand Total Payable:", 9)
+    _text_right(page, right, y, f"{previous['grand_total']:.2f}", 9)
+
+    page.draw_line(fitz.Point(PREV_LEFT, y + 3), fitz.Point(right, y + 3),
+                   width=0.8)
+
+
+# ------------------------------------------------------------------ public API
+
+def resolve_template(distributor):
+    """The template path and layout to render with.
+
+    Falls back to the bundled template so invoicing keeps working before any
+    distributor has been configured.
     """
-    template = fitz.open(PDF_PATH)
-    doc = fitz.open()
+    if distributor is not None and distributor.template_path:
+        path = distributor.template_path
 
-    pages = chunk_rows(rows)
+        if not os.path.exists(path):
+            raise TemplateError(
+                f"{distributor.name}'s template file is missing from the server."
+            )
 
-    for _ in pages:
-        doc.insert_pdf(template, from_page=0, to_page=0)
+        layout = distributor.layout
 
-    for index, page_rows in enumerate(pages):
-        is_last = index == len(pages) - 1
+        if not layout or not layout.get("table"):
+            # Never configured, or the upload predates layout detection.
+            layout = detect_layout(path)
 
-        _fill_page(
-            page=doc[index],
-            header=header,
-            rows=page_rows,
-            totals=totals if is_last else None,
-            first_row_number=index * ROWS_PER_PAGE + 1,
-            page_no=index + 1,
-            page_count=len(pages),
-            previous=previous if is_last else None,
+        return path, layout
+
+    if not os.path.exists(FALLBACK_TEMPLATE):
+        raise TemplateError(
+            "No distributor template configured and template.pdf is missing."
         )
 
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    doc.close()
-    template.close()
+    return FALLBACK_TEMPLATE, detect_layout(FALLBACK_TEMPLATE)
 
-    return buffer.getvalue()
+
+def render_invoice(header, rows, totals, previous=None, distributor=None):
+    """Return the finished PDF as bytes."""
+    path, layout = resolve_template(distributor)
+
+    template = fitz.open(path)
+    document = fitz.open()
+
+    try:
+        pages = chunk_rows(rows, rows_per_page(layout))
+
+        for _ in pages:
+            document.insert_pdf(template, from_page=0, to_page=0)
+
+        per_page = rows_per_page(layout)
+
+        for index, page_rows in enumerate(pages):
+            is_last = index == len(pages) - 1
+
+            _fill_page(
+                page=document[index],
+                layout=layout,
+                header=header,
+                rows=page_rows,
+                totals=totals if is_last else None,
+                first_row_number=index * per_page + 1,
+                page_no=index + 1,
+                page_count=len(pages),
+                previous=previous if is_last else None,
+            )
+
+        buffer = io.BytesIO()
+        document.save(buffer)
+
+        return buffer.getvalue()
+
+    finally:
+        document.close()
+        template.close()

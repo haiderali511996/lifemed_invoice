@@ -12,6 +12,9 @@ from django.utils import timezone
 # An invoice still unpaid after this many days is flagged as overdue.
 OVERDUE_DAYS = 30
 
+# Batches expiring within this many days are flagged for action.
+EXPIRY_WARNING_DAYS = 90
+
 ZERO = Decimal("0.00")
 
 INVOICE_PREFIX = "HHC"
@@ -77,6 +80,13 @@ class Customer(models.Model):
 class Invoice(models.Model):
     customer = models.ForeignKey(Customer, on_delete=models.CASCADE)
 
+    # Which company's form this invoice is printed on. Its code drives the
+    # invoice number prefix, so each distributor has an independent series.
+    distributor = models.ForeignKey(
+        "Distributor", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="invoices",
+    )
+
     # ✅ STRING FORMAT
     invoice_no = models.CharField(max_length=20, unique=True)
 
@@ -114,12 +124,23 @@ class Invoice(models.Model):
         return not self.is_paid and self.days_outstanding >= OVERDUE_DAYS
 
     @classmethod
-    def next_invoice_no(cls):
-        """Highest existing number + 1, compared numerically rather than as text."""
+    def next_invoice_no(cls, distributor=None):
+        """Highest existing number + 1 for this distributor's series.
+
+        Compared numerically rather than as text, so HHC-9999 is followed by
+        HHC-10000 and not HHC-10000 sorting below it.
+        """
+        prefix = (distributor.code if distributor else INVOICE_PREFIX)
+
+        start = (
+            distributor.invoice_start_number
+            if distributor else INVOICE_START_NUMBER
+        )
+
         numbers = []
 
         for value in cls.objects.filter(
-            invoice_no__startswith=f"{INVOICE_PREFIX}-"
+            invoice_no__startswith=f"{prefix}-"
         ).values_list("invoice_no", flat=True):
 
             suffix = value.rsplit("-", 1)[-1]
@@ -127,9 +148,9 @@ class Invoice(models.Model):
             if suffix.isdigit():
                 numbers.append(int(suffix))
 
-        new_num = max(numbers) + 1 if numbers else INVOICE_START_NUMBER
+        new_num = max(numbers) + 1 if numbers else start
 
-        return f"{INVOICE_PREFIX}-{new_num:04d}"
+        return f"{prefix}-{new_num:04d}"
 
     def save(self, *args, **kwargs):
         if self.invoice_no:
@@ -141,7 +162,7 @@ class Invoice(models.Model):
 
         for attempt in range(INVOICE_NUMBER_ATTEMPTS):
 
-            self.invoice_no = self.next_invoice_no()
+            self.invoice_no = self.next_invoice_no(self.distributor)
 
             try:
                 with transaction.atomic():
@@ -162,6 +183,17 @@ class Item(models.Model):
     expiry = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     discount = models.DecimalField(max_digits=5, decimal_places=2)
+
+    # Set when the line was picked from stock. Free-text lines leave these
+    # null and move no stock, so ad-hoc items still work.
+    product = models.ForeignKey(
+        "Product", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="sold_items",
+    )
+    stock_batch = models.ForeignKey(
+        "Batch", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="sold_items",
+    )
 
 
 class Payment(models.Model):
@@ -524,3 +556,247 @@ class PlanVisit(models.Model):
     @property
     def visit_date(self):
         return self.plan.week_start + timedelta(days=self.day)
+
+
+# ------------------------------------------------------------------ DISTRIBUTORS
+
+class Distributor(models.Model):
+    """A company whose invoices this system prints.
+
+    Each one has its own pre-printed PDF form. `layout` holds the coordinate
+    map detected from that form (see invoices.layout), so adding a distributor
+    is an upload rather than a code change.
+    """
+
+    name = models.CharField(max_length=200, unique=True)
+    code = models.CharField(
+        max_length=10,
+        unique=True,
+        help_text="Invoice number prefix, e.g. HHC for HHC-9965.",
+    )
+
+    address = models.TextField(blank=True)
+    phone = models.CharField(max_length=50, blank=True)
+    license_no = models.CharField("Drug licence", max_length=100, blank=True)
+    ntn = models.CharField(max_length=50, blank=True)
+    sales_tax = models.CharField(max_length=50, blank=True)
+
+    template = models.FileField(
+        upload_to="invoice_templates/",
+        blank=True,
+        help_text="The blank invoice PDF. Coordinates are read from it.",
+    )
+    layout = models.JSONField(
+        blank=True,
+        null=True,
+        help_text="Detected coordinate map. Regenerated when the template changes.",
+    )
+
+    invoice_start_number = models.IntegerField(default=1)
+
+    is_active = models.BooleanField(default=True)
+    is_default = models.BooleanField(
+        default=False, help_text="Pre-selected on the invoice form."
+    )
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+    def save(self, *args, **kwargs):
+        self.code = self.code.upper().strip()
+
+        super().save(*args, **kwargs)
+
+        # Exactly one default, enforced here rather than trusted to the form.
+        if self.is_default:
+            Distributor.objects.exclude(pk=self.pk).update(is_default=False)
+
+    @property
+    def template_path(self):
+        return self.template.path if self.template else None
+
+    @property
+    def has_layout(self):
+        return bool(self.layout and self.layout.get("table"))
+
+    @classmethod
+    def default(cls):
+        return (
+            cls.objects.filter(is_active=True, is_default=True).first()
+            or cls.objects.filter(is_active=True).first()
+        )
+
+
+# ------------------------------------------------------------------ PURCHASING
+
+class Supplier(models.Model):
+    name = models.CharField(max_length=200, unique=True)
+    contact_person = models.CharField(max_length=150, blank=True)
+    phone = models.CharField(max_length=50, blank=True)
+    email = models.EmailField(blank=True)
+    address = models.TextField(blank=True)
+    ntn = models.CharField(max_length=50, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class Product(models.Model):
+    """A sellable item. Stock is tracked per batch, not on the product."""
+
+    code = models.CharField(max_length=50, unique=True)
+    name = models.CharField(max_length=255)
+    pack_size = models.CharField(max_length=50, blank=True)
+    trade_price = models.DecimalField(max_digits=10, decimal_places=2, default=ZERO)
+    is_active = models.BooleanField(default=True)
+
+    reorder_level = models.IntegerField(
+        default=0, help_text="Flag the product when total stock falls below this."
+    )
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return f"{self.name} ({self.code})"
+
+    @property
+    def stock_on_hand(self):
+        return self.batches.aggregate(t=Sum("quantity"))["t"] or 0
+
+    @property
+    def sellable_stock(self):
+        """Excludes expired batches - they must not be sold."""
+        return (
+            self.batches.filter(expiry_date__gte=timezone.localdate())
+            .aggregate(t=Sum("quantity"))["t"] or 0
+        )
+
+    @property
+    def needs_reorder(self):
+        return self.reorder_level > 0 and self.sellable_stock <= self.reorder_level
+
+
+class Batch(models.Model):
+    """A received lot, with its own expiry and cost."""
+
+    product = models.ForeignKey(
+        Product, on_delete=models.CASCADE, related_name="batches"
+    )
+    batch_no = models.CharField(max_length=100)
+    expiry_date = models.DateField()
+
+    cost_price = models.DecimalField(max_digits=10, decimal_places=2, default=ZERO)
+    received_quantity = models.IntegerField(default=0)
+    quantity = models.IntegerField(default=0, help_text="Currently on hand.")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["expiry_date", "batch_no"]
+        unique_together = [("product", "batch_no")]
+        verbose_name_plural = "batches"
+
+    def __str__(self):
+        return f"{self.product.name} / {self.batch_no}"
+
+    @property
+    def is_expired(self):
+        return self.expiry_date < timezone.localdate()
+
+    @property
+    def days_to_expiry(self):
+        return (self.expiry_date - timezone.localdate()).days
+
+    @property
+    def expires_soon(self):
+        return not self.is_expired and self.days_to_expiry <= EXPIRY_WARNING_DAYS
+
+
+class Purchase(models.Model):
+    """Goods received from a supplier."""
+
+    supplier = models.ForeignKey(
+        Supplier, on_delete=models.PROTECT, related_name="purchases"
+    )
+    reference = models.CharField(
+        max_length=100, blank=True, help_text="The supplier's invoice number."
+    )
+    date = models.DateField(default=timezone.localdate)
+    note = models.TextField(blank=True)
+
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date", "-id"]
+
+    def __str__(self):
+        return f"{self.supplier.name} - {self.date}"
+
+    @property
+    def total(self):
+        return sum(
+            (line.line_total for line in self.items.all()), ZERO
+        )
+
+
+class PurchaseItem(models.Model):
+    purchase = models.ForeignKey(
+        Purchase, on_delete=models.CASCADE, related_name="items"
+    )
+    product = models.ForeignKey(Product, on_delete=models.PROTECT)
+    batch = models.ForeignKey(
+        Batch, on_delete=models.PROTECT, related_name="purchase_items"
+    )
+
+    quantity = models.IntegerField()
+    cost_price = models.DecimalField(max_digits=10, decimal_places=2, default=ZERO)
+
+    @property
+    def line_total(self):
+        return self.cost_price * self.quantity
+
+
+class StockMovement(models.Model):
+    """Append-only stock ledger. Batch quantities are a cache of this."""
+
+    PURCHASE = "purchase"
+    SALE = "sale"
+    ADJUSTMENT = "adjustment"
+    RETURN = "return"
+
+    KIND_CHOICES = (
+        (PURCHASE, "Purchase"),
+        (SALE, "Sale"),
+        (ADJUSTMENT, "Adjustment"),
+        (RETURN, "Return"),
+    )
+
+    product = models.ForeignKey(
+        Product, on_delete=models.CASCADE, related_name="movements"
+    )
+    batch = models.ForeignKey(
+        Batch, on_delete=models.CASCADE, related_name="movements"
+    )
+
+    quantity = models.IntegerField(help_text="Positive in, negative out.")
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES)
+    reference = models.CharField(max_length=100, blank=True)
+    note = models.TextField(blank=True)
+
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"{self.batch} {self.quantity:+d} ({self.kind})"

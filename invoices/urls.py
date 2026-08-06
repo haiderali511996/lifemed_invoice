@@ -75,4 +75,59 @@ urlpatterns = [
         views.visit_status,
         name='visit_status',
     ),
+
+    path('distributors/', views.distributor_list, name='distributor_list'),
+    path('distributors/new/', views.distributor_edit, name='distributor_new'),
+    path(
+        'distributors/<int:distributor_id>/edit/',
+        views.distributor_edit,
+        name='distributor_edit',
+    ),
+    path(
+        'distributors/<int:distributor_id>/layout/',
+        views.distributor_layout,
+        name='distributor_layout',
+    ),
+    path(
+        'distributors/<int:distributor_id>/detect/',
+        views.distributor_detect,
+        name='distributor_detect',
+    ),
+    path(
+        'distributors/<int:distributor_id>/preview/',
+        views.distributor_preview,
+        name='distributor_preview',
+    ),
+
+    path('products/', views.product_list, name='product_list'),
+    path('products/new/', views.product_edit, name='product_new'),
+    path(
+        'products/<int:product_id>/edit/',
+        views.product_edit,
+        name='product_edit',
+    ),
+    path(
+        'products/<int:product_id>/batches/',
+        views.product_batches,
+        name='product_batches',
+    ),
+
+    path('suppliers/', views.supplier_list, name='supplier_list'),
+    path('suppliers/new/', views.supplier_edit, name='supplier_new'),
+    path(
+        'suppliers/<int:supplier_id>/edit/',
+        views.supplier_edit,
+        name='supplier_edit',
+    ),
+
+    path('purchases/', views.purchase_list, name='purchase_list'),
+    path('purchases/new/', views.purchase_create, name='purchase_new'),
+
+    path('stock/', views.stock_report, name='stock_report'),
+    path('stock/movements/', views.stock_movements, name='stock_movements'),
+    path(
+        'stock/batches/<int:batch_id>/adjust/',
+        views.batch_adjust,
+        name='batch_adjust',
+    ),
 ]

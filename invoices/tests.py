@@ -20,9 +20,12 @@ from django.urls import reverse
 from django.utils import timezone
 
 from . import models
-from .forms import EmployeeForm
+from .forms import DistributorForm, EmployeeForm
+from .layout import LayoutError, detect_layout
 from .models import (
+    Batch,
     CallPoint,
+    Distributor,
     Customer,
     Employee,
     Invoice,
@@ -31,12 +34,18 @@ from .models import (
     OVERDUE_DAYS,
     Payment,
     PlanVisit,
+    Product,
+    Purchase,
+    PurchaseItem,
+    StockMovement,
+    Supplier,
     Territory,
     UserRolls,
     WeeklyPlan,
     is_super_admin,
 )
-from .pdf import ROWS_PER_PAGE, TABLE_HEADER_BOTTOM, TABLE_RULE_Y
+from .pdf import rows_per_page
+from .stock import StockError, adjust, allocate_fefo, issue, receive
 from .planning import generate_plan, monday_of
 from .views import customers_with_balances, overdue_invoices
 
@@ -87,8 +96,8 @@ class InvoiceNumberTests(TestCase):
         original = Invoice.next_invoice_no.__func__
         state = {"raced": False}
 
-        def racing_next(cls):
-            number = original(cls)
+        def racing_next(cls, distributor=None):
+            number = original(cls, distributor)
 
             if not state["raced"]:
                 state["raced"] = True
@@ -1187,12 +1196,18 @@ class InvoicePdfLayoutTests(TestCase):
 
     Only three rows fit between the column headers (ending y=206.15) and the
     rule that closes the table (y=240.7). Overflowing past it used to white out
-    the form's own totals labels.
+    the form's own totals labels. The bounds come from the detected layout
+    rather than constants, so this holds for any distributor's template.
     """
 
     def setUp(self):
         User.objects.create_user("clerk", password="pw")
         self.client.login(username="clerk", password="pw")
+
+        self.layout = detect_layout("template.pdf")
+        self.per_page = rows_per_page(self.layout)
+        self.rule_y = self.layout["table"]["bottom"]
+        self.header_bottom = self.layout["table"]["header_bottom"]
 
     def generate(self, item_count, customer="Shifa Pharmacy"):
         n = item_count
@@ -1214,10 +1229,10 @@ class InvoicePdfLayoutTests(TestCase):
         return "".join(page.get_text() for page in doc)
 
     def test_short_invoice_is_a_single_page(self):
-        self.assertEqual(self.generate(ROWS_PER_PAGE).page_count, 1)
+        self.assertEqual(self.generate(self.per_page).page_count, 1)
 
     def test_long_invoice_paginates(self):
-        doc = self.generate(ROWS_PER_PAGE + 1)
+        doc = self.generate(self.per_page + 1)
 
         self.assertEqual(doc.page_count, 2)
 
@@ -1245,8 +1260,8 @@ class InvoicePdfLayoutTests(TestCase):
         for page in doc:
             for word in page.get_text("words"):
                 if word[4].startswith("Medicine"):
-                    self.assertLess(word[3], TABLE_RULE_Y, word[4])
-                    self.assertGreater(word[1], TABLE_HEADER_BOTTOM, word[4])
+                    self.assertLess(word[3], self.rule_y, word[4])
+                    self.assertGreater(word[1], self.header_bottom, word[4])
 
     def test_totals_appear_only_on_the_final_page(self):
         doc = self.generate(10)          # 10 x 2 x 90 = 1800.00
@@ -1487,3 +1502,473 @@ class BackupCommandTests(TestCase):
                         self.run_backup()
 
         self.assertEqual(sorted(self.out.glob("backup-*")), [])
+
+
+class LayoutDetectionTests(TestCase):
+    """Coordinates are found by locating the labels the form already prints,
+    so a new distributor is an upload rather than a code change."""
+
+    def setUp(self):
+        self.layout = detect_layout("template.pdf")
+
+    def test_finds_the_header_fields(self):
+        for field in ("customer_name", "address", "invoice_no", "date",
+                      "license_no", "ntn", "sales_tax"):
+            self.assertIn(field, self.layout["fields"], field)
+
+    def test_matches_the_hand_measured_coordinates(self):
+        """Guards the detector against drifting away from the known-good map."""
+        expected = {
+            "customer_name": 125.84, "address": 125.84,
+            "invoice_no": 482.60, "date": 479.85, "license_no": 75.06,
+        }
+
+        for field, x in expected.items():
+            self.assertAlmostEqual(
+                self.layout["fields"][field]["x"], x, delta=2.5, msg=field
+            )
+
+    def test_finds_the_item_columns(self):
+        columns = self.layout["table"]["columns"]
+
+        for column in ("sr", "name", "qty", "batch", "expiry", "price",
+                       "discount", "amount"):
+            self.assertIn(column, columns, column)
+
+    def test_numeric_columns_are_right_aligned(self):
+        columns = self.layout["table"]["columns"]
+
+        self.assertEqual(columns["amount"]["align"], "right")
+        self.assertEqual(columns["name"]["align"], "left")
+
+    def test_finds_the_table_band(self):
+        table = self.layout["table"]
+
+        self.assertAlmostEqual(table["header_bottom"], 206.15, delta=1)
+        self.assertAlmostEqual(table["bottom"], 240.7, delta=1)
+
+    def test_finds_the_totals(self):
+        for total in ("gross", "discount", "net", "company_total"):
+            self.assertIn(total, self.layout["totals"], total)
+
+    def test_finds_free_space_for_the_balance_block(self):
+        band = self.layout["previous_balance"]
+
+        self.assertIsNotNone(band)
+        self.assertGreater(band["bottom"] - band["top"], 100)
+
+    def test_rows_per_page_matches_the_band(self):
+        self.assertEqual(rows_per_page(self.layout), 3)
+
+    def test_a_pdf_without_a_table_is_rejected(self):
+        """A payslip or a scan must not be accepted as an invoice template."""
+        import pymupdf
+
+        document = pymupdf.open()
+        page = document.new_page()
+        page.insert_text((72, 72), "This is not an invoice.", fontsize=12)
+
+        path = Path(tempfile.mkdtemp()) / "not-an-invoice.pdf"
+        document.save(str(path))
+        document.close()
+
+        with self.assertRaises(LayoutError):
+            detect_layout(str(path))
+
+    def test_an_empty_pdf_is_rejected(self):
+        import pymupdf
+
+        document = pymupdf.open()
+        document.new_page()
+
+        path = Path(tempfile.mkdtemp()) / "blank.pdf"
+        document.save(str(path))
+        document.close()
+
+        with self.assertRaises(LayoutError) as caught:
+            detect_layout(str(path))
+
+        self.assertIn("No text", str(caught.exception))
+
+
+class DistributorTests(TestCase):
+
+    def setUp(self):
+        User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.hhc = Distributor.objects.get(code="HHC")
+
+    def test_seed_migration_registered_the_original_company(self):
+        self.assertEqual(self.hhc.name, "HADI HEALTH CARE")
+        self.assertTrue(self.hhc.is_default)
+        self.assertTrue(self.hhc.template)
+
+    def test_each_distributor_has_its_own_number_series(self):
+        other = Distributor.objects.create(
+            name="Other Distributor", code="ODC", invoice_start_number=1
+        )
+        customer = Customer.objects.create(name="Shifa", address="x")
+
+        first = Invoice.objects.create(
+            customer=customer, distributor=self.hhc, license_no="L"
+        )
+        second = Invoice.objects.create(
+            customer=customer, distributor=other, license_no="L"
+        )
+        third = Invoice.objects.create(
+            customer=customer, distributor=other, license_no="L"
+        )
+
+        self.assertTrue(first.invoice_no.startswith("HHC-"))
+        self.assertEqual(second.invoice_no, "ODC-0001")
+        self.assertEqual(third.invoice_no, "ODC-0002")
+
+    def test_one_series_does_not_disturb_another(self):
+        other = Distributor.objects.create(
+            name="Other", code="ODC", invoice_start_number=500
+        )
+        customer = Customer.objects.create(name="Shifa", address="x")
+
+        Invoice.objects.create(customer=customer, distributor=other, license_no="L")
+        hhc_invoice = Invoice.objects.create(
+            customer=customer, distributor=self.hhc, license_no="L"
+        )
+
+        self.assertEqual(hhc_invoice.invoice_no, "HHC-9965")
+
+    def test_only_one_distributor_can_be_default(self):
+        other = Distributor.objects.create(
+            name="Other", code="ODC", is_default=True
+        )
+
+        self.hhc.refresh_from_db()
+        self.assertFalse(self.hhc.is_default)
+        self.assertEqual(Distributor.default(), other)
+
+    def test_code_is_uppercased(self):
+        distributor = Distributor.objects.create(name="Lower", code="abc")
+
+        self.assertEqual(distributor.code, "ABC")
+
+    def test_duplicate_code_is_rejected_by_the_form(self):
+        form = DistributorForm(data={
+            "name": "Clashing", "code": "hhc", "address": "", "phone": "",
+            "license_no": "", "ntn": "", "sales_tax": "",
+            "invoice_start_number": 1, "is_active": True, "is_default": False,
+        })
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("code", form.errors)
+
+    def test_layout_page_renders(self):
+        response = self.client.get(
+            reverse("distributor_layout", args=[self.hhc.pk])
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_preview_returns_a_pdf(self):
+        if not self.hhc.layout:
+            self.hhc.layout = detect_layout(self.hhc.template.path)
+            self.hhc.save()
+
+        response = self.client.get(
+            reverse("distributor_preview", args=[self.hhc.pk])
+        )
+
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertTrue(response.content.startswith(b"%PDF"))
+
+
+class StockTests(TestCase):
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.supplier = Supplier.objects.create(name="ABC Pharma")
+        self.product = Product.objects.create(
+            code="PAN500", name="Panadol 500mg",
+            trade_price=Decimal("100.00"), reorder_level=20,
+        )
+
+    def make_batch(self, batch_no="B1", quantity=0, days=365):
+        return Batch.objects.create(
+            product=self.product, batch_no=batch_no,
+            expiry_date=timezone.localdate() + timedelta(days=days),
+            cost_price=Decimal("80.00"), quantity=quantity,
+        )
+
+    def test_receiving_adds_stock_and_logs_a_movement(self):
+        batch = self.make_batch()
+
+        receive(batch, 50, reference="GRN-1", user=self.user)
+
+        batch.refresh_from_db()
+        self.assertEqual(batch.quantity, 50)
+        self.assertEqual(batch.received_quantity, 50)
+        self.assertEqual(StockMovement.objects.get().quantity, 50)
+
+    def test_issuing_removes_stock(self):
+        batch = self.make_batch(quantity=50)
+
+        issue(batch, 20, reference="HHC-9965", user=self.user)
+
+        batch.refresh_from_db()
+        self.assertEqual(batch.quantity, 30)
+        self.assertEqual(StockMovement.objects.get().quantity, -20)
+
+    def test_overselling_is_refused(self):
+        """Shipping stock that does not exist must never be silent."""
+        batch = self.make_batch(quantity=5)
+
+        with self.assertRaises(StockError):
+            issue(batch, 6)
+
+        batch.refresh_from_db()
+        self.assertEqual(batch.quantity, 5)
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_zero_or_negative_quantities_are_refused(self):
+        batch = self.make_batch(quantity=5)
+
+        for bad in (0, -1):
+            with self.assertRaises(StockError):
+                issue(batch, bad)
+            with self.assertRaises(StockError):
+                receive(batch, bad)
+
+    def test_adjustment_records_the_difference(self):
+        batch = self.make_batch(quantity=50)
+
+        movement = adjust(batch, 45, note="Counted", user=self.user)
+
+        batch.refresh_from_db()
+        self.assertEqual(batch.quantity, 45)
+        self.assertEqual(movement.quantity, -5)
+        self.assertEqual(movement.kind, StockMovement.ADJUSTMENT)
+
+    def test_adjustment_to_the_same_quantity_is_a_no_op(self):
+        batch = self.make_batch(quantity=50)
+
+        self.assertIsNone(adjust(batch, 50))
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_expired_stock_is_not_sellable(self):
+        self.make_batch("OLD", quantity=10, days=-1)
+        self.make_batch("NEW", quantity=7, days=100)
+
+        self.assertEqual(self.product.stock_on_hand, 17)
+        self.assertEqual(self.product.sellable_stock, 7)
+
+    def test_fefo_allocates_the_soonest_expiry_first(self):
+        later = self.make_batch("LATER", quantity=50, days=500)
+        sooner = self.make_batch("SOONER", quantity=30, days=100)
+
+        picks, short = allocate_fefo(self.product, 45)
+
+        self.assertEqual([(b.batch_no, q) for b, q in picks],
+                         [("SOONER", 30), ("LATER", 15)])
+        self.assertEqual(short, 0)
+
+    def test_fefo_reports_a_shortfall(self):
+        self.make_batch("ONLY", quantity=10, days=100)
+
+        picks, short = allocate_fefo(self.product, 25)
+
+        self.assertEqual(short, 15)
+
+    def test_fefo_skips_expired_batches(self):
+        self.make_batch("EXPIRED", quantity=100, days=-5)
+
+        picks, short = allocate_fefo(self.product, 10)
+
+        self.assertEqual(picks, [])
+        self.assertEqual(short, 10)
+
+    def test_reorder_level_flags_low_stock(self):
+        self.make_batch(quantity=15, days=200)
+
+        self.assertTrue(self.product.needs_reorder)
+
+        adjust(self.make_batch("B2", quantity=0, days=200), 30)
+
+        self.assertFalse(Product.objects.get(pk=self.product.pk).needs_reorder)
+
+
+class PurchaseFlowTests(TestCase):
+
+    def setUp(self):
+        User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.supplier = Supplier.objects.create(name="ABC Pharma")
+        self.product = Product.objects.create(
+            code="PAN500", name="Panadol", trade_price=Decimal("100.00")
+        )
+
+    def receive_post(self, **overrides):
+        payload = {
+            "supplier": self.supplier.pk,
+            "reference": "SUP-1",
+            "date": timezone.localdate().isoformat(),
+            "note": "",
+            "product[]": [self.product.pk],
+            "batch_no[]": ["B-1"],
+            "expiry_date[]": [
+                (timezone.localdate() + timedelta(days=400)).isoformat()
+            ],
+            "quantity[]": ["50"],
+            "cost_price[]": ["80.00"],
+        }
+        payload.update(overrides)
+
+        return self.client.post(reverse("purchase_new"), payload)
+
+    def test_receiving_creates_batch_stock_and_movement(self):
+        response = self.receive_post()
+
+        self.assertRedirects(response, reverse("purchase_list"))
+
+        batch = Batch.objects.get()
+        self.assertEqual(batch.quantity, 50)
+        self.assertEqual(batch.batch_no, "B-1")
+        self.assertEqual(StockMovement.objects.get().kind, StockMovement.PURCHASE)
+        self.assertEqual(PurchaseItem.objects.get().quantity, 50)
+
+    def test_purchase_total_is_quantity_times_cost(self):
+        self.receive_post()
+
+        self.assertEqual(Purchase.objects.get().total, Decimal("4000.00"))
+
+    def test_receiving_the_same_batch_again_tops_it_up(self):
+        self.receive_post()
+        self.receive_post()
+
+        self.assertEqual(Batch.objects.count(), 1)
+        self.assertEqual(Batch.objects.get().quantity, 100)
+
+    def test_a_line_without_a_batch_number_is_rejected(self):
+        response = self.receive_post(**{"batch_no[]": ["  "]})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Batch.objects.count(), 0)
+        self.assertEqual(Purchase.objects.count(), 0)
+
+    def test_a_line_without_an_expiry_is_rejected(self):
+        """Pharma stock without an expiry date cannot be tracked safely."""
+        response = self.receive_post(**{"expiry_date[]": [""]})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Batch.objects.count(), 0)
+
+    def test_a_zero_quantity_line_is_rejected(self):
+        response = self.receive_post(**{"quantity[]": ["0"]})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Purchase.objects.count(), 0)
+
+    def test_nothing_is_written_when_any_line_is_invalid(self):
+        """A part-applied delivery note would silently misstate stock."""
+        response = self.receive_post(
+            **{
+                "product[]": [self.product.pk, self.product.pk],
+                "batch_no[]": ["GOOD", ""],
+                "expiry_date[]": [
+                    (timezone.localdate() + timedelta(days=400)).isoformat(),
+                    (timezone.localdate() + timedelta(days=400)).isoformat(),
+                ],
+                "quantity[]": ["10", "10"],
+                "cost_price[]": ["80", "80"],
+            }
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Batch.objects.count(), 0)
+        self.assertEqual(Purchase.objects.count(), 0)
+
+
+class InvoiceStockTests(TestCase):
+
+    def setUp(self):
+        User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.product = Product.objects.create(
+            code="PAN500", name="Panadol", trade_price=Decimal("100.00")
+        )
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1",
+            expiry_date=timezone.localdate() + timedelta(days=365),
+            cost_price=Decimal("80.00"), quantity=50,
+        )
+
+    def sell(self, quantity="10", batch_id=None):
+        return self.client.post(reverse("generate"), {
+            "distributor": Distributor.objects.get(code="HHC").pk,
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "1", "sales_tax": "2", "license_no": "L",
+            "item_name[]": ["Panadol"], "qty[]": [quantity],
+            "price[]": ["100"], "discount[]": ["10"],
+            "batch[]": [""], "expiry[]": [""],
+            "stock_batch[]": [str(self.batch.pk if batch_id is None else batch_id)],
+        })
+
+    def test_selling_from_stock_deducts_the_batch(self):
+        self.sell("10")
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 40)
+
+    def test_sale_is_recorded_in_the_movement_ledger(self):
+        self.sell("10")
+
+        movement = StockMovement.objects.get(kind=StockMovement.SALE)
+        self.assertEqual(movement.quantity, -10)
+        self.assertEqual(movement.reference, Invoice.objects.get().invoice_no)
+
+    def test_item_records_which_batch_it_came_from(self):
+        self.sell("10")
+
+        item = Item.objects.get()
+        self.assertEqual(item.product, self.product)
+        self.assertEqual(item.stock_batch, self.batch)
+        self.assertEqual(item.batch, "B-1")
+
+    def test_selling_more_than_stock_does_not_go_negative(self):
+        response = self.sell("999")
+
+        self.batch.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.batch.quantity, 50)
+        self.assertFalse(StockMovement.objects.filter(kind=StockMovement.SALE).exists())
+
+    def test_free_text_items_still_work_and_move_no_stock(self):
+        """Ad-hoc lines must not require a product record."""
+        response = self.client.post(reverse("generate"), {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "", "sales_tax": "", "license_no": "L",
+            "item_name[]": ["Something not in stock"], "qty[]": ["3"],
+            "price[]": ["50"], "discount[]": ["0"],
+            "batch[]": ["X1"], "expiry[]": ["12/27"], "stock_batch[]": [""],
+        })
+
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        item = Item.objects.get()
+        self.assertIsNone(item.product)
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_batches_endpoint_lists_sellable_stock(self):
+        Batch.objects.create(
+            product=self.product, batch_no="EXPIRED",
+            expiry_date=timezone.localdate() - timedelta(days=1), quantity=99,
+        )
+
+        data = self.client.get(
+            reverse("product_batches", args=[self.product.pk])
+        ).json()
+
+        numbers = [b["batch_no"] for b in data["batches"]]
+        self.assertIn("B-1", numbers)
+        self.assertNotIn("EXPIRED", numbers)

@@ -492,6 +492,20 @@
           💰 <span>Payments</span>
         </a>
 
+        <div class="nav-section">Purchasing &amp; Stock</div>
+        <a href="{% url 'stock_report' %}" class="{% if active == 'stock' %}active{% endif %}">
+          📦 <span>Stock on Hand</span>
+        </a>
+        <a href="{% url 'purchase_list' %}" class="{% if active == 'purchases' %}active{% endif %}">
+          🚚 <span>Purchases</span>
+        </a>
+        <a href="{% url 'product_list' %}" class="{% if active == 'products' %}active{% endif %}">
+          💊 <span>Products</span>
+        </a>
+        <a href="{% url 'supplier_list' %}" class="{% if active == 'suppliers' %}active{% endif %}">
+          🏭 <span>Suppliers</span>
+        </a>
+
         <div class="nav-section">Field Force</div>
         <a href="{% url 'team_list' %}" class="{% if active == 'team' %}active{% endif %}">
           🧑‍💼 <span>Team</span>
@@ -512,6 +526,11 @@
         </a>
         <a href="{% url 'invoice_logs' %}" class="{% if active == 'logs' %}active{% endif %}">
           📋 <span>Activity Log</span>
+        </a>
+
+        <div class="nav-section">Setup</div>
+        <a href="{% url 'distributor_list' %}" class="{% if active == 'distributors' %}active{% endif %}">
+          🏢 <span>Distributors</span>
         </a>
       </nav>
     </aside>

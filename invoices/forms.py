@@ -5,9 +5,13 @@ from django import forms
 from .models import (
     CallPoint,
     Customer,
+    Distributor,
     Employee,
     Invoice,
     Payment,
+    Product,
+    Purchase,
+    Supplier,
     Territory,
     UserRolls,
 )
@@ -236,3 +240,91 @@ class PlanGenerateForm(forms.Form):
         help_text="Any date in the target week; it snaps to that Monday.",
     )
     calls_per_day = forms.IntegerField(min_value=1, max_value=20, initial=6)
+
+
+class DistributorForm(forms.ModelForm):
+    """Register a company and read the coordinates off its invoice template."""
+
+    class Meta:
+        model = Distributor
+        fields = [
+            "name", "code", "address", "phone", "license_no", "ntn",
+            "sales_tax", "template", "invoice_start_number",
+            "is_active", "is_default",
+        ]
+        widgets = {"address": forms.Textarea(attrs={"rows": 2})}
+        help_texts = {
+            "template": "PDF of the blank invoice form. Must contain real text, "
+                        "not a scan.",
+        }
+
+    def clean_code(self):
+        code = self.cleaned_data["code"].strip().upper()
+
+        if not code.isalnum():
+            raise forms.ValidationError("Use letters and digits only, e.g. HHC.")
+
+        clash = Distributor.objects.filter(code__iexact=code)
+
+        if self.instance.pk:
+            clash = clash.exclude(pk=self.instance.pk)
+
+        if clash.exists():
+            raise forms.ValidationError("Another distributor already uses this code.")
+
+        return code
+
+    def clean_template(self):
+        template = self.cleaned_data.get("template")
+
+        if template and hasattr(template, "name"):
+            if not template.name.lower().endswith(".pdf"):
+                raise forms.ValidationError("The template must be a PDF file.")
+
+        return template
+
+
+class SupplierForm(forms.ModelForm):
+    class Meta:
+        model = Supplier
+        fields = [
+            "name", "contact_person", "phone", "email", "address", "ntn",
+            "is_active",
+        ]
+        widgets = {"address": forms.Textarea(attrs={"rows": 2})}
+
+
+class ProductForm(forms.ModelForm):
+    class Meta:
+        model = Product
+        fields = [
+            "code", "name", "pack_size", "trade_price", "reorder_level",
+            "is_active",
+        ]
+
+
+class PurchaseForm(forms.ModelForm):
+    class Meta:
+        model = Purchase
+        fields = ["supplier", "reference", "date", "note"]
+        widgets = {
+            "date": forms.DateInput(attrs={"type": "date"}),
+            "note": forms.Textarea(attrs={"rows": 2}),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.fields["supplier"].queryset = Supplier.objects.filter(is_active=True)
+        self.fields["reference"].required = False
+        self.fields["note"].required = False
+
+
+class StockAdjustmentForm(forms.Form):
+    """Correct a batch to a counted quantity."""
+
+    counted_quantity = forms.IntegerField(min_value=0)
+    note = forms.CharField(
+        max_length=255, required=False,
+        widget=forms.TextInput(attrs={"placeholder": "Reason for the adjustment"}),
+    )

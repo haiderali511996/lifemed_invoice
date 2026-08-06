@@ -200,6 +200,29 @@ scratch database now, while nothing depends on it. Backups sitting on the same
 server as the database also die with the server — download a copy periodically,
 or point `BACKUP_DIR` somewhere that is included in your host's off-site backup.
 
+## 7c. Adding a distributor
+
+Each distributor invoices on their own pre-printed form. Print positions are
+read from the PDF rather than measured by hand.
+
+1. **Distributors → New Distributor**
+2. Fill in the name and a **code** — this becomes the invoice prefix, and each
+   distributor keeps an independent number series (`HHC-9965`, `ODC-0001`).
+3. Upload their blank invoice **PDF** and save.
+4. The coordinates are read automatically; the confirmation says how many
+   fields, columns and totals were found, and how many item rows fit per page.
+5. **Open the preview** before invoicing. It prints sample data in every
+   detected position so you can confirm the mapping on the real form.
+
+The detector works by locating the labels the form already prints — "Customer
+Name", "Invoice Number", the column headings, "Net Payable" — and placing each
+value relative to its label. Two consequences worth knowing:
+
+- The PDF must contain **real text**. A scanned image has no labels to find and
+  will be rejected with a clear message.
+- If a field is not found, it is listed on the layout page and left blank on
+  the invoice. That is normal when the form has no such box.
+
 ## 8. Enable SSL (recommended)
 
 cPanel → **SSL/TLS Status** → select the subdomain → **Run AutoSSL**.

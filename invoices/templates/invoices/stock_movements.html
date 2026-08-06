@@ -1,0 +1,39 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Stock Movements{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Stock Movements</h1>
+  <a href="{% url 'stock_report' %}" class="btn btn-grey">Stock on Hand</a>
+</div>
+<div class="card">
+  <p style="color:#8595a8;font-size:13px;margin-top:0">
+    Every change to stock, newest first. This ledger is append-only; batch
+    quantities are derived from it.
+  </p>
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>When</th><th>Product</th><th>Batch</th><th>Type</th>
+        <th class="num">Change</th><th>Reference</th><th>By</th>
+      </tr></thead>
+      <tbody>
+        {% for m in movements %}
+        <tr>
+          <td>{{ m.created_at|date:"d-m-Y H:i" }}</td>
+          <td>{{ m.product.name }}</td>
+          <td>{{ m.batch.batch_no }}</td>
+          <td>{{ m.get_kind_display }}</td>
+          <td class="num" style="font-weight:bold;color:{% if m.quantity > 0 %}#1e7b24{% else %}#a71d2a{% endif %}">
+            {{ m.quantity|stringformat:"+d" }}
+          </td>
+          <td>{{ m.reference|default:"-" }}</td>
+          <td>{{ m.created_by.username|default:"-" }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" style="text-align:center;padding:26px">No stock movements yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

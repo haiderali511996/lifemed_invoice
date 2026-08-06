@@ -1,0 +1,45 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Products{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Products</h1>
+  <a href="{% url 'product_new' %}" class="btn">＋ New Product</a>
+</div>
+<div class="card">
+  <form method="GET" style="display:flex;gap:10px;margin-bottom:16px">
+    <input type="text" name="q" value="{{ query }}" placeholder="Search name or code..."
+      style="flex:1;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px" />
+    <button type="submit" class="btn">Search</button>
+    {% if query %}<a href="{% url 'product_list' %}" class="btn btn-grey">Clear</a>{% endif %}
+  </form>
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Code</th><th>Product</th><th>Pack</th><th class="num">Trade Price</th>
+        <th class="num">On Hand</th><th class="num">Sellable</th><th></th>
+      </tr></thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td>{{ row.product.code }}</td>
+          <td>
+            <strong>{{ row.product.name }}</strong>
+            {% if row.needs_reorder %}<span class="pill pill-overdue">reorder</span>{% endif %}
+            {% if not row.product.is_active %}<span class="pill">inactive</span>{% endif %}
+          </td>
+          <td>{{ row.product.pack_size|default:"-" }}</td>
+          <td class="num">{{ row.product.trade_price|floatformat:2 }}</td>
+          <td class="num">{{ row.stock }}</td>
+          <td class="num"><strong>{{ row.sellable }}</strong></td>
+          <td><a href="{% url 'product_edit' row.product.id %}" class="btn btn-sm">Edit</a></td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" style="text-align:center;padding:26px">
+          No products yet. Add products before receiving stock.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

@@ -9,28 +9,45 @@ from django.contrib import messages
 from django.db.models import Count, DecimalField, F, OuterRef, Q, Subquery, Sum
 from django.db.models.functions import Coalesce
 from django.utils import timezone
+from django.utils.dateparse import parse_date
+from django.db import transaction
 
 from datetime import timedelta
 
 from .forms import (
     CallPointForm,
     CustomerForm,
+    DistributorForm,
     EmployeeForm,
     PaymentForm,
     PlanGenerateForm,
+    ProductForm,
     ProfileForm,
+    PurchaseForm,
+    StockAdjustmentForm,
+    SupplierForm,
     TerritoryForm,
 )
+from .layout import LayoutError, describe, detect_layout
+from .stock import StockError, adjust, allocate_fefo, issue, receive
 from .planning import current_week_start, generate_plan
 from .models import (
+    Batch,
     CallPoint,
     Customer,
+    Distributor,
     Employee,
+    EXPIRY_WARNING_DAYS,
     Invoice,
     Item,
     InvoiceLog,
     Payment,
     PlanVisit,
+    Product,
+    Purchase,
+    PurchaseItem,
+    StockMovement,
+    Supplier,
     Territory,
     UserRolls,
     WeeklyPlan,
@@ -39,7 +56,7 @@ from .models import (
     is_super_admin,
 )
 
-from .pdf import render_invoice
+from .pdf import TemplateError, render_invoice
 
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
@@ -126,6 +143,14 @@ def previous_balance_breakdown(customer, current_invoice):
     }
 
 
+def _stock_batch(raw_id):
+    """The Batch a row was picked from, if any. Free-text rows return None."""
+    if not raw_id:
+        return None
+
+    return Batch.objects.select_related("product").filter(pk=raw_id).first()
+
+
 def post_column(request, field, length):
     """Read one item column, padded to `length` so a short list can't IndexError.
 
@@ -190,7 +215,10 @@ def index(request):
         request,
         "invoices/index.html",
         {
-            "customers": customers
+            "customers": customers,
+            "distributors": Distributor.objects.filter(is_active=True),
+            "default_distributor": Distributor.default(),
+            "products": Product.objects.filter(is_active=True),
         }
     )
 
@@ -301,6 +329,13 @@ def generate_invoice(request):
 
     if request.method == "POST":
 
+        distributor = (
+            Distributor.objects.filter(
+                pk=request.POST.get("distributor"), is_active=True
+            ).first()
+            or Distributor.default()
+        )
+
         license_no = clip(request.POST.get("license_no", ""), 100)
 
         customer_name = clip(request.POST.get("customer_name", ""), 255).strip()
@@ -330,6 +365,7 @@ def generate_invoice(request):
 
         invoice = Invoice.objects.create(
             customer=customer,
+            distributor=distributor,
             license_no=license_no
         )
 
@@ -341,6 +377,7 @@ def generate_invoice(request):
         discounts = post_column(request, "discount[]", row_count)
         batches = post_column(request, "batch[]", row_count)
         expiries = post_column(request, "expiry[]", row_count)
+        batch_ids = post_column(request, "stock_batch[]", row_count)
 
         total_gross = Decimal("0")
         total_net = Decimal("0")
@@ -382,15 +419,39 @@ def generate_invoice(request):
 
             total_net += amount
 
+            stock_batch = _stock_batch(batch_ids[i])
+
             item = Item.objects.create(
                 invoice=invoice,
                 name=clip(names[i], 255),
                 qty=safe_int(qty),
-                batch=clip(batches[i], 100),
+                batch=clip(batches[i], 100) or (
+                    stock_batch.batch_no if stock_batch else ""
+                ),
                 expiry=clip(expiries[i], 20),
                 price=price,
-                discount=disc
+                discount=disc,
+                product=stock_batch.product if stock_batch else None,
+                stock_batch=stock_batch,
             )
+
+            if stock_batch is not None:
+                try:
+                    issue(
+                        stock_batch,
+                        item.qty,
+                        reference=invoice.invoice_no,
+                        user=request.user,
+                    )
+
+                except StockError as error:
+                    # Selling stock that is not there would silently corrupt
+                    # the ledger, so say so and leave the line unlinked.
+                    messages.error(request, str(error))
+
+                    Item.objects.filter(pk=item.pk).update(
+                        product=None, stock_batch=None
+                    )
 
             pdf_rows.append({
                 "name": item.name,
@@ -425,6 +486,7 @@ def generate_invoice(request):
                 "license_no": invoice.license_no,
                 "ntn": customer.ntn or "",
                 "sales_tax": customer.sales_tax or "",
+                "area": customer.territory.city if customer.territory else "",
             },
             rows=pdf_rows,
             totals={
@@ -432,6 +494,7 @@ def generate_invoice(request):
                 "discount": total_discount,
                 "net": total_net,
             },
+            distributor=distributor,
         )
 
         # Deliberately not FileResponse: it hands the object to the server's
@@ -1054,3 +1117,508 @@ def territory_report(request):
             "total_balance": sum((r["balance"] for r in rows), ZERO),
         }
     )
+
+
+# ---------------------------------------------------------------- DISTRIBUTORS
+
+@login_required
+def distributor_list(request):
+    distributors = Distributor.objects.annotate(
+        invoice_count=Count("invoices")
+    )
+
+    return render(
+        request,
+        "invoices/distributor_list.html",
+        {"distributors": distributors}
+    )
+
+
+@login_required
+def distributor_edit(request, distributor_id=None):
+    distributor = (
+        get_object_or_404(Distributor, pk=distributor_id) if distributor_id else None
+    )
+
+    previous_template = distributor.template.name if distributor else None
+
+    if request.method == "POST":
+        form = DistributorForm(request.POST, request.FILES, instance=distributor)
+
+        if form.is_valid():
+            saved = form.save()
+
+            # Re-read coordinates whenever the form itself changes.
+            if saved.template and saved.template.name != previous_template:
+                _detect_and_store_layout(request, saved)
+
+            messages.success(request, f"Saved {saved.name}.")
+
+            return redirect("distributor_list")
+
+    else:
+        form = DistributorForm(instance=distributor)
+
+    return render(
+        request,
+        "invoices/distributor_form.html",
+        {
+            "form": form,
+            "distributor": distributor,
+            "heading": "Edit Distributor" if distributor else "New Distributor",
+        }
+    )
+
+
+def _detect_and_store_layout(request, distributor):
+    """Read the coordinate map off a freshly uploaded template."""
+    try:
+        distributor.layout = detect_layout(distributor.template.path)
+        distributor.save(update_fields=["layout"])
+
+        summary = describe(distributor.layout)
+
+        messages.success(
+            request,
+            f"Read {len(summary['fields'])} field(s), "
+            f"{len(summary['columns'])} column(s) and "
+            f"{len(summary['totals'])} total(s) from the template; "
+            f"{summary['rows_per_page']} item row(s) fit per page.",
+        )
+
+        if summary["missing"]:
+            messages.error(
+                request,
+                "Could not locate: " + ", ".join(summary["missing"])
+                + ". Those fields will be left blank - check the template "
+                  "labels, or set the coordinates by hand.",
+            )
+
+    except LayoutError as error:
+        distributor.layout = None
+        distributor.save(update_fields=["layout"])
+
+        messages.error(request, f"Could not read the template: {error}")
+
+
+@login_required
+def distributor_detect(request, distributor_id):
+    """Re-run detection, for a template that was replaced on disk."""
+    distributor = get_object_or_404(Distributor, pk=distributor_id)
+
+    if not distributor.template:
+        messages.error(request, "Upload a template first.")
+    else:
+        _detect_and_store_layout(request, distributor)
+
+    return redirect("distributor_layout", distributor_id=distributor.pk)
+
+
+@login_required
+def distributor_layout(request, distributor_id):
+    """Show what was detected, so a human can sanity-check it."""
+    distributor = get_object_or_404(Distributor, pk=distributor_id)
+
+    return render(
+        request,
+        "invoices/distributor_layout.html",
+        {
+            "distributor": distributor,
+            "summary": describe(distributor.layout) if distributor.has_layout else None,
+        }
+    )
+
+
+@login_required
+def distributor_preview(request, distributor_id):
+    """A sample invoice on this distributor's form, to verify the mapping."""
+    distributor = get_object_or_404(Distributor, pk=distributor_id)
+
+    sample_rows = [
+        {
+            "name": f"Sample Product {i + 1}", "qty": 10, "batch": f"B-{i + 1}00",
+            "expiry": "12/27", "price": Decimal("250.00"),
+            "discount": Decimal("10.00"), "amount": Decimal("2250.00"),
+        }
+        for i in range(4)
+    ]
+
+    try:
+        pdf_bytes = render_invoice(
+            header={
+                "customer_name": "SAMPLE PHARMACY",
+                "address": "123 Sample Road, Lahore",
+                "invoice_no": f"{distributor.code}-PREVIEW",
+                "date": timezone.localdate().strftime("%d/%m/%Y"),
+                "license_no": "LIC-SAMPLE-001",
+                "ntn": "1234567-8",
+                "sales_tax": "ST-SAMPLE",
+                "area": "LAHORE",
+            },
+            rows=sample_rows,
+            totals={
+                "gross": Decimal("10000.00"),
+                "discount": Decimal("1000.00"),
+                "net": Decimal("9000.00"),
+            },
+            distributor=distributor,
+        )
+
+    except (TemplateError, LayoutError) as error:
+        messages.error(request, str(error))
+
+        return redirect("distributor_layout", distributor_id=distributor.pk)
+
+    response = HttpResponse(pdf_bytes, content_type="application/pdf")
+    response["Content-Disposition"] = 'inline; filename="layout-preview.pdf"'
+
+    return response
+
+
+# ---------------------------------------------------------------- INVENTORY
+
+@login_required
+def product_list(request):
+    query = request.GET.get("q", "").strip()
+
+    products = Product.objects.all()
+
+    if query:
+        products = products.filter(
+            Q(name__icontains=query) | Q(code__icontains=query)
+        )
+
+    rows = [
+        {
+            "product": product,
+            "stock": product.stock_on_hand,
+            "sellable": product.sellable_stock,
+            "needs_reorder": product.needs_reorder,
+        }
+        for product in products
+    ]
+
+    return render(
+        request,
+        "invoices/product_list.html",
+        {"rows": rows, "query": query}
+    )
+
+
+@login_required
+def product_edit(request, product_id=None):
+    product = get_object_or_404(Product, pk=product_id) if product_id else None
+
+    if request.method == "POST":
+        form = ProductForm(request.POST, instance=product)
+
+        if form.is_valid():
+            saved = form.save()
+            messages.success(request, f"Saved {saved.name}.")
+
+            return redirect("product_list")
+
+    else:
+        form = ProductForm(instance=product)
+
+    return render(
+        request,
+        "invoices/simple_form.html",
+        {
+            "form": form,
+            "heading": "Edit Product" if product else "New Product",
+            "cancel_url": reverse("product_list"),
+        }
+    )
+
+
+@login_required
+def supplier_list(request):
+    return render(
+        request,
+        "invoices/supplier_list.html",
+        {"suppliers": Supplier.objects.annotate(purchase_count=Count("purchases"))}
+    )
+
+
+@login_required
+def supplier_edit(request, supplier_id=None):
+    supplier = get_object_or_404(Supplier, pk=supplier_id) if supplier_id else None
+
+    if request.method == "POST":
+        form = SupplierForm(request.POST, instance=supplier)
+
+        if form.is_valid():
+            saved = form.save()
+            messages.success(request, f"Saved {saved.name}.")
+
+            return redirect("supplier_list")
+
+    else:
+        form = SupplierForm(instance=supplier)
+
+    return render(
+        request,
+        "invoices/simple_form.html",
+        {
+            "form": form,
+            "heading": "Edit Supplier" if supplier else "New Supplier",
+            "cancel_url": reverse("supplier_list"),
+        }
+    )
+
+
+@login_required
+def purchase_list(request):
+    purchases = Purchase.objects.select_related("supplier").prefetch_related("items")
+
+    return render(
+        request,
+        "invoices/purchase_list.html",
+        {"purchases": purchases}
+    )
+
+
+@login_required
+def purchase_create(request):
+    """Receive goods: creates or tops up batches and moves stock in."""
+    if request.method == "POST":
+        form = PurchaseForm(request.POST)
+
+        product_ids = request.POST.getlist("product[]")
+        count = len(product_ids)
+
+        batch_nos = post_column(request, "batch_no[]", count)
+        expiries = post_column(request, "expiry_date[]", count)
+        quantities = post_column(request, "quantity[]", count)
+        costs = post_column(request, "cost_price[]", count)
+
+        lines, errors = _clean_purchase_lines(
+            product_ids, batch_nos, expiries, quantities, costs
+        )
+
+        if form.is_valid() and lines and not errors:
+            purchase = form.save(commit=False)
+            purchase.created_by = request.user
+            purchase.save()
+
+            _receive_lines(purchase, lines, request.user)
+
+            messages.success(
+                request,
+                f"Received {len(lines)} line(s) from {purchase.supplier.name}.",
+            )
+
+            return redirect("purchase_list")
+
+        for error in errors:
+            messages.error(request, error)
+
+        if not lines and not errors:
+            messages.error(request, "Add at least one product line.")
+
+    else:
+        form = PurchaseForm(initial={"date": timezone.localdate()})
+
+    return render(
+        request,
+        "invoices/purchase_form.html",
+        {
+            "form": form,
+            "products": Product.objects.filter(is_active=True),
+        }
+    )
+
+
+def _clean_purchase_lines(product_ids, batch_nos, expiries, quantities, costs):
+    """Validate the posted rows before anything is written."""
+    lines = []
+    errors = []
+
+    for index, raw_id in enumerate(product_ids):
+        if not raw_id:
+            continue
+
+        product = Product.objects.filter(pk=raw_id).first()
+
+        if product is None:
+            errors.append(f"Row {index + 1}: unknown product.")
+            continue
+
+        batch_no = clip(batch_nos[index], 100).strip()
+
+        if not batch_no:
+            errors.append(f"Row {index + 1}: batch number is required.")
+            continue
+
+        expiry = parse_date(expiries[index])
+
+        if expiry is None:
+            errors.append(f"Row {index + 1}: a valid expiry date is required.")
+            continue
+
+        quantity = safe_int(quantities[index])
+
+        if quantity <= 0:
+            errors.append(f"Row {index + 1}: quantity must be at least 1.")
+            continue
+
+        lines.append({
+            "product": product,
+            "batch_no": batch_no,
+            "expiry": expiry,
+            "quantity": quantity,
+            "cost": safe_decimal(costs[index], max_value=MAX_PRICE),
+        })
+
+    return lines, errors
+
+
+@transaction.atomic
+def _receive_lines(purchase, lines, user):
+    for line in lines:
+        batch, created = Batch.objects.get_or_create(
+            product=line["product"],
+            batch_no=line["batch_no"],
+            defaults={
+                "expiry_date": line["expiry"],
+                "cost_price": line["cost"],
+            },
+        )
+
+        if not created and batch.expiry_date != line["expiry"]:
+            # Same batch number, different expiry: trust the delivery note.
+            batch.expiry_date = line["expiry"]
+            batch.cost_price = line["cost"]
+            batch.save(update_fields=["expiry_date", "cost_price"])
+
+        receive(
+            batch,
+            line["quantity"],
+            reference=purchase.reference or f"GRN-{purchase.pk}",
+            user=user,
+        )
+
+        PurchaseItem.objects.create(
+            purchase=purchase,
+            product=line["product"],
+            batch=batch,
+            quantity=line["quantity"],
+            cost_price=line["cost"],
+        )
+
+
+@login_required
+def stock_report(request):
+    """Everything on hand, with expiry and reorder warnings."""
+    batches = (
+        Batch.objects.select_related("product")
+        .filter(quantity__gt=0)
+        .order_by("expiry_date")
+    )
+
+    today = timezone.localdate()
+    soon = today + timedelta(days=EXPIRY_WARNING_DAYS)
+
+    expired = [b for b in batches if b.expiry_date < today]
+    expiring = [b for b in batches if today <= b.expiry_date <= soon]
+
+    reorder = [p for p in Product.objects.filter(is_active=True) if p.needs_reorder]
+
+    value = sum((b.cost_price * b.quantity for b in batches), ZERO)
+
+    return render(
+        request,
+        "invoices/stock_report.html",
+        {
+            "batches": batches,
+            "expired": expired,
+            "expiring": expiring,
+            "reorder": reorder,
+            "stock_value": value,
+            "expiry_days": EXPIRY_WARNING_DAYS,
+        }
+    )
+
+
+@login_required
+def stock_movements(request):
+    movements = StockMovement.objects.select_related(
+        "product", "batch", "created_by"
+    )[:400]
+
+    return render(
+        request,
+        "invoices/stock_movements.html",
+        {"movements": movements}
+    )
+
+
+@login_required
+def batch_adjust(request, batch_id):
+    batch = get_object_or_404(Batch.objects.select_related("product"), pk=batch_id)
+
+    if request.method == "POST":
+        form = StockAdjustmentForm(request.POST)
+
+        if form.is_valid():
+            try:
+                movement = adjust(
+                    batch,
+                    form.cleaned_data["counted_quantity"],
+                    note=form.cleaned_data["note"],
+                    user=request.user,
+                )
+
+            except StockError as error:
+                messages.error(request, str(error))
+
+            else:
+                if movement is None:
+                    messages.success(request, "Counted quantity already matched.")
+                else:
+                    messages.success(
+                        request,
+                        f"Adjusted {batch.product.name} / {batch.batch_no} "
+                        f"by {movement.quantity:+d}.",
+                    )
+
+                return redirect("stock_report")
+
+    else:
+        form = StockAdjustmentForm(initial={"counted_quantity": batch.quantity})
+
+    return render(
+        request,
+        "invoices/simple_form.html",
+        {
+            "form": form,
+            "heading": f"Adjust {batch.product.name} / {batch.batch_no}",
+            "cancel_url": reverse("stock_report"),
+        }
+    )
+
+
+@login_required
+def product_batches(request, product_id):
+    """Sellable batches for a product, for the invoice form's row picker."""
+    product = get_object_or_404(Product, pk=product_id)
+
+    batches = (
+        product.batches.filter(quantity__gt=0, expiry_date__gte=timezone.localdate())
+        .order_by("expiry_date")
+    )
+
+    return JsonResponse({
+        "product": product.name,
+        "trade_price": f"{product.trade_price:.2f}",
+        "batches": [
+            {
+                "id": batch.pk,
+                "batch_no": batch.batch_no,
+                "expiry": batch.expiry_date.strftime("%m/%y"),
+                "quantity": batch.quantity,
+            }
+            for batch in batches
+        ],
+    })
