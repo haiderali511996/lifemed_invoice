@@ -1,204 +1,70 @@
-{% load static %}
-<!DOCTYPE html>
-<html>
-  <head>
-    <title>LifeMed Pharma - Invoice Logs</title>
+{% extends "invoices/base.html" %}
 
-    <link rel="icon" href="{% static 'invoices/favicon-32.png' %}" sizes="32x32" />
-    <link rel="icon" href="{% static 'invoices/favicon-64.png' %}" sizes="64x64" />
-    <link rel="apple-touch-icon" href="{% static 'invoices/apple-touch-icon.png' %}" />
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
-    <style>
-      body {
-        font-family: "Segoe UI", sans-serif;
-        background: #f8f9fa;
-        padding: 20px;
-      }
-      .container {
-        background: white;
-        padding: 25px;
-        border-radius: 12px;
-        max-width: 1200px;
-        margin: auto;
-        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
-      }
-      .top-bar {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        flex-wrap: wrap;
-        gap: 12px;
-        margin-bottom: 20px;
-      }
+{% block title %}LifeMed Pharma - Activity Log{% endblock %}
 
-      .brand {
-        display: flex;
-        align-items: center;
-        gap: 14px;
-      }
+{% block content %}
+<div class="page-head">
+  <h1>📋 Invoice History</h1>
+  <button onclick="downloadPDF()" class="btn no-print">
+    Download Report (PDF)
+  </button>
+</div>
 
-      .brand h2 {
-        margin: 0;
-        padding-left: 14px;
-        border-left: 3px solid #0065ad;
-        font-size: 20px;
-        color: #14304d;
-      }
+<div class="card" id="report">
+  <div style="overflow-x: auto">
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>User Name</th>
+          <th>Invoice #</th>
+          <th>Customer Name</th>
+          <th class="num">Amount (Net)</th>
+          <th>Date</th>
+          <th>Time</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for log in logs %}
+        <tr>
+          <td>#{{ log.id }}</td>
+          <td><strong>{{ log.user.username }}</strong></td>
+          <td>{{ log.invoice.invoice_no }}</td>
+          <td>{{ log.customer_name }}</td>
+          <td class="num" style="color: #1e7b24; font-weight: bold">
+            {{ log.amount|floatformat:2 }}
+          </td>
+          <td>{{ log.timestamp|date:"d-m-Y" }}</td>
+          <td>{{ log.timestamp|date:"H:i:s" }}</td>
+        </tr>
+        {% empty %}
+        <tr>
+          <td colspan="7" style="text-align: center; padding: 26px">
+            No records found.
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
 
-      .brand-logo {
-        height: 46px;
-        width: auto;
-      }
+{% block extra_scripts %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<script>
+  function downloadPDF() {
+    const element = document.getElementById("report");
 
-      table {
-        width: 100%;
-        border-collapse: collapse;
-        margin-top: 15px;
-      }
-      th {
-        background: #212529;
-        color: white;
-        padding: 12px;
-        text-align: left;
-        font-size: 13px;
-      }
-      td {
-        padding: 10px;
-        border-bottom: 1px solid #dee2e6;
-        font-size: 14px;
-        color: #333;
-      }
+    const options = {
+      margin: 0.3,
+      filename: "invoice_logs_report.pdf",
+      image: { type: "jpeg", quality: 1 },
+      html2canvas: { scale: 2 },
+      jsPDF: { unit: "in", format: "a4", orientation: "portrait" },
+    };
 
-      .badge-id {
-        background: #f1f1f1;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-weight: bold;
-      }
-      .amount-text {
-        font-weight: bold;
-        color: #28a745;
-      }
-      .btn-print {
-        background: #007bff;
-        color: white;
-        padding: 8px 15px;
-        border-radius: 5px;
-        border: none;
-        cursor: pointer;
-      }
-
-      .top-bar-actions {
-        display: flex;
-        gap: 10px;
-        align-items: center;
-      }
-
-      .btn-admin {
-        text-decoration: none;
-        color: white;
-        background: #6c757d;
-        padding: 8px 15px;
-        border-radius: 5px;
-        font-size: 14px;
-      }
-
-      .logout {
-        text-decoration: none;
-        color: white;
-        background: #dc3545;
-        padding: 8px 15px;
-        border-radius: 5px;
-        font-size: 14px;
-      }
-
-      @media print {
-        .no-print {
-          display: none;
-        }
-        .container {
-          box-shadow: none;
-          width: 100%;
-          max-width: 100%;
-        }
-      }
-    </style>
-  </head>
-  <body>
-    <div class="container">
-      <div class="top-bar">
-        <div class="brand">
-          <img
-            src="{% static 'invoices/lifemed-logo.png' %}"
-            alt="LifeMed Pharma"
-            class="brand-logo"
-          />
-          <h2>📋 Invoice History</h2>
-        </div>
-        <div class="no-print top-bar-actions">
-          <span style="color: #666; margin-right: 5px">
-            {{ request.user.username }}
-          </span>
-          {% if request.user.is_staff %}
-          <a href="/admin/" class="btn-admin">⚙️ Admin</a>
-          {% endif %}
-          <button onclick="downloadPDF()" class="btn-print">
-            Download Report (PDF)
-          </button>
-          <a href="{% url 'logout' %}" class="logout">Logout</a>
-        </div>
-      </div>
-
-      <table>
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>User Name</th>
-            <th>Invoice #</th>
-            <th>Customer Name</th>
-            <th>Amount (Net)</th>
-            <th>Date</th>
-            <th>Time</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for log in logs %}
-          <tr>
-            <td><span class="badge-id">#{{ log.id }}</span></td>
-            <td><strong>{{ log.user.username }}</strong></td>
-            <td>{{ log.invoice.invoice_no }}</td>
-            <td>{{ log.customer_name }}</td>
-            <td class="amount-text">{{ log.amount }}</td>
-            <td>{{ log.timestamp|date:"d-m-Y" }}</td>
-            <td>{{ log.timestamp|date:"H:i:s" }}</td>
-          </tr>
-          {% empty %}
-          <tr>
-            <td colspan="7" style="text-align: center">No records found.</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-
-    <script>
-      function downloadPDF() {
-        const element = document.querySelector(".container");
-
-        const options = {
-          margin: 0.3,
-          filename: "invoice_logs_report.pdf",
-          image: { type: "jpeg", quality: 1 },
-          html2canvas: { scale: 2 },
-          jsPDF: {
-            unit: "in",
-            format: "a4",
-            orientation: "portrait",
-          },
-        };
-
-        html2pdf().set(options).from(element).save();
-      }
-    </script>
-  </body>
-</html>
+    html2pdf().set(options).from(element).save();
+  }
+</script>
+{% endblock %}

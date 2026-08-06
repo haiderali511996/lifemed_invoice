@@ -1,9 +1,18 @@
 import os
+from datetime import timedelta
+from decimal import Decimal
 
 from django.db import models, transaction, IntegrityError
 from django.contrib.auth.models import User
+from django.db.models import Sum
 from django.db.models.signals import post_save
 from django.dispatch import receiver
+from django.utils import timezone
+
+# An invoice still unpaid after this many days is flagged as overdue.
+OVERDUE_DAYS = 30
+
+ZERO = Decimal("0.00")
 
 INVOICE_PREFIX = "HHC"
 
@@ -37,6 +46,28 @@ class Customer(models.Model):
     def __str__(self):
         return self.name
 
+    @property
+    def total_invoiced(self):
+        return self.invoice_set.aggregate(t=Sum("total"))["t"] or ZERO
+
+    @property
+    def total_paid(self):
+        return self.payments.aggregate(t=Sum("amount"))["t"] or ZERO
+
+    @property
+    def outstanding_balance(self):
+        """What the customer owes across every invoice, less everything paid."""
+        return self.total_invoiced - self.total_paid
+
+    def overdue_invoices(self):
+        cutoff = timezone.now().date() - timedelta(days=OVERDUE_DAYS)
+
+        return [
+            invoice
+            for invoice in self.invoice_set.filter(date__lte=cutoff)
+            if invoice.balance > ZERO
+        ]
+
 
 class Invoice(models.Model):
     customer = models.ForeignKey(Customer, on_delete=models.CASCADE)
@@ -46,6 +77,36 @@ class Invoice(models.Model):
 
     date = models.DateField(auto_now_add=True)
     license_no = models.CharField(max_length=100)
+
+    # Net payable, stored so ledgers and balances never have to recompute it
+    # from line items (and stay correct if pricing rules ever change).
+    total = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+
+    class Meta:
+        ordering = ["-id"]
+
+    def __str__(self):
+        return self.invoice_no
+
+    @property
+    def amount_paid(self):
+        return self.payments.aggregate(t=Sum("amount"))["t"] or ZERO
+
+    @property
+    def balance(self):
+        return self.total - self.amount_paid
+
+    @property
+    def is_paid(self):
+        return self.balance <= ZERO
+
+    @property
+    def days_outstanding(self):
+        return (timezone.now().date() - self.date).days
+
+    @property
+    def is_overdue(self):
+        return not self.is_paid and self.days_outstanding >= OVERDUE_DAYS
 
     @classmethod
     def next_invoice_no(cls):
@@ -98,6 +159,50 @@ class Item(models.Model):
     discount = models.DecimalField(max_digits=5, decimal_places=2)
 
 
+class Payment(models.Model):
+    """Money received from a customer.
+
+    A payment may be allocated to one invoice or left against the account, so
+    lump sums and part payments both work without forcing a split up front.
+    """
+
+    METHOD_CHOICES = (
+        ("cash", "Cash"),
+        ("cheque", "Cheque"),
+        ("bank", "Bank Transfer"),
+        ("other", "Other"),
+    )
+
+    customer = models.ForeignKey(
+        Customer, on_delete=models.CASCADE, related_name="payments"
+    )
+    invoice = models.ForeignKey(
+        Invoice,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="payments",
+        help_text="Leave blank to credit the account rather than one invoice.",
+    )
+
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    method = models.CharField(max_length=20, choices=METHOD_CHOICES, default="cash")
+    reference = models.CharField(
+        max_length=100, blank=True, help_text="Cheque number, transaction ID, etc."
+    )
+    paid_on = models.DateField(default=timezone.localdate)
+    note = models.TextField(blank=True)
+
+    recorded_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    recorded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-paid_on", "-id"]
+
+    def __str__(self):
+        return f"{self.customer.name} - {self.amount}"
+
+
 # 1. User Role Model
 class UserRolls(models.Model):
     ROLE_SUPER_ADMIN = 'super_admin'
@@ -110,8 +215,26 @@ class UserRolls(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=ROLE_MANAGER)
 
+    avatar = models.ImageField(upload_to="avatars/", blank=True, null=True)
+    phone = models.CharField(max_length=50, blank=True)
+
     def __str__(self):
         return f"{self.user.username} - {self.role}"
+
+    @property
+    def display_name(self):
+        return self.user.get_full_name() or self.user.username
+
+    @property
+    def initials(self):
+        """Fallback avatar when no picture has been uploaded."""
+        name = self.user.get_full_name().strip()
+
+        if name:
+            parts = name.split()
+            return (parts[0][0] + (parts[-1][0] if len(parts) > 1 else "")).upper()
+
+        return self.user.username[:2].upper()
 
 
 def is_super_admin(user):

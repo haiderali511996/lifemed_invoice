@@ -1,0 +1,147 @@
+{% extends "invoices/base.html" %}
+
+{% block title %}LifeMed Pharma - Profile Settings{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Profile Settings</h1>
+</div>
+
+<div class="card" style="max-width: 620px">
+  <div class="profile-head">
+    {% if profile.avatar %}
+    <img src="{{ profile.avatar.url }}" alt="" class="avatar-lg" />
+    {% else %}
+    <span class="avatar-lg placeholder">{{ profile.initials }}</span>
+    {% endif %}
+
+    <div>
+      <strong style="font-size: 17px">{{ profile.display_name }}</strong><br />
+      <span style="color: #8595a8; font-size: 13px">
+        {{ request.user.username }} &middot; {{ profile.get_role_display }}
+      </span>
+    </div>
+  </div>
+
+  <form method="POST" enctype="multipart/form-data" novalidate>
+    {% csrf_token %}
+
+    <div class="row">
+      <div class="field">
+        <label for="{{ form.first_name.id_for_label }}">First Name</label>
+        {{ form.first_name }} {{ form.first_name.errors }}
+      </div>
+
+      <div class="field">
+        <label for="{{ form.last_name.id_for_label }}">Last Name</label>
+        {{ form.last_name }} {{ form.last_name.errors }}
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="{{ form.email.id_for_label }}">Email</label>
+      {{ form.email }} {{ form.email.errors }}
+    </div>
+
+    <div class="field">
+      <label for="{{ form.phone.id_for_label }}">Phone</label>
+      {{ form.phone }} {{ form.phone.errors }}
+    </div>
+
+    <div class="field">
+      <label for="{{ form.avatar.id_for_label }}">Profile Picture</label>
+      {{ form.avatar }} {{ form.avatar.errors }}
+      <p class="help">
+        Shown in the top-right corner. Your initials are used if none is set.
+      </p>
+    </div>
+
+    <div style="display: flex; gap: 10px; margin-top: 20px">
+      <button type="submit" class="btn">Save Changes</button>
+      <a href="{% url 'dashboard' %}" class="btn btn-grey">Cancel</a>
+    </div>
+  </form>
+
+  <hr style="margin: 26px 0; border: none; border-top: 1px solid #eef2f6" />
+
+  <h3 style="margin: 0 0 8px">Password</h3>
+  <p style="color: #8595a8; font-size: 13px; margin-top: 0">
+    Passwords are changed from the Django admin, or ask an administrator to
+    reset yours.
+  </p>
+  {% if request.user.is_staff %}
+  <a href="/admin/password_change/" class="btn btn-grey">Change Password</a>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .profile-head {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding-bottom: 18px;
+    margin-bottom: 20px;
+    border-bottom: 1px solid #eef2f6;
+  }
+
+  .avatar-lg {
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    object-fit: cover;
+  }
+
+  .avatar-lg.placeholder {
+    background: var(--brand);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 25px;
+    font-weight: bold;
+  }
+
+  .field {
+    margin-bottom: 15px;
+  }
+
+  .field label {
+    display: block;
+    margin-bottom: 5px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #55657a;
+  }
+
+  .field input[type="text"],
+  .field input[type="email"] {
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid #dbe2ea;
+    border-radius: 7px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+
+  .help {
+    font-size: 12px;
+    color: #8595a8;
+    margin: 5px 0 0;
+  }
+
+  .errorlist {
+    color: #dc3545;
+    font-size: 12px;
+    margin: 5px 0 0;
+    padding-left: 16px;
+  }
+</style>
+{% endblock %}

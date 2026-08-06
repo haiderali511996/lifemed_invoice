@@ -1,0 +1,104 @@
+{% extends "invoices/base.html" %}
+
+{% block title %}LifeMed Pharma - Search{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Search Results</h1>
+  {% if query %}
+  <span style="color: #8595a8">
+    {{ result_count }} result(s) for "<strong>{{ query }}</strong>"
+  </span>
+  {% endif %}
+</div>
+
+{% if not query %}
+<div class="card">
+  <p class="muted" style="margin: 0">
+    Use the search box above to find a customer by name, pharmacy address,
+    licence number, contact person or phone - or an invoice by its number.
+  </p>
+</div>
+{% else %}
+
+<div class="card" style="margin-bottom: 18px">
+  <h3 style="margin-top: 0">Customers ({{ customers|length }})</h3>
+
+  <div style="overflow-x: auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Customer</th>
+          <th>Address</th>
+          <th>Licence</th>
+          <th>Contact</th>
+          <th class="num">Balance</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for customer in customers %}
+        <tr>
+          <td><strong>{{ customer.name }}</strong></td>
+          <td>{{ customer.address|default:"-"|truncatechars:48 }}</td>
+          <td>{{ customer.license_no|default:"-" }}</td>
+          <td>
+            {{ customer.contact_person|default:"-" }}
+            {% if customer.contact_number %}<br /><span style="font-size: 12px; color: #8595a8">{{ customer.contact_number }}</span>{% endif %}
+          </td>
+          <td class="num">
+            {% with bal=customer.invoiced|add:0 %}
+            <strong>{{ customer.outstanding_balance|floatformat:2 }}</strong>
+            {% endwith %}
+          </td>
+          <td style="white-space: nowrap">
+            <a href="{% url 'customer_ledger' customer.id %}" class="btn btn-sm">Ledger</a>
+            <a href="{% url 'customer_edit' customer.id %}" class="btn btn-sm btn-grey">Edit</a>
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6" style="text-align: center; padding: 20px">No matching customers.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top: 0">Invoices ({{ invoices|length }})</h3>
+
+  <div style="overflow-x: auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Invoice #</th>
+          <th>Customer</th>
+          <th>Date</th>
+          <th class="num">Total</th>
+          <th class="num">Balance</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for invoice in invoices %}
+        <tr>
+          <td><strong>{{ invoice.invoice_no }}</strong></td>
+          <td>{{ invoice.customer.name }}</td>
+          <td>{{ invoice.date|date:"d-m-Y" }}</td>
+          <td class="num">{{ invoice.total|floatformat:2 }}</td>
+          <td class="num">{{ invoice.balance|floatformat:2 }}</td>
+          <td>
+            {% if invoice.is_paid %}<span class="pill pill-paid">paid</span>
+            {% elif invoice.is_overdue %}<span class="pill pill-overdue">overdue</span>
+            {% else %}<span class="pill pill-due">due</span>{% endif %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6" style="text-align: center; padding: 20px">No matching invoices.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

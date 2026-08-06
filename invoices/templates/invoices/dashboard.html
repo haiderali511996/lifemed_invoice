@@ -1,0 +1,137 @@
+{% extends "invoices/base.html" %}
+
+{% block title %}LifeMed Pharma - Dashboard{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Dashboard</h1>
+  {% if not is_super_admin %}
+  <a href="{% url 'index' %}" class="btn">＋ New Invoice</a>
+  {% endif %}
+</div>
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Total Invoiced</span>
+    <span class="stat-value">{{ total_invoiced|floatformat:2 }}</span>
+    <span class="stat-sub">{{ invoice_count }} invoice(s)</span>
+  </div>
+
+  <div class="card stat">
+    <span class="stat-label">Received</span>
+    <span class="stat-value" style="color: #1e7b24">
+      {{ total_received|floatformat:2 }}
+    </span>
+    <span class="stat-sub">All payments</span>
+  </div>
+
+  <div class="card stat">
+    <span class="stat-label">Outstanding</span>
+    <span class="stat-value" style="color: #a71d2a">
+      {{ total_outstanding|floatformat:2 }}
+    </span>
+    <span class="stat-sub">{{ customer_count }} customer(s)</span>
+  </div>
+
+  <div class="card stat">
+    <span class="stat-label">Overdue ({{ overdue_days }}+ days)</span>
+    <span class="stat-value" style="color: #a71d2a">
+      {{ overdue_total|floatformat:2 }}
+    </span>
+    <span class="stat-sub">{{ overdue_invoices|length }} invoice(s)</span>
+  </div>
+</div>
+
+{% if overdue_invoices %}
+<div class="alert alert-warn">
+  <strong>⚠️ {{ overdue_invoices|length }} invoice(s) unpaid for more than
+  {{ overdue_days }} days</strong>, totalling
+  {{ overdue_total|floatformat:2 }}. Follow these up first.
+</div>
+
+<div class="card">
+  <h3 style="margin-top: 0">Overdue Invoices</h3>
+
+  <div style="overflow-x: auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Invoice #</th>
+          <th>Customer</th>
+          <th>Date</th>
+          <th class="num">Total</th>
+          <th class="num">Balance</th>
+          <th class="num">Days</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for invoice in overdue_invoices %}
+        <tr>
+          <td><strong>{{ invoice.invoice_no }}</strong></td>
+          <td>{{ invoice.customer.name }}</td>
+          <td>{{ invoice.date|date:"d-m-Y" }}</td>
+          <td class="num">{{ invoice.total|floatformat:2 }}</td>
+          <td class="num" style="color: #a71d2a; font-weight: bold">
+            {{ invoice.balance|floatformat:2 }}
+          </td>
+          <td class="num">
+            <span class="pill pill-overdue">{{ invoice.days_outstanding }}</span>
+          </td>
+          <td>
+            <a
+              href="{% url 'customer_ledger' invoice.customer.id %}"
+              class="btn btn-sm"
+              >Ledger</a
+            >
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<div class="card">
+  <p class="muted" style="margin: 0">
+    Nothing overdue beyond {{ overdue_days }} days. 🎉
+  </p>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 15px;
+    margin-bottom: 20px;
+  }
+
+  .stat {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .stat-label {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #8595a8;
+  }
+
+  .stat-value {
+    font-size: 25px;
+    font-weight: 700;
+    color: var(--brand-dark);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .stat-sub {
+    font-size: 12px;
+    color: #98a6b8;
+  }
+</style>
+{% endblock %}

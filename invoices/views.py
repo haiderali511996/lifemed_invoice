@@ -1,14 +1,29 @@
 from django.shortcuts import render, redirect, get_object_or_404
 from django.http import FileResponse, JsonResponse
+from django.urls import reverse
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth import authenticate, login, logout
 from django.utils.timezone import now
 from django.contrib import messages
 
-from django.db.models import Count, Q
+from django.db.models import Count, DecimalField, F, OuterRef, Q, Subquery, Sum
+from django.db.models.functions import Coalesce
+from django.utils import timezone
 
-from .forms import CustomerForm
-from .models import Customer, Invoice, Item, InvoiceLog, UserRolls, is_super_admin
+from datetime import timedelta
+
+from .forms import CustomerForm, PaymentForm, ProfileForm
+from .models import (
+    Customer,
+    Invoice,
+    Item,
+    InvoiceLog,
+    Payment,
+    UserRolls,
+    ZERO,
+    OVERDUE_DAYS,
+    is_super_admin,
+)
 
 try:
     # PyMuPDF renamed its module to `pymupdf`; `fitz` is the pre-1.24.3 name.
@@ -206,14 +221,25 @@ def customer_last_invoice(request, customer_id):
             for item in invoice.items.all()
         ]
 
+    overdue = customer.overdue_invoices()
+
     return JsonResponse({
         "customer_name": customer.name,
         "address": customer.address or "",
         "ntn": customer.ntn or "",
         "sales_tax": customer.sales_tax or "",
         "license_no": customer.license_no or "",
+        "contact_person": customer.contact_person or "",
+        "contact_number": customer.contact_number or "",
         "last_invoice_no": invoice.invoice_no if invoice else None,
         "items": items,
+
+        # Shown on the form so the operator sees what is already owed before
+        # adding another invoice to the pile.
+        "previous_balance": f"{customer.outstanding_balance:.2f}",
+        "overdue_count": len(overdue),
+        "overdue_amount": f"{sum((i.balance for i in overdue), ZERO):.2f}",
+        "ledger_url": reverse("customer_ledger", args=[customer.pk]),
     })
 
 
@@ -307,6 +333,10 @@ def generate_invoice(request):
                 price=price,
                 discount=disc
             )
+
+        # Store the net payable so ledgers never recompute it from line items
+        invoice.total = total_net
+        invoice.save(update_fields=["total"])
 
         # LOG ENTRY
         InvoiceLog.objects.create(
@@ -466,5 +496,272 @@ def invoice_logs_view(request):
         "invoices/invoice_logs.html",
         {
             "logs": logs
+        }
+    )
+
+# ---------------------------------------------------------------- LEDGERS
+
+MONEY = DecimalField(max_digits=14, decimal_places=2)
+
+
+def _sum_subquery(model, field):
+    """Per-customer SUM as a correlated subquery.
+
+    Two aggregates over different joins in one query multiply each other out,
+    and Sum(distinct=True) is not a fix - it drops genuinely repeated amounts
+    (two invoices of the same value would count once). Subqueries keep each
+    total independent.
+    """
+    return Subquery(
+        model.objects.filter(customer=OuterRef("pk"))
+        .values("customer")
+        .annotate(total=Sum(field))
+        .values("total"),
+        output_field=MONEY,
+    )
+
+
+def customers_with_balances(queryset=None):
+    """Annotate customers with invoiced and paid totals."""
+    customers = queryset if queryset is not None else Customer.objects.all()
+
+    return customers.annotate(
+        invoiced=Coalesce(_sum_subquery(Invoice, "total"), ZERO, output_field=MONEY),
+        paid=Coalesce(_sum_subquery(Payment, "amount"), ZERO, output_field=MONEY),
+    )
+
+
+def overdue_invoices():
+    cutoff = timezone.localdate() - timedelta(days=OVERDUE_DAYS)
+
+    return (
+        Invoice.objects.filter(date__lte=cutoff)
+        .annotate(received=Coalesce(Sum("payments__amount"), ZERO))
+        .filter(total__gt=F("received"))
+        .select_related("customer")
+        .order_by("date")
+    )
+
+
+@login_required
+def dashboard(request):
+    overdue = list(overdue_invoices())
+
+    totals = Invoice.objects.aggregate(t=Sum("total"))["t"] or ZERO
+    received = Payment.objects.aggregate(t=Sum("amount"))["t"] or ZERO
+
+    return render(
+        request,
+        "invoices/dashboard.html",
+        {
+            "total_invoiced": totals,
+            "total_received": received,
+            "total_outstanding": totals - received,
+            "overdue_invoices": overdue,
+            "overdue_total": sum((i.balance for i in overdue), ZERO),
+            "overdue_days": OVERDUE_DAYS,
+            "customer_count": Customer.objects.count(),
+            "invoice_count": Invoice.objects.count(),
+        }
+    )
+
+
+@login_required
+def ledger_list(request):
+    query = request.GET.get("q", "").strip()
+
+    customers = customers_with_balances()
+
+    if query:
+        customers = customers.filter(
+            Q(name__icontains=query)
+            | Q(address__icontains=query)
+            | Q(license_no__icontains=query)
+            | Q(contact_person__icontains=query)
+        )
+
+    rows = [
+        {"customer": c, "invoiced": c.invoiced, "paid": c.paid,
+         "balance": c.invoiced - c.paid}
+        for c in customers
+    ]
+
+    # Biggest debtors first - that is what the page is for.
+    rows.sort(key=lambda r: r["balance"], reverse=True)
+
+    return render(
+        request,
+        "invoices/ledger_list.html",
+        {
+            "rows": rows,
+            "query": query,
+            "total_outstanding": sum((r["balance"] for r in rows), ZERO),
+        }
+    )
+
+
+@login_required
+def customer_ledger(request, customer_id):
+    """A running statement: invoices as debits, payments as credits."""
+    customer = get_object_or_404(Customer, pk=customer_id)
+
+    entries = []
+
+    for invoice in customer.invoice_set.all():
+        entries.append({
+            "date": invoice.date,
+            "kind": "invoice",
+            "reference": invoice.invoice_no,
+            "detail": f"{invoice.items.count()} item(s)",
+            "debit": invoice.total,
+            "credit": ZERO,
+            "object": invoice,
+        })
+
+    for payment in customer.payments.all():
+        entries.append({
+            "date": payment.paid_on,
+            "kind": "payment",
+            "reference": payment.reference or payment.get_method_display(),
+            "detail": (
+                f"Against {payment.invoice.invoice_no}"
+                if payment.invoice else "Against account"
+            ),
+            "debit": ZERO,
+            "credit": payment.amount,
+            "object": payment,
+        })
+
+    entries.sort(key=lambda e: (e["date"], e["kind"] == "payment"))
+
+    running = ZERO
+
+    for entry in entries:
+        running += entry["debit"] - entry["credit"]
+        entry["balance"] = running
+
+    return render(
+        request,
+        "invoices/customer_ledger.html",
+        {
+            "customer": customer,
+            "entries": entries,
+            "balance": running,
+            "overdue": [i for i in customer.overdue_invoices()],
+            "overdue_days": OVERDUE_DAYS,
+        }
+    )
+
+
+@login_required
+def payment_create(request, customer_id):
+    customer = get_object_or_404(Customer, pk=customer_id)
+
+    if request.method == "POST":
+        form = PaymentForm(request.POST, customer=customer)
+
+        if form.is_valid():
+            payment = form.save(commit=False)
+            payment.customer = customer
+            payment.recorded_by = request.user
+            payment.save()
+
+            messages.success(
+                request, f"Recorded {payment.amount} against {customer.name}."
+            )
+
+            return redirect("customer_ledger", customer_id=customer.pk)
+
+    else:
+        form = PaymentForm(customer=customer)
+
+    return render(
+        request,
+        "invoices/payment_form.html",
+        {
+            "form": form,
+            "customer": customer,
+            "balance": customer.outstanding_balance,
+        }
+    )
+
+
+@login_required
+def payment_list(request):
+    payments = Payment.objects.select_related("customer", "invoice", "recorded_by")
+
+    return render(
+        request,
+        "invoices/payment_list.html",
+        {
+            "payments": payments,
+            "total": payments.aggregate(t=Sum("amount"))["t"] or ZERO,
+        }
+    )
+
+
+# ---------------------------------------------------------------- PROFILE / SEARCH
+
+@login_required
+def profile(request):
+    profile_obj, _ = UserRolls.objects.get_or_create(user=request.user)
+
+    if request.method == "POST":
+        form = ProfileForm(request.POST, request.FILES, instance=profile_obj)
+
+        if form.is_valid():
+            form.save()
+            messages.success(request, "Profile updated.")
+
+            return redirect("profile")
+
+    else:
+        form = ProfileForm(instance=profile_obj)
+
+    return render(
+        request,
+        "invoices/profile.html",
+        {"form": form, "profile": profile_obj}
+    )
+
+
+@login_required
+def global_search(request):
+    """Header search across customer name, pharmacy address and licence."""
+    query = request.GET.get("q", "").strip()
+
+    customers = []
+    invoices = []
+
+    if query:
+        customers = list(
+            customers_with_balances(
+                Customer.objects.filter(
+                    Q(name__icontains=query)
+                    | Q(address__icontains=query)
+                    | Q(license_no__icontains=query)
+                    | Q(contact_person__icontains=query)
+                    | Q(contact_number__icontains=query)
+                    | Q(ntn__icontains=query)
+                )
+            )
+        )
+
+        invoices = list(
+            Invoice.objects.filter(
+                Q(invoice_no__icontains=query)
+                | Q(license_no__icontains=query)
+                | Q(customer__name__icontains=query)
+            ).select_related("customer")[:25]
+        )
+
+    return render(
+        request,
+        "invoices/search.html",
+        {
+            "query": query,
+            "customers": customers,
+            "invoices": invoices,
+            "result_count": len(customers) + len(invoices),
         }
     )

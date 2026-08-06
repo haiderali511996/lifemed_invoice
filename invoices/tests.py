@@ -1,5 +1,7 @@
 import json
 import tempfile
+from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
@@ -7,9 +9,20 @@ from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 
 from . import models
-from .models import Customer, Invoice, InvoiceLog, Item, UserRolls, is_super_admin
+from .models import (
+    Customer,
+    Invoice,
+    InvoiceLog,
+    Item,
+    OVERDUE_DAYS,
+    Payment,
+    UserRolls,
+    is_super_admin,
+)
+from .views import customers_with_balances, overdue_invoices
 
 
 class InvoiceNumberTests(TestCase):
@@ -490,3 +503,268 @@ class CustomerLastInvoiceTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertIn("/login/", response["Location"])
+
+
+class LedgerTests(TestCase):
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.customer = Customer.objects.create(name="Shifa Pharmacy", address="Lahore")
+
+    def invoice(self, total, days_ago=0):
+        invoice = Invoice.objects.create(customer=self.customer, license_no="L")
+        Invoice.objects.filter(pk=invoice.pk).update(
+            total=Decimal(total),
+            date=timezone.localdate() - timedelta(days=days_ago),
+        )
+
+        return Invoice.objects.get(pk=invoice.pk)
+
+    def pay(self, amount, invoice=None):
+        return Payment.objects.create(
+            customer=self.customer,
+            invoice=invoice,
+            amount=Decimal(amount),
+            recorded_by=self.user,
+        )
+
+    def test_balance_is_invoiced_minus_paid(self):
+        self.invoice("1000.00")
+        self.pay("400.00")
+
+        self.assertEqual(self.customer.outstanding_balance, Decimal("600.00"))
+
+    def test_partial_payment_leaves_invoice_balance(self):
+        invoice = self.invoice("1000.00")
+        self.pay("250.00", invoice=invoice)
+
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.amount_paid, Decimal("250.00"))
+        self.assertEqual(invoice.balance, Decimal("750.00"))
+        self.assertFalse(invoice.is_paid)
+
+    def test_multiple_partial_payments_settle_an_invoice(self):
+        invoice = self.invoice("1000.00")
+        self.pay("400.00", invoice=invoice)
+        self.pay("600.00", invoice=invoice)
+
+        self.assertTrue(Invoice.objects.get(pk=invoice.pk).is_paid)
+
+    def test_account_payment_reduces_balance_without_an_invoice(self):
+        self.invoice("500.00")
+        self.pay("500.00")
+
+        self.assertEqual(self.customer.outstanding_balance, Decimal("0.00"))
+
+    def test_invoice_is_overdue_after_the_threshold(self):
+        old = self.invoice("100.00", days_ago=OVERDUE_DAYS + 1)
+        recent = self.invoice("100.00", days_ago=1)
+
+        self.assertTrue(old.is_overdue)
+        self.assertFalse(recent.is_overdue)
+
+    def test_paid_invoice_is_never_overdue(self):
+        old = self.invoice("100.00", days_ago=OVERDUE_DAYS + 5)
+        self.pay("100.00", invoice=old)
+
+        self.assertFalse(Invoice.objects.get(pk=old.pk).is_overdue)
+
+    def test_overdue_list_excludes_settled_invoices(self):
+        stale = self.invoice("100.00", days_ago=OVERDUE_DAYS + 2)
+        settled = self.invoice("100.00", days_ago=OVERDUE_DAYS + 2)
+        self.pay("100.00", invoice=settled)
+
+        numbers = [i.invoice_no for i in overdue_invoices()]
+
+        self.assertIn(stale.invoice_no, numbers)
+        self.assertNotIn(settled.invoice_no, numbers)
+
+    def test_statement_shows_a_running_balance(self):
+        self.invoice("1000.00", days_ago=5)
+        self.pay("300.00")
+
+        response = self.client.get(
+            reverse("customer_ledger", args=[self.customer.pk])
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["balance"], Decimal("700.00"))
+        self.assertEqual(len(response.context["entries"]), 2)
+
+    def test_recording_a_payment_updates_the_ledger(self):
+        invoice = self.invoice("800.00")
+
+        response = self.client.post(
+            reverse("payment_create", args=[self.customer.pk]),
+            {
+                "invoice": invoice.pk,
+                "amount": "300.00",
+                "method": "cash",
+                "reference": "",
+                "paid_on": timezone.localdate().isoformat(),
+                "note": "",
+            },
+        )
+
+        self.assertRedirects(
+            response, reverse("customer_ledger", args=[self.customer.pk])
+        )
+        self.assertEqual(self.customer.outstanding_balance, Decimal("500.00"))
+
+    def test_overpaying_a_single_invoice_is_rejected(self):
+        invoice = self.invoice("100.00")
+
+        response = self.client.post(
+            reverse("payment_create", args=[self.customer.pk]),
+            {
+                "invoice": invoice.pk,
+                "amount": "500.00",
+                "method": "cash",
+                "reference": "",
+                "paid_on": timezone.localdate().isoformat(),
+                "note": "",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Payment.objects.count(), 0)
+
+    def test_zero_or_negative_payments_are_rejected(self):
+        response = self.client.post(
+            reverse("payment_create", args=[self.customer.pk]),
+            {
+                "invoice": "",
+                "amount": "0",
+                "method": "cash",
+                "reference": "",
+                "paid_on": timezone.localdate().isoformat(),
+                "note": "",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Payment.objects.count(), 0)
+
+    def test_generated_invoice_stores_its_total(self):
+        self.client.post(reverse("generate"), {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "", "sales_tax": "", "license_no": "L",
+            "item_name[]": ["Panadol"], "qty[]": ["10"], "price[]": ["100.00"],
+            "discount[]": ["10"], "batch[]": ["B"], "expiry[]": ["12/26"],
+        })
+
+        invoice = Invoice.objects.latest("id")
+        self.assertEqual(invoice.total, Decimal("900.00"))
+
+    def test_previous_balance_is_exposed_to_the_invoice_form(self):
+        self.invoice("1000.00", days_ago=OVERDUE_DAYS + 1)
+        self.pay("250.00")
+
+        data = self.client.get(
+            reverse("customer_last_invoice", args=[self.customer.pk])
+        ).json()
+
+        self.assertEqual(data["previous_balance"], "750.00")
+        self.assertEqual(data["overdue_count"], 1)
+
+
+class ShellTests(TestCase):
+
+    def setUp(self):
+        User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+    def test_pages_render_with_the_sidebar_and_user_menu(self):
+        for name in ("dashboard", "customer_list", "ledger_list",
+                     "payment_list", "profile", "search"):
+            with self.subTest(page=name):
+                html = self.client.get(reverse(name)).content.decode()
+
+                self.assertIn('class="sidebar"', html)
+                self.assertIn(reverse("logout"), html)
+                self.assertIn(reverse("profile"), html)
+
+    def test_search_finds_a_customer_by_licence_number(self):
+        Customer.objects.create(
+            name="Shifa Pharmacy", address="Mall Road", license_no="LIC-7788"
+        )
+
+        html = self.client.get(reverse("search"), {"q": "7788"}).content.decode()
+
+        self.assertIn("Shifa Pharmacy", html)
+
+    def test_search_finds_a_customer_by_address(self):
+        Customer.objects.create(name="Al-Noor", address="Ferozepur Road, Lahore")
+
+        html = self.client.get(reverse("search"), {"q": "Ferozepur"}).content.decode()
+
+        self.assertIn("Al-Noor", html)
+
+    def test_profile_updates_the_users_name(self):
+        self.client.post(reverse("profile"), {
+            "first_name": "Mustafa", "last_name": "Ali",
+            "email": "m@example.com", "phone": "0300-1112223",
+        })
+
+        user = User.objects.get(username="clerk")
+        self.assertEqual(user.get_full_name(), "Mustafa Ali")
+        self.assertEqual(user.userrolls.phone, "0300-1112223")
+
+    def test_initials_fall_back_to_the_username(self):
+        profile = User.objects.get(username="clerk").userrolls
+
+        self.assertEqual(profile.initials, "CL")
+
+
+class LedgerAggregateTests(TestCase):
+    """The list page aggregates in SQL; it must agree with the model properties."""
+
+    def setUp(self):
+        self.customer = Customer.objects.create(name="Test Pharmacy", address="x")
+
+    def add_invoice(self, total):
+        invoice = Invoice.objects.create(customer=self.customer, license_no="L")
+        Invoice.objects.filter(pk=invoice.pk).update(total=Decimal(total))
+
+    def test_repeated_amounts_are_not_collapsed(self):
+        """Two invoices of the same value must count twice, not once."""
+        self.add_invoice("100.00")
+        self.add_invoice("100.00")
+        Payment.objects.create(customer=self.customer, amount=Decimal("50.00"))
+        Payment.objects.create(customer=self.customer, amount=Decimal("50.00"))
+
+        row = customers_with_balances().get(pk=self.customer.pk)
+
+        self.assertEqual(row.invoiced, Decimal("200.00"))
+        self.assertEqual(row.paid, Decimal("100.00"))
+
+    def test_invoices_and_payments_do_not_inflate_each_other(self):
+        """Joining both in one query would multiply the totals out."""
+        self.add_invoice("300.00")
+        self.add_invoice("200.00")
+        for _ in range(3):
+            Payment.objects.create(customer=self.customer, amount=Decimal("10.00"))
+
+        row = customers_with_balances().get(pk=self.customer.pk)
+
+        self.assertEqual(row.invoiced, Decimal("500.00"))
+        self.assertEqual(row.paid, Decimal("30.00"))
+
+    def test_annotations_match_the_model_properties(self):
+        self.add_invoice("125.50")
+        self.add_invoice("125.50")
+        Payment.objects.create(customer=self.customer, amount=Decimal("75.25"))
+
+        row = customers_with_balances().get(pk=self.customer.pk)
+
+        self.assertEqual(row.invoiced, self.customer.total_invoiced)
+        self.assertEqual(row.paid, self.customer.total_paid)
+        self.assertEqual(row.invoiced - row.paid, self.customer.outstanding_balance)
+
+    def test_customer_with_no_activity_shows_zero(self):
+        row = customers_with_balances().get(pk=self.customer.pk)
+
+        self.assertEqual(row.invoiced, Decimal("0.00"))
+        self.assertEqual(row.paid, Decimal("0.00"))
