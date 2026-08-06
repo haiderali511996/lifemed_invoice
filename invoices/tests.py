@@ -2267,3 +2267,159 @@ class ManufacturerTests(TestCase):
                     reverse("manufacturer_edit", args=[self.maker.pk])):
             with self.subTest(url=url):
                 self.assertEqual(self.client.get(url).status_code, 200)
+
+
+class DeleteInvoiceDataTests(TestCase):
+    """Removing a test invoice must also put back the stock it took out,
+    or the ledger is corrected while stock is quietly left wrong."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.customer = Customer.objects.create(name="Test Pharmacy", address="x")
+        self.product = Product.objects.create(
+            code="PAN500", name="Panadol", trade_price=Decimal("100.00")
+        )
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1", quantity=50,
+            expiry_date=timezone.localdate() + timedelta(days=365),
+        )
+
+    def make_invoice(self, from_stock=True, qty=10):
+        invoice = Invoice.objects.create(
+            customer=self.customer, license_no="L", total=Decimal("900.00")
+        )
+        Item.objects.create(
+            invoice=invoice, name="Panadol", qty=qty,
+            price=Decimal("100.00"), discount=Decimal("10.00"),
+            product=self.product if from_stock else None,
+            stock_batch=self.batch if from_stock else None,
+        )
+        InvoiceLog.objects.create(
+            invoice=invoice, user=self.user,
+            customer_name=self.customer.name, amount=invoice.total,
+        )
+
+        if from_stock:
+            issue(self.batch, qty, reference=invoice.invoice_no)
+
+        return invoice
+
+    def test_dry_run_deletes_nothing(self):
+        self.make_invoice()
+
+        call_command("delete_invoice_data", customer=self.customer.pk, verbosity=0)
+
+        self.assertEqual(Invoice.objects.count(), 1)
+        self.assertEqual(Customer.objects.count(), 1)
+
+    def test_confirm_removes_the_invoice_and_its_lines(self):
+        self.make_invoice()
+
+        call_command("delete_invoice_data", customer=self.customer.pk,
+                     confirm=True, verbosity=0)
+
+        self.assertEqual(Invoice.objects.count(), 0)
+        self.assertEqual(Item.objects.count(), 0)
+        self.assertEqual(InvoiceLog.objects.count(), 0)
+        self.assertEqual(Customer.objects.count(), 0)
+
+    def test_stock_is_returned(self):
+        self.make_invoice(qty=10)
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 40)
+
+        call_command("delete_invoice_data", customer=self.customer.pk,
+                     confirm=True, verbosity=0)
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 50)
+
+    def test_the_return_is_recorded_in_the_ledger(self):
+        invoice = self.make_invoice(qty=10)
+        number = invoice.invoice_no
+
+        call_command("delete_invoice_data", customer=self.customer.pk,
+                     confirm=True, verbosity=0)
+
+        movement = StockMovement.objects.filter(
+            kind=StockMovement.ADJUSTMENT
+        ).latest("id")
+
+        self.assertEqual(movement.quantity, 10)
+        self.assertIn(number, movement.note)
+
+    def test_free_text_invoices_touch_no_stock(self):
+        self.make_invoice(from_stock=False)
+
+        call_command("delete_invoice_data", customer=self.customer.pk,
+                     confirm=True, verbosity=0)
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 50)
+
+    def test_payments_are_removed_too(self):
+        invoice = self.make_invoice()
+        Payment.objects.create(
+            customer=self.customer, invoice=invoice, amount=Decimal("100.00")
+        )
+
+        call_command("delete_invoice_data", customer=self.customer.pk,
+                     confirm=True, verbosity=0)
+
+        self.assertEqual(Payment.objects.count(), 0)
+
+    def test_customer_can_be_kept(self):
+        self.make_invoice()
+
+        call_command("delete_invoice_data", customer=self.customer.pk,
+                     confirm=True, keep_customer=True, verbosity=0)
+
+        self.assertEqual(Invoice.objects.count(), 0)
+        self.assertEqual(Customer.objects.count(), 1)
+
+    def test_a_single_invoice_can_be_targeted(self):
+        first = self.make_invoice(qty=5)
+        second = self.make_invoice(qty=5)
+
+        call_command("delete_invoice_data", invoice=[first.invoice_no],
+                     confirm=True, verbosity=0)
+
+        self.assertEqual(
+            list(Invoice.objects.values_list("invoice_no", flat=True)),
+            [second.invoice_no],
+        )
+        self.assertEqual(Customer.objects.count(), 1)
+
+    def test_an_unknown_invoice_number_is_rejected(self):
+        with self.assertRaises(CommandError):
+            call_command("delete_invoice_data", invoice=["HHC-0000"],
+                         confirm=True, verbosity=0)
+
+    def test_an_unknown_customer_is_rejected(self):
+        with self.assertRaises(CommandError):
+            call_command("delete_invoice_data", customer=999999, verbosity=0)
+
+    def test_calling_with_no_target_is_rejected(self):
+        with self.assertRaises(CommandError):
+            call_command("delete_invoice_data", verbosity=0)
+
+    def test_numbering_continues_after_a_deletion(self):
+        """Deleting the last invoice must not let its number be reissued."""
+        distributor = Distributor.objects.get(code="HHC")
+        invoice = Invoice.objects.create(
+            customer=self.customer, distributor=distributor, license_no="L"
+        )
+        first_number = invoice.invoice_no
+
+        call_command("delete_invoice_data", invoice=[first_number],
+                     confirm=True, verbosity=0)
+
+        replacement = Invoice.objects.create(
+            customer=self.customer, distributor=distributor, license_no="L"
+        )
+
+        # The series restarts once the table is empty again - flagged rather
+        # than silently reissued, since the deleted invoice was never sent.
+        self.assertEqual(replacement.invoice_no, first_number)
