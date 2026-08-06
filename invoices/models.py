@@ -313,6 +313,10 @@ class Territory(models.Model):
     """A field area (a "brick"). Everything location-wise hangs off this."""
 
     name = models.CharField(max_length=120, unique=True)
+    code = models.CharField(
+        max_length=20, blank=True,
+        help_text="Short reference used on tour plans, e.g. N-01.",
+    )
     city = models.CharField(max_length=80)
     region = models.CharField(
         max_length=80, blank=True, help_text="Zone or province grouping."
@@ -320,11 +324,11 @@ class Territory(models.Model):
     is_active = models.BooleanField(default=True)
 
     class Meta:
-        ordering = ["city", "name"]
+        ordering = ["city", "code", "name"]
         verbose_name_plural = "territories"
 
     def __str__(self):
-        return f"{self.name} ({self.city})"
+        return f"{self.code} {self.name}".strip() if self.code else self.name
 
     @property
     def sales_total(self):
@@ -412,6 +416,10 @@ class CallPoint(models.Model):
 
     address = models.TextField(blank=True)
     phone = models.CharField(max_length=50, blank=True)
+    estimated_volume = models.CharField(
+        max_length=50, blank=True,
+        help_text="Rough size, e.g. '250+' doctors or '150+ Chemists'.",
+    )
     is_active = models.BooleanField(default=True)
 
     class Meta:

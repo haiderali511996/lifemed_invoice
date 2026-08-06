@@ -1,3 +1,4 @@
+import csv
 import gzip
 import json
 import os
@@ -1972,3 +1973,164 @@ class InvoiceStockTests(TestCase):
         numbers = [b["batch_no"] for b in data["batches"]]
         self.assertIn("B-1", numbers)
         self.assertNotIn("EXPIRED", numbers)
+
+
+class TerritoryImportTests(TestCase):
+    """The zone breakdown arrives as a spreadsheet, so importing must be
+    repeatable without duplicating anything."""
+
+    HEADER = [
+        "zone", "territory_code", "territory_name", "city", "call_point",
+        "address", "estimated_volume",
+    ]
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write_csv(self, rows, header=None):
+        path = Path(self.tmp) / "territories.csv"
+
+        with open(path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(header or self.HEADER)
+            writer.writerows(rows)
+
+        return str(path)
+
+    def run_import(self, rows, **kwargs):
+        call_command("import_territories", file=self.write_csv(rows),
+                     verbosity=0, **kwargs)
+
+    def test_imports_the_shipped_file(self):
+        """The real spreadsheet: 16 territories across 4 zones, 32 call points."""
+        call_command("import_territories", verbosity=0)
+
+        self.assertEqual(Territory.objects.count(), 16)
+        self.assertEqual(CallPoint.objects.count(), 32)
+        self.assertEqual(
+            sorted({t.region for t in Territory.objects.all()}),
+            ["East", "North", "South", "West"],
+        )
+
+    def test_territory_carries_its_code_and_zone(self):
+        call_command("import_territories", verbosity=0)
+
+        territory = Territory.objects.get(code="N-01")
+        self.assertEqual(territory.name, "Mayo Hub")
+        self.assertEqual(territory.city, "Lahore")
+        self.assertEqual(territory.region, "North")
+
+    def test_call_points_attach_to_their_territory(self):
+        call_command("import_territories", verbosity=0)
+
+        mayo = Territory.objects.get(code="N-01")
+        names = set(mayo.call_points.values_list("name", flat=True))
+
+        self.assertEqual(len(names), 3)
+        self.assertIn("Mayo Hospital", names)
+
+    def test_address_columns_are_joined(self):
+        call_command("import_territories", verbosity=0)
+
+        point = CallPoint.objects.get(name="Mayo Hospital")
+
+        self.assertEqual(point.address, "Hospital Rd, Anarkali Bazaar")
+        self.assertEqual(point.estimated_volume, "500+")
+
+    def test_kind_is_inferred_from_the_name(self):
+        call_command("import_territories", verbosity=0)
+
+        self.assertEqual(
+            CallPoint.objects.get(name="Lohari Wholesale Market").kind, "chemist"
+        )
+        self.assertEqual(
+            CallPoint.objects.get(name="Mayo Hospital").kind, "hospital"
+        )
+        self.assertEqual(
+            CallPoint.objects.get(name="Ravi Road GP Clusters").kind, "doctor"
+        )
+
+    def test_running_twice_creates_nothing_new(self):
+        call_command("import_territories", verbosity=0)
+        call_command("import_territories", verbosity=0)
+
+        self.assertEqual(Territory.objects.count(), 16)
+        self.assertEqual(CallPoint.objects.count(), 32)
+
+    def test_dry_run_writes_nothing(self):
+        call_command("import_territories", dry_run=True, verbosity=0)
+
+        self.assertEqual(Territory.objects.count(), 0)
+        self.assertEqual(CallPoint.objects.count(), 0)
+
+    def test_existing_territory_is_updated_not_duplicated(self):
+        Territory.objects.create(code="N-01", name="Mayo Hub", city="Lahore")
+
+        call_command("import_territories", verbosity=0)
+
+        self.assertEqual(Territory.objects.filter(code="N-01").count(), 1)
+        self.assertEqual(Territory.objects.get(code="N-01").region, "North")
+
+    def test_a_matching_name_without_a_code_is_reused(self):
+        """Territories added by hand before the import must not be duplicated."""
+        Territory.objects.create(name="Mayo Hub", city="Lahore")
+
+        call_command("import_territories", verbosity=0)
+
+        territory = Territory.objects.get(name="Mayo Hub")
+        self.assertEqual(territory.code, "N-01")
+        self.assertEqual(Territory.objects.filter(name="Mayo Hub").count(), 1)
+
+    def test_updated_address_is_applied_on_reimport(self):
+        self.run_import([["North", "N-01", "Mayo Hub", "Lahore",
+                          "Mayo Hospital", "Old Road", "100+"]])
+        self.run_import([["North", "N-01", "Mayo Hub", "Lahore",
+                          "Mayo Hospital", "New Road", "500+"]])
+
+        point = CallPoint.objects.get(name="Mayo Hospital")
+        self.assertEqual(point.address, "New Road")
+        self.assertEqual(point.estimated_volume, "500+")
+
+    def test_same_name_in_two_territories_is_kept_separate(self):
+        self.run_import([
+            ["North", "N-01", "Mayo Hub", "Lahore", "City Clinic", "A", "10+"],
+            ["South", "S-01", "Johar Town", "Lahore", "City Clinic", "B", "20+"],
+        ])
+
+        self.assertEqual(CallPoint.objects.filter(name="City Clinic").count(), 2)
+
+    def test_rows_without_a_call_point_are_skipped(self):
+        self.run_import([["North", "N-01", "Mayo Hub", "Lahore", "", "", ""]])
+
+        self.assertEqual(Territory.objects.count(), 1)
+        self.assertEqual(CallPoint.objects.count(), 0)
+
+    def test_a_file_missing_columns_is_rejected(self):
+        path = self.write_csv([["North", "Mayo Hub"]], header=["zone", "name"])
+
+        with self.assertRaises(CommandError) as caught:
+            call_command("import_territories", file=path, verbosity=0)
+
+        self.assertIn("Missing column", str(caught.exception))
+
+    def test_a_missing_file_is_rejected(self):
+        with self.assertRaises(CommandError):
+            call_command("import_territories", file="/nope/absent.csv", verbosity=0)
+
+    def test_imported_territories_drive_plan_generation(self):
+        """The point of importing: MRs can be planned against real call points."""
+        call_command("import_territories", verbosity=0)
+
+        territory = Territory.objects.get(code="S-03")
+        mr = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza",
+            designation="mr", territory=territory,
+        )
+
+        plan, created = generate_plan(mr, timezone.localdate())
+
+        self.assertEqual(created, 3)
+        self.assertEqual(plan.visit_count, 3)

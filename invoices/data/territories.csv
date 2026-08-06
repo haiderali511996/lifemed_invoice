@@ -1,0 +1,33 @@
+zone,territory_code,territory_name,city,call_point,address,estimated_volume
+North,N-01,Mayo Hub,Lahore,Mayo Hospital,"Hospital Rd, Anarkali Bazaar",500+
+North,N-01,Mayo Hub,Lahore,King Edward Medical University,"Nila Gumbad, Anarkali",200+
+North,N-01,Mayo Hub,Lahore,Lohari Wholesale Market,"Lohari Medicine Market, Walled City",150+ Chemists
+North,N-02,Shahdara Belt,Lahore,Munauwar Hospital,"Main GT Road, Shahdara",40+
+North,N-02,Shahdara Belt,Lahore,Shahdara Hospital,"Sheikhupura Road, Shahdara",60+
+North,N-03,Ravi-Bund Road,Lahore,MIH Hospital,Bund Road near Babu Sabu Interchange,50+
+North,N-03,Ravi-Bund Road,Lahore,Ravi Road GP Clusters,"Main Ravi Road, Near Timber Market",80+
+North,N-04,Lower Mall,Lahore,Lady Willingdon Hospital,"Ravi Road, near Fort",120+
+North,N-04,Lower Mall,Lahore,Lady Aitchison Hospital,Mayo Hospital Road,100+
+South,S-01,Johar Town A,Lahore,Doctors Hospital,"152-G, 1 Canal Rd, Block G1, Johar Town",250+
+South,S-01,Johar Town A,Lahore,MedCure Hospital,"Block R1, Plot 87 Main Blvd, Johar Town",80+
+South,S-01,Johar Town A,Lahore,Horizon Hospital,"403-402 Bahria University Rd, Block D2, Johar Town",110+
+South,S-02,Johar Town B,Lahore,Evercare Hospital,"D1 Commercial, NECHS Block D1, Nespak Scheme",150+
+South,S-02,Johar Town B,Lahore,Surgimed Hospital,"Zafar Ali Road, Gulberg V",120+
+South,S-03,Ferozepur Strip,Lahore,Lahore General Hospital,"Main Ferozepur Road, Nishtar Town",400+
+South,S-03,Ferozepur Strip,Lahore,Childrens Hospital,"Main Ferozepur Road, near Model Town",300+
+South,S-03,Ferozepur Strip,Lahore,Lahore Care Hospital,"Ghazi Road Stop, Main Ferozepur Road",90+
+South,S-04,Raiwind-Khayaban,Lahore,Vital Care Hospital,"50A Commercial, Block A, Khayaban E Ameen",35+
+South,S-04,Raiwind-Khayaban,Lahore,Bahria International Hospital,"Takbeer Block, Sector B, Bahria Town",180+
+South,S-04,Raiwind-Khayaban,Lahore,Cure-All Medical Complex,"250-B, Tulip Block, Sector C, Bahria Town",40+
+East,E-01,Cantt Core,Lahore,CMH Lahore,"Abdul Rehman Rd, Lahore Cantt",350+
+East,E-01,Cantt Core,Lahore,oladoc Corporate Hub,"NASTP, 69 Abid Majeed Rd, Cantt",100+ Network
+East,E-02,DHA Phase 1-4,Lahore,National Hospital & Medical Centre,"Street 123, Sector L, DHA Phase 1",220+
+East,E-02,DHA Phase 1-4,Lahore,DHA Hospital,"W Block, Phase 3, DHA",50+
+East,E-03,DHA Phase 5+,Lahore,Integrated Medical Care (IMC),"153/1, Street 1, F Block, Sector F, Phase 5, DHA",130+
+East,E-03,DHA Phase 5+,Lahore,Bedian Road Clinics,"Main Bedian Road, Mota Singh Wala",70+
+East,E-04,Shalimar Belt,Lahore,Shalamar Hospital,"Shalamar Link Road, Mughalpura",250+
+East,E-04,Shalimar Belt,Lahore,Ghurki Trust Teaching Hospital,"Jallo Morr, Main GT Road",180+
+West,W-01,Iqbal Town,Lahore,Mansoora Hospital,"Main Multan Road, Near Iqbal Town",100+
+West,W-02,Wahdat-Mustafa,Lahore,Lahore Medical City Hospital,"32 Wahdat Rd, Mamdot Block, Mustafa Town",60+
+West,W-03,Samanabad,Lahore,Nawaz Sharif Hospital,"Yatiman Chowk, Samanabad",120+
+West,W-04,Thokar Belt,Lahore,Social Security Hospital,"Main Multan Road, near Thokar Niaz Baig",140+

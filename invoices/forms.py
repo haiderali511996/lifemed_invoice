@@ -162,7 +162,7 @@ class ProfileForm(forms.ModelForm):
 class TerritoryForm(forms.ModelForm):
     class Meta:
         model = Territory
-        fields = ["name", "city", "region", "is_active"]
+        fields = ["code", "name", "city", "region", "is_active"]
 
 
 class EmployeeForm(forms.ModelForm):
@@ -217,7 +217,7 @@ class CallPointForm(forms.ModelForm):
         model = CallPoint
         fields = [
             "name", "kind", "speciality", "territory", "customer",
-            "address", "phone", "is_active",
+            "address", "phone", "estimated_volume", "is_active",
         ]
         widgets = {"address": forms.Textarea(attrs={"rows": 2})}
 

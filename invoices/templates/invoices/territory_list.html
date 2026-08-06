@@ -14,7 +14,7 @@
     <table>
       <thead>
         <tr>
-          <th>Territory</th><th>City</th><th>Region</th>
+          <th>Code</th><th>Territory</th><th>City</th><th>Zone</th>
           <th class="num">Customers</th><th class="num">Call Points</th>
           <th class="num">Staff</th><th>Status</th><th></th>
         </tr>
@@ -22,6 +22,7 @@
       <tbody>
         {% for t in territories %}
         <tr>
+          <td>{{ t.code|default:"-" }}</td>
           <td><strong>{{ t.name }}</strong></td>
           <td>{{ t.city }}</td>
           <td>{{ t.region|default:"-" }}</td>
@@ -35,7 +36,7 @@
           <td><a href="{% url 'territory_edit' t.id %}" class="btn btn-sm">Edit</a></td>
         </tr>
         {% empty %}
-        <tr><td colspan="8" style="text-align:center;padding:26px">
+        <tr><td colspan="9" style="text-align:center;padding:26px">
           No territories yet. Create one to start assigning customers, call
           points and field staff by location.
         </td></tr>
