@@ -1,7 +1,12 @@
+{% load static %}
 <!DOCTYPE html>
 <html>
   <head>
-    <title>Invoice System</title>
+    <title>LifeMed Pharma - Invoice System</title>
+
+    <link rel="icon" href="{% static 'invoices/favicon-32.png' %}" sizes="32x32" />
+    <link rel="icon" href="{% static 'invoices/favicon-64.png' %}" sizes="64x64" />
+    <link rel="apple-touch-icon" href="{% static 'invoices/apple-touch-icon.png' %}" />
 
     <style>
       body {
@@ -26,7 +31,29 @@
       .top-bar {
         display: flex;
         justify-content: space-between;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 12px;
         margin-bottom: 20px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+
+      .brand h2 {
+        margin: 0;
+        padding-left: 14px;
+        border-left: 3px solid #0065ad;
+        font-size: 20px;
+        color: #14304d;
+      }
+
+      .brand-logo {
+        height: 46px;
+        width: auto;
       }
 
       /* 📋 Logs aur Logout buttons ka container */
@@ -193,7 +220,14 @@
       {% endif %}
 
       <div class="top-bar">
-        <h2>Invoice Form</h2>
+        <div class="brand">
+          <img
+            src="{% static 'invoices/lifemed-logo.png' %}"
+            alt="LifeMed Pharma"
+            class="brand-logo"
+          />
+          <h2>Invoice Form</h2>
+        </div>
         <div class="top-bar-actions">
           <a href="{% url 'invoice_logs' %}" class="btn-logs"
             >📋 View Activity Logs</a

@@ -1,7 +1,12 @@
+{% load static %}
 <!DOCTYPE html>
 <html>
   <head>
-    <title>Invoice Logs Report</title>
+    <title>LifeMed Pharma - Invoice Logs</title>
+
+    <link rel="icon" href="{% static 'invoices/favicon-32.png' %}" sizes="32x32" />
+    <link rel="icon" href="{% static 'invoices/favicon-64.png' %}" sizes="64x64" />
+    <link rel="apple-touch-icon" href="{% static 'invoices/apple-touch-icon.png' %}" />
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
     <style>
       body {
@@ -21,7 +26,28 @@
         display: flex;
         justify-content: space-between;
         align-items: center;
+        flex-wrap: wrap;
+        gap: 12px;
         margin-bottom: 20px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+
+      .brand h2 {
+        margin: 0;
+        padding-left: 14px;
+        border-left: 3px solid #0065ad;
+        font-size: 20px;
+        color: #14304d;
+      }
+
+      .brand-logo {
+        height: 46px;
+        width: auto;
       }
 
       table {
@@ -101,7 +127,14 @@
   <body>
     <div class="container">
       <div class="top-bar">
-        <h2>📋 Invoice History </h2>
+        <div class="brand">
+          <img
+            src="{% static 'invoices/lifemed-logo.png' %}"
+            alt="LifeMed Pharma"
+            class="brand-logo"
+          />
+          <h2>📋 Invoice History</h2>
+        </div>
         <div class="no-print top-bar-actions">
           <span style="color: #666; margin-right: 5px">
             {{ request.user.username }}
