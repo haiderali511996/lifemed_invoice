@@ -516,6 +516,12 @@
         </a>
 
         <div class="nav-section">Field Force</div>
+        <a href="{% url 'daily_calls' %}" class="{% if active == 'daily' %}active{% endif %}">
+          📅 <span>My Day</span>
+        </a>
+        <a href="{% url 'call_report_list' %}" class="{% if active == 'calls' %}active{% endif %}">
+          🩺 <span>Doctor Visits</span>
+        </a>
         <a href="{% url 'sample_list' %}" class="{% if active == 'samples' %}active{% endif %}">
           🧪 <span>Sampling</span>
         </a>
@@ -546,6 +552,9 @@
         </a>
         <a href="{% url 'sample_report' %}" class="{% if active == 'sample_report' %}active{% endif %}">
           🔬 <span>Sample Report</span>
+        </a>
+        <a href="{% url 'call_report_summary' %}" class="{% if active == 'call_summary' %}active{% endif %}">
+          📊 <span>Call Coverage</span>
         </a>
         <a href="{% url 'territory_report' %}" class="{% if active == 'territory_report' %}active{% endif %}">
           📍 <span>Location-wise</span>

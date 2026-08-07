@@ -76,6 +76,16 @@ urlpatterns = [
         name='visit_status',
     ),
 
+    path('daily/', views.daily_calls, name='daily_calls'),
+    path('calls/', views.call_report_list, name='call_report_list'),
+    path('calls/new/', views.call_report_create, name='call_report_new'),
+    path('calls/summary/', views.call_report_summary, name='call_report_summary'),
+    path(
+        'calls/visit/<int:visit_id>/',
+        views.call_report_create,
+        name='call_report_for_visit',
+    ),
+
     path('distributors/', views.distributor_list, name='distributor_list'),
     path('distributors/new/', views.distributor_edit, name='distributor_new'),
     path(

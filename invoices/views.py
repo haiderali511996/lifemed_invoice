@@ -16,6 +16,7 @@ from datetime import timedelta
 
 from .forms import (
     CallPointForm,
+    CallReportForm,
     CustomerForm,
     DistributorForm,
     EmployeeForm,
@@ -37,10 +38,11 @@ from .layout import LayoutError, describe, detect_layout
 from .stock import (
     StockError, adjust, allocate_fefo, issue, receive, record_sales_return,
 )
-from .planning import current_week_start, generate_plan
+from .planning import current_week_start, generate_plan, monday_of
 from .models import (
     Batch,
     CallPoint,
+    CallReport,
     Customer,
     Distributor,
     Employee,
@@ -2604,3 +2606,254 @@ def payslip_pdf(request, payslip_id):
     )
 
     return response
+
+
+# ---------------------------------------------------------------- DAILY CALLS
+
+@login_required
+def daily_calls(request):
+    """An MR's day: what was scheduled, and what has been reported so far."""
+    day = parse_date(request.GET.get("date", "")) or timezone.localdate()
+
+    employee_id = request.GET.get("employee", "").strip()
+    employee = None
+
+    if employee_id:
+        employee = Employee.objects.filter(pk=employee_id).first()
+    else:
+        # Default to the team member linked to whoever is signed in.
+        employee = Employee.objects.filter(user=request.user).first()
+
+    scheduled = []
+    reported = []
+
+    if employee is not None:
+        week_start = monday_of(day)
+        weekday = day.weekday()
+
+        plan = WeeklyPlan.objects.filter(
+            employee=employee, week_start=week_start
+        ).first()
+
+        if plan is not None and weekday < 6:
+            scheduled = list(
+                plan.visits.filter(day=weekday)
+                .select_related("call_point")
+                .prefetch_related("report")
+            )
+
+        reported = list(
+            CallReport.objects.filter(employee=employee, visit_date=day)
+            .select_related("call_point", "sample_issue")
+            .prefetch_related("products")
+        )
+
+    reported_visit_ids = {r.plan_visit_id for r in reported if r.plan_visit_id}
+
+    return render(
+        request,
+        "invoices/daily_calls.html",
+        {
+            "day": day,
+            "previous_day": day - timedelta(days=1),
+            "next_day": day + timedelta(days=1),
+            "employee": employee,
+            "employees": Employee.objects.filter(is_active=True),
+            "scheduled": [
+                {"visit": visit, "done": visit.pk in reported_visit_ids}
+                for visit in scheduled
+            ],
+            "reported": reported,
+            "unplanned": [r for r in reported if not r.was_planned],
+            "samples_today": sum(r.samples_given for r in reported),
+        }
+    )
+
+
+@login_required
+def call_report_create(request, visit_id=None):
+    """Log a visit, optionally against a scheduled slot."""
+    plan_visit = (
+        get_object_or_404(
+            PlanVisit.objects.select_related("plan__employee", "call_point"),
+            pk=visit_id,
+        )
+        if visit_id else None
+    )
+
+    if request.method == "POST":
+        form = CallReportForm(request.POST)
+
+        batch_ids = request.POST.getlist("batch[]")
+        quantities = post_column(request, "qty[]", len(batch_ids))
+
+        sample_lines, sample_errors = _clean_sample_lines(batch_ids, quantities)
+
+        if form.is_valid() and not sample_errors:
+            report = form.save(commit=False)
+            report.plan_visit = plan_visit
+            report.created_by = request.user
+            report.save()
+            form.save_m2m()
+
+            if sample_lines:
+                report.sample_issue = _samples_for_report(
+                    report, sample_lines, request.user
+                )
+                report.save(update_fields=["sample_issue"])
+
+            # A reported call closes its scheduled slot automatically.
+            if plan_visit is not None:
+                plan_visit.status = (
+                    "done" if report.outcome == CallReport.MET else "missed"
+                )
+                plan_visit.remarks = report.feedback[:255]
+                plan_visit.save(update_fields=["status", "remarks"])
+
+            messages.success(
+                request,
+                f"Recorded visit to {report.call_point.name}"
+                + (f" — {report.samples_given} sample(s) issued."
+                   if report.samples_given else "."),
+            )
+
+            return redirect(
+                f"{reverse('daily_calls')}?date={report.visit_date:%Y-%m-%d}"
+                f"&employee={report.employee_id}"
+            )
+
+        for error in sample_errors:
+            messages.error(request, error)
+
+    else:
+        initial = {"visit_date": timezone.localdate()}
+
+        if plan_visit is not None:
+            initial.update({
+                "employee": plan_visit.plan.employee_id,
+                "call_point": plan_visit.call_point_id,
+                "visit_date": plan_visit.visit_date,
+                "speciality": plan_visit.call_point.speciality,
+            })
+
+        form = CallReportForm(initial=initial)
+
+    return render(
+        request,
+        "invoices/call_report_form.html",
+        {
+            "form": form,
+            "plan_visit": plan_visit,
+            "products": Product.objects.filter(is_active=True),
+        }
+    )
+
+
+def _samples_for_report(report, lines, user):
+    """Samples left on this call, issued from stock like any other sample."""
+    issue_record = SampleIssue.objects.create(
+        employee=report.employee,
+        call_point=report.call_point,
+        date=report.visit_date,
+        note=f"Left on call with {report.doctor_name or report.call_point.name}",
+        created_by=user,
+    )
+
+    _issue_samples(issue_record, lines, user)
+
+    return issue_record
+
+
+@login_required
+def call_report_list(request):
+    reports = CallReport.objects.select_related(
+        "employee", "call_point", "sample_issue"
+    ).prefetch_related("products")
+
+    employee_id = request.GET.get("employee", "").strip()
+    month = request.GET.get("month", "").strip()
+
+    if employee_id:
+        reports = reports.filter(employee_id=employee_id)
+
+    if month:
+        parsed = parse_date(f"{month}-01")
+
+        if parsed:
+            reports = reports.filter(
+                visit_date__year=parsed.year, visit_date__month=parsed.month
+            )
+
+    reports = list(reports)
+
+    return render(
+        request,
+        "invoices/call_report_list.html",
+        {
+            "reports": reports,
+            "employees": Employee.objects.filter(is_active=True),
+            "selected_employee": employee_id,
+            "month": month,
+            "met": len([r for r in reports if r.outcome == CallReport.MET]),
+            "unplanned": len([r for r in reports if not r.was_planned]),
+            "samples": sum(r.samples_given for r in reports),
+        }
+    )
+
+
+@login_required
+def call_report_summary(request):
+    """Calls made versus calls planned, per team member."""
+    month = request.GET.get("month", "").strip()
+
+    reports = CallReport.objects.select_related("employee", "call_point")
+    visits = PlanVisit.objects.select_related("plan__employee")
+
+    parsed = parse_date(f"{month}-01") if month else None
+
+    if parsed:
+        reports = reports.filter(
+            visit_date__year=parsed.year, visit_date__month=parsed.month
+        )
+
+    rows = {}
+
+    for report in reports:
+        row = rows.setdefault(
+            report.employee.full_name,
+            {"calls": 0, "met": 0, "unplanned": 0, "samples": 0, "doctors": set()},
+        )
+
+        row["calls"] += 1
+        row["met"] += 1 if report.outcome == CallReport.MET else 0
+        row["unplanned"] += 0 if report.was_planned else 1
+        row["samples"] += report.samples_given
+        row["doctors"].add(report.call_point_id)
+
+    ranked = sorted(
+        (
+            {
+                "name": name,
+                "calls": data["calls"],
+                "met": data["met"],
+                "unplanned": data["unplanned"],
+                "samples": data["samples"],
+                "doctors": len(data["doctors"]),
+                "met_percent": round(data["met"] * 100 / data["calls"])
+                if data["calls"] else 0,
+            }
+            for name, data in rows.items()
+        ),
+        key=lambda row: row["calls"],
+        reverse=True,
+    )
+
+    return render(
+        request,
+        "invoices/call_report_summary.html",
+        {
+            "rows": ranked,
+            "month": month,
+            "total_calls": sum(row["calls"] for row in ranked),
+        }
+    )

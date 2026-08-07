@@ -1243,3 +1243,78 @@ class Payslip(models.Model):
         self.net_pay = self.gross_pay - self.total_deductions
 
         return self
+
+
+# ------------------------------------------------------------------ CALL REPORTS
+
+class CallReport(models.Model):
+    """What actually happened on a visit.
+
+    Separate from PlanVisit so unplanned calls are first-class: an MR who meets
+    a doctor who was never on the schedule still records it, and the report
+    links back to the planned slot when there was one.
+    """
+
+    MET = "met"
+    NOT_AVAILABLE = "not_available"
+    RESCHEDULED = "rescheduled"
+
+    OUTCOME_CHOICES = (
+        (MET, "Doctor met"),
+        (NOT_AVAILABLE, "Not available"),
+        (RESCHEDULED, "Rescheduled"),
+    )
+
+    employee = models.ForeignKey(
+        Employee, on_delete=models.PROTECT, related_name="call_reports"
+    )
+    call_point = models.ForeignKey(
+        CallPoint, on_delete=models.PROTECT, related_name="call_reports"
+    )
+    plan_visit = models.OneToOneField(
+        PlanVisit, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="report",
+        help_text="The scheduled slot this fulfils, when it was planned.",
+    )
+
+    visit_date = models.DateField(default=timezone.localdate)
+    visit_time = models.TimeField(null=True, blank=True)
+
+    # The person actually seen. A hospital call point covers many doctors, so
+    # the name belongs on the visit rather than on the call point.
+    doctor_name = models.CharField(max_length=200, blank=True)
+    speciality = models.CharField(max_length=120, blank=True)
+
+    outcome = models.CharField(max_length=20, choices=OUTCOME_CHOICES, default=MET)
+
+    products = models.ManyToManyField(
+        Product, blank=True, related_name="call_reports",
+        help_text="What was detailed on this call.",
+    )
+
+    sample_issue = models.ForeignKey(
+        SampleIssue, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="call_reports",
+    )
+
+    feedback = models.TextField(blank=True)
+    next_visit_date = models.DateField(null=True, blank=True)
+
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-visit_date", "-visit_time", "-id"]
+
+    def __str__(self):
+        who = self.doctor_name or self.call_point.name
+
+        return f"{who} - {self.visit_date}"
+
+    @property
+    def was_planned(self):
+        return self.plan_visit_id is not None
+
+    @property
+    def samples_given(self):
+        return self.sample_issue.total_units if self.sample_issue else 0

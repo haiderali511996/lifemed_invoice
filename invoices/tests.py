@@ -29,6 +29,7 @@ from .layout import LayoutError, detect_layout
 from .models import (
     Batch,
     CallPoint,
+    CallReport,
     Distributor,
     Customer,
     Employee,
@@ -3178,5 +3179,291 @@ class PayrollTests(TestCase):
         for url in (reverse("payroll_list"),
                     reverse("payroll_detail", args=[run.pk]),
                     reverse("payslip_edit", args=[slip.pk])):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, 200)
+
+
+class CallReportTests(TestCase):
+    """An MR opens the day, sees the schedule, and logs who was actually seen."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("ali", password="pw")
+        self.client.login(username="ali", password="pw")
+
+        self.territory = Territory.objects.create(name="Gulberg", city="Lahore")
+        self.mr = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza", designation="mr",
+            territory=self.territory, user=self.user,
+        )
+        self.doctor = CallPoint.objects.create(
+            name="Dr. Ahmed", territory=self.territory,
+            kind="doctor", speciality="Cardiology",
+        )
+        self.product = Product.objects.create(code="PAN500", name="Panadol")
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1", quantity=2500,
+            cost_price=Decimal("20.00"),
+            expiry_date=timezone.localdate() + timedelta(days=365),
+        )
+
+        self.monday = monday_of(timezone.localdate())
+        self.plan = WeeklyPlan.objects.create(
+            employee=self.mr, week_start=self.monday, status="approved",
+        )
+        self.visit = PlanVisit.objects.create(
+            plan=self.plan, call_point=self.doctor, day=0,
+            objective="Detail Panadol",
+        )
+
+    def report(self, **overrides):
+        payload = {
+            "employee": self.mr.pk,
+            "call_point": self.doctor.pk,
+            "visit_date": self.monday.isoformat(),
+            "visit_time": "",
+            "doctor_name": "Dr. Ahmed Khan",
+            "speciality": "Cardiology",
+            "outcome": CallReport.MET,
+            "products": [self.product.pk],
+            "feedback": "Agreed to trial",
+            "next_visit_date": "",
+            "new_call_point": "",
+            "new_call_point_kind": "doctor",
+            "new_call_point_territory": "",
+        }
+        payload.update(overrides)
+
+        return self.client.post(reverse("call_report_new"), payload)
+
+    # ---------------------------------------------------------- recording
+
+    def test_a_visit_records_the_doctor_seen(self):
+        self.report()
+
+        report = CallReport.objects.get()
+        self.assertEqual(report.employee, self.mr)
+        self.assertEqual(report.call_point, self.doctor)
+        self.assertEqual(report.doctor_name, "Dr. Ahmed Khan")
+        self.assertEqual(report.speciality, "Cardiology")
+        self.assertEqual(report.outcome, CallReport.MET)
+        self.assertEqual(list(report.products.all()), [self.product])
+        self.assertEqual(report.created_by, self.user)
+
+    def test_reporting_against_a_scheduled_slot_closes_it(self):
+        self.client.post(
+            reverse("call_report_for_visit", args=[self.visit.pk]),
+            {
+                "employee": self.mr.pk, "call_point": self.doctor.pk,
+                "visit_date": self.monday.isoformat(), "visit_time": "",
+                "doctor_name": "Dr. Ahmed Khan", "speciality": "",
+                "outcome": CallReport.MET, "feedback": "Good meeting",
+                "next_visit_date": "", "new_call_point": "",
+                "new_call_point_kind": "doctor", "new_call_point_territory": "",
+            },
+        )
+
+        self.visit.refresh_from_db()
+        self.assertEqual(self.visit.status, "done")
+        self.assertEqual(self.visit.remarks, "Good meeting")
+
+        report = CallReport.objects.get()
+        self.assertEqual(report.plan_visit, self.visit)
+        self.assertTrue(report.was_planned)
+
+    def test_a_doctor_who_was_not_in_marks_the_slot_missed(self):
+        self.client.post(
+            reverse("call_report_for_visit", args=[self.visit.pk]),
+            {
+                "employee": self.mr.pk, "call_point": self.doctor.pk,
+                "visit_date": self.monday.isoformat(), "visit_time": "",
+                "doctor_name": "", "speciality": "",
+                "outcome": CallReport.NOT_AVAILABLE, "feedback": "",
+                "next_visit_date": "", "new_call_point": "",
+                "new_call_point_kind": "doctor", "new_call_point_territory": "",
+            },
+        )
+
+        self.visit.refresh_from_db()
+        self.assertEqual(self.visit.status, "missed")
+
+    def test_a_visit_off_the_plan_is_unplanned(self):
+        self.report()
+
+        self.assertFalse(CallReport.objects.get().was_planned)
+
+    # ----------------------------------------------------- new call points
+
+    def test_an_unlisted_doctor_can_be_added_from_the_form(self):
+        self.report(call_point="", new_call_point="Dr. Sana Malik")
+
+        created = CallPoint.objects.get(name="Dr. Sana Malik")
+        self.assertEqual(created.territory, self.territory)
+        self.assertEqual(created.kind, "doctor")
+        self.assertEqual(CallReport.objects.get().call_point, created)
+
+    def test_the_same_new_name_twice_makes_one_call_point(self):
+        self.report(call_point="", new_call_point="Dr. Sana Malik")
+        self.report(call_point="", new_call_point="Dr. Sana Malik")
+
+        self.assertEqual(CallPoint.objects.filter(name="Dr. Sana Malik").count(), 1)
+        self.assertEqual(CallReport.objects.count(), 2)
+
+    def test_a_report_needs_a_call_point_one_way_or_the_other(self):
+        response = self.report(call_point="", new_call_point="")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CallReport.objects.count(), 0)
+        self.assertContains(response, "Pick a call point")
+
+    def test_a_new_call_point_needs_a_territory_to_fall_back_on(self):
+        self.mr.territory = None
+        self.mr.save()
+
+        response = self.report(call_point="", new_call_point="Dr. Nobody")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CallPoint.objects.filter(name="Dr. Nobody").count(), 0)
+        self.assertEqual(CallReport.objects.count(), 0)
+
+    # ----------------------------------------------------------- sampling
+
+    def test_samples_left_on_a_call_come_out_of_stock(self):
+        self.report(**{"batch[]": [str(self.batch.pk)], "qty[]": ["12"]})
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 2488)
+
+        report = CallReport.objects.get()
+        self.assertIsNotNone(report.sample_issue)
+        self.assertEqual(report.samples_given, 12)
+        self.assertEqual(report.sample_issue.call_point, self.doctor)
+        self.assertEqual(report.sample_issue.employee, self.mr)
+
+        movement = StockMovement.objects.get(kind=StockMovement.SAMPLE)
+        self.assertEqual(movement.quantity, -12)
+
+    def test_a_call_with_no_samples_leaves_stock_alone(self):
+        self.report()
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 2500)
+        self.assertIsNone(CallReport.objects.get().sample_issue)
+        self.assertEqual(CallReport.objects.get().samples_given, 0)
+
+    def test_oversampling_saves_nothing_at_all(self):
+        response = self.report(**{"batch[]": [str(self.batch.pk)], "qty[]": ["9000"]})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CallReport.objects.count(), 0)
+        self.assertEqual(SampleIssue.objects.count(), 0)
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 2500)
+
+    # -------------------------------------------------------------- my day
+
+    def test_my_day_defaults_to_the_signed_in_member(self):
+        response = self.client.get(reverse("daily_calls"))
+
+        self.assertEqual(response.context["employee"], self.mr)
+
+    def test_my_day_shows_the_schedule_and_what_was_reported(self):
+        self.report(**{"visit_date": self.monday.isoformat()})
+
+        response = self.client.get(
+            reverse("daily_calls"), {"date": self.monday.isoformat()}
+        )
+
+        self.assertEqual(len(response.context["scheduled"]), 1)
+        self.assertEqual(len(response.context["reported"]), 1)
+        self.assertEqual(len(response.context["unplanned"]), 1)
+
+    def test_a_reported_slot_is_flagged_done_on_my_day(self):
+        self.client.post(
+            reverse("call_report_for_visit", args=[self.visit.pk]),
+            {
+                "employee": self.mr.pk, "call_point": self.doctor.pk,
+                "visit_date": self.monday.isoformat(), "visit_time": "",
+                "doctor_name": "", "speciality": "", "outcome": CallReport.MET,
+                "feedback": "", "next_visit_date": "", "new_call_point": "",
+                "new_call_point_kind": "doctor", "new_call_point_territory": "",
+            },
+        )
+
+        response = self.client.get(
+            reverse("daily_calls"), {"date": self.monday.isoformat()}
+        )
+
+        self.assertTrue(response.context["scheduled"][0]["done"])
+        self.assertEqual(response.context["unplanned"], [])
+
+    def test_my_day_counts_samples_left_that_day(self):
+        self.report(**{"batch[]": [str(self.batch.pk)], "qty[]": ["7"]})
+
+        response = self.client.get(
+            reverse("daily_calls"), {"date": self.monday.isoformat()}
+        )
+
+        self.assertEqual(response.context["samples_today"], 7)
+
+    def test_my_day_only_shows_the_day_asked_for(self):
+        self.report(visit_date=(self.monday + timedelta(days=1)).isoformat())
+
+        response = self.client.get(
+            reverse("daily_calls"), {"date": self.monday.isoformat()}
+        )
+
+        self.assertEqual(response.context["reported"], [])
+
+    # ------------------------------------------------------------ reports
+
+    def test_the_visit_list_filters_by_member_and_month(self):
+        other = Employee.objects.create(
+            employee_code="MR-02", full_name="Bilal Khan",
+            designation="mr", territory=self.territory,
+        )
+        self.report()
+        self.report(employee=other.pk)
+
+        response = self.client.get(
+            reverse("call_report_list"), {"employee": self.mr.pk}
+        )
+
+        self.assertEqual(len(response.context["reports"]), 1)
+        self.assertEqual(response.context["reports"][0].employee, self.mr)
+
+        response = self.client.get(
+            reverse("call_report_list"), {"month": self.monday.strftime("%Y-%m")}
+        )
+
+        self.assertEqual(len(response.context["reports"]), 2)
+
+    def test_coverage_ranks_members_by_calls_made(self):
+        other = Employee.objects.create(
+            employee_code="MR-02", full_name="Bilal Khan",
+            designation="mr", territory=self.territory,
+        )
+        self.report()
+        self.report()
+        self.report(employee=other.pk, outcome=CallReport.NOT_AVAILABLE)
+
+        rows = self.client.get(reverse("call_report_summary")).context["rows"]
+
+        self.assertEqual([row["name"] for row in rows], ["Ali Raza", "Bilal Khan"])
+        self.assertEqual(rows[0]["calls"], 2)
+        self.assertEqual(rows[0]["met"], 2)
+        self.assertEqual(rows[0]["met_percent"], 100)
+        self.assertEqual(rows[0]["doctors"], 1)
+        self.assertEqual(rows[1]["met"], 0)
+        self.assertEqual(rows[1]["met_percent"], 0)
+
+    def test_call_pages_render(self):
+        self.report(**{"batch[]": [str(self.batch.pk)], "qty[]": ["3"]})
+
+        for url in (reverse("daily_calls"),
+                    reverse("call_report_new"),
+                    reverse("call_report_for_visit", args=[self.visit.pk]),
+                    reverse("call_report_list"),
+                    reverse("call_report_summary")):
             with self.subTest(url=url):
                 self.assertEqual(self.client.get(url).status_code, 200)

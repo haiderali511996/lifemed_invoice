@@ -4,6 +4,7 @@ from django import forms
 
 from .models import (
     CallPoint,
+    CallReport,
     Customer,
     Distributor,
     Employee,
@@ -486,3 +487,107 @@ class PayrollRunForm(forms.ModelForm):
             )
 
         return month
+
+
+class CallReportForm(forms.ModelForm):
+    """What happened on a visit.
+
+    A call point can be created here: an MR who meets a doctor who was never
+    on the list must be able to record it without leaving the form.
+    """
+
+    new_call_point = forms.CharField(
+        max_length=200, required=False,
+        label="...or add a new call point",
+        widget=forms.TextInput(
+            attrs={"placeholder": "e.g. Dr. Sana Malik Clinic"}
+        ),
+    )
+    new_call_point_kind = forms.ChoiceField(
+        choices=CallPoint.KIND_CHOICES, required=False, initial="doctor",
+        label="New call point type",
+    )
+    new_call_point_territory = forms.ModelChoiceField(
+        queryset=Territory.objects.filter(is_active=True), required=False,
+        label="New call point territory",
+    )
+
+    class Meta:
+        model = CallReport
+        fields = [
+            "employee", "call_point", "visit_date", "visit_time",
+            "doctor_name", "speciality", "outcome", "products",
+            "feedback", "next_visit_date",
+        ]
+        widgets = {
+            "visit_date": forms.DateInput(attrs={"type": "date"}),
+            "visit_time": forms.TimeInput(attrs={"type": "time"}),
+            "next_visit_date": forms.DateInput(attrs={"type": "date"}),
+            "feedback": forms.Textarea(attrs={"rows": 3}),
+            "products": forms.SelectMultiple(attrs={"size": 6}),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.fields["employee"].queryset = Employee.objects.filter(is_active=True)
+        self.fields["call_point"].queryset = CallPoint.objects.filter(
+            is_active=True
+        ).select_related("territory")
+        self.fields["call_point"].required = False
+        self.fields["call_point"].empty_label = "-- choose a call point --"
+
+        self.fields["products"].queryset = Product.objects.filter(is_active=True)
+        self.fields["products"].required = False
+
+        for optional in ("visit_time", "doctor_name", "speciality", "feedback",
+                         "next_visit_date"):
+            self.fields[optional].required = False
+
+    def clean(self):
+        cleaned = super().clean()
+
+        call_point = cleaned.get("call_point")
+        new_name = (cleaned.get("new_call_point") or "").strip()
+
+        if not call_point and not new_name:
+            raise forms.ValidationError(
+                "Pick a call point, or type a name to create a new one."
+            )
+
+        if not call_point and new_name:
+            territory = cleaned.get("new_call_point_territory")
+
+            if territory is None:
+                employee = cleaned.get("employee")
+                territory = employee.territory if employee else None
+
+            if territory is None:
+                self.add_error(
+                    "new_call_point_territory",
+                    "Choose a territory - the MR has none assigned to fall back on.",
+                )
+
+                return cleaned
+
+            # get_or_create keeps a repeated name in one territory as one record.
+            cleaned["call_point"] = CallPoint.objects.get_or_create(
+                name=new_name,
+                territory=territory,
+                defaults={
+                    "kind": cleaned.get("new_call_point_kind") or "doctor",
+                    "is_active": True,
+                },
+            )[0]
+
+        return cleaned
+
+    def save(self, commit=True):
+        report = super().save(commit=False)
+        report.call_point = self.cleaned_data["call_point"]
+
+        if commit:
+            report.save()
+            self.save_m2m()
+
+        return report

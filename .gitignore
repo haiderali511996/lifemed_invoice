@@ -7,3 +7,5 @@ staticfiles/
 media/
 
 backups/
+.venv/
+venv/
