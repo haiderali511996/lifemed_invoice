@@ -1,0 +1,31 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Expense Categories{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Expense Categories</h1>
+  <a href="{% url 'expense_category_new' %}" class="btn">＋ New Category</a>
+</div>
+<div class="card"><div style="overflow-x:auto">
+  <table>
+    <thead><tr>
+      <th>Category</th><th>Code</th><th>Claimed By</th>
+      <th class="num">Claims</th><th class="num">Total Spend</th><th>Status</th><th></th>
+    </tr></thead>
+    <tbody>
+      {% for c in categories %}
+      <tr>
+        <td><strong>{{ c.name }}</strong>
+          {% if c.note %}<br><span style="font-size:12px;color:#8595a8">{{ c.note }}</span>{% endif %}</td>
+        <td>{{ c.code|default:"—" }}</td>
+        <td>{% if c.per_employee %}Team member{% else %}Company{% endif %}</td>
+        <td class="num">{{ c.claim_count }}</td>
+        <td class="num">{{ c.spend|floatformat:2 }}</td>
+        <td>{% if c.is_active %}<span class="pill pill-paid">active</span>
+            {% else %}<span class="pill pill-overdue">inactive</span>{% endif %}</td>
+        <td><a href="{% url 'expense_category_edit' c.id %}" class="btn btn-sm">Edit</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div></div>
+{% endblock %}

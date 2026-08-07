@@ -7,7 +7,7 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest import mock
@@ -22,7 +22,9 @@ from django.urls import reverse
 from django.utils import timezone
 
 from . import models
-from .forms import DistributorForm, EmployeeForm, ManufacturerForm
+from .forms import (
+    DistributorForm, EmployeeForm, ExpenseForm, ManufacturerForm,
+)
 from .layout import LayoutError, detect_layout
 from .models import (
     Batch,
@@ -30,22 +32,28 @@ from .models import (
     Distributor,
     Customer,
     Employee,
+    Expense,
+    ExpenseCategory,
     Invoice,
     InvoiceLog,
     Item,
     Manufacturer,
     OVERDUE_DAYS,
     Payment,
+    PayrollRun,
+    Payslip,
     PlanVisit,
     Product,
     Purchase,
     PurchaseItem,
     SalesReturn,
+    SampleIssue,
     StockMovement,
     Supplier,
     Territory,
     UserRolls,
     WeeklyPlan,
+    ZERO,
     is_super_admin,
 )
 from .pdf import rows_per_page
@@ -2777,3 +2785,398 @@ class StockLedgerTests(TestCase):
 
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["movement"].product, self.product)
+
+
+class ExpenseTests(TestCase):
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.employee = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza", designation="mr"
+        )
+        self.fuel = ExpenseCategory.objects.get(name="Fuel Allowance")
+        self.drap = ExpenseCategory.objects.get(name="DRAP Fees")
+
+    def test_the_categories_you_asked_for_are_seeded(self):
+        names = set(ExpenseCategory.objects.values_list("name", flat=True))
+
+        for expected in ("Fuel Allowance", "Doctor Refreshment",
+                         "Literature Expense", "Promotional Material",
+                         "DRAP Fees", "Salary & Payroll"):
+            self.assertIn(expected, names)
+
+    def test_claim_is_recorded_against_a_team_member(self):
+        response = self.client.post(reverse("expense_new"), {
+            "category": self.fuel.pk, "employee": self.employee.pk,
+            "territory": "", "date": timezone.localdate().isoformat(),
+            "amount": "4500.00", "description": "Petrol", "reference": "B-1",
+        })
+
+        self.assertRedirects(response, reverse("expense_list"))
+        expense = Expense.objects.get()
+        self.assertEqual(expense.employee, self.employee)
+        self.assertEqual(expense.status, Expense.PENDING)
+        self.assertEqual(expense.submitted_by, self.user)
+
+    def test_a_per_employee_category_requires_someone_to_claim_it(self):
+        """A fuel allowance with nobody attached cannot be reported per person."""
+        form = ExpenseForm(data={
+            "category": self.fuel.pk, "employee": "", "territory": "",
+            "date": timezone.localdate().isoformat(), "amount": "1000",
+            "description": "", "reference": "",
+        })
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("employee", form.errors)
+
+    def test_company_costs_need_no_employee(self):
+        form = ExpenseForm(data={
+            "category": self.drap.pk, "employee": "", "territory": "",
+            "date": timezone.localdate().isoformat(), "amount": "25000",
+            "description": "Renewal", "reference": "",
+        })
+
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_zero_amount_is_rejected(self):
+        form = ExpenseForm(data={
+            "category": self.drap.pk, "employee": "", "territory": "",
+            "date": timezone.localdate().isoformat(), "amount": "0",
+            "description": "", "reference": "",
+        })
+
+        self.assertFalse(form.is_valid())
+
+    def make_expense(self, amount="1000", status=Expense.PENDING, employee=True):
+        return Expense.objects.create(
+            category=self.fuel if employee else self.drap,
+            employee=self.employee if employee else None,
+            date=timezone.localdate(), amount=Decimal(amount),
+            status=status, submitted_by=self.user,
+        )
+
+    def test_approving_records_who_and_when(self):
+        expense = self.make_expense()
+
+        self.client.post(reverse("expense_status", args=[expense.pk, "approve"]))
+
+        expense.refresh_from_db()
+        self.assertEqual(expense.status, Expense.APPROVED)
+        self.assertEqual(expense.reviewed_by, self.user)
+        self.assertIsNotNone(expense.reviewed_at)
+
+    def test_rejected_claims_are_not_counted_as_spend(self):
+        self.make_expense("1000", Expense.APPROVED)
+        self.make_expense("9999", Expense.REJECTED)
+
+        response = self.client.get(reverse("expense_list"))
+
+        self.assertEqual(response.context["total"], Decimal("1000.00"))
+
+    def test_report_totals_by_category_and_by_person(self):
+        self.make_expense("1000", Expense.APPROVED)
+        self.make_expense("25000", Expense.APPROVED, employee=False)
+
+        response = self.client.get(reverse("expense_report"))
+
+        by_category = dict(response.context["by_category"])
+        by_employee = dict(response.context["by_employee"])
+
+        self.assertEqual(by_category["Fuel Allowance"], Decimal("1000.00"))
+        self.assertEqual(by_category["DRAP Fees"], Decimal("25000.00"))
+        self.assertEqual(by_employee["Ali Raza"], Decimal("1000.00"))
+        self.assertEqual(by_employee["Company"], Decimal("25000.00"))
+
+    def test_list_can_be_filtered_by_employee(self):
+        other = Employee.objects.create(employee_code="MR-02", full_name="Sara")
+        self.make_expense("1000")
+        Expense.objects.create(
+            category=self.fuel, employee=other, date=timezone.localdate(),
+            amount=Decimal("500"), submitted_by=self.user,
+        )
+
+        response = self.client.get(
+            reverse("expense_list"), {"employee": self.employee.pk}
+        )
+
+        self.assertEqual(len(response.context["expenses"]), 1)
+
+    def test_expense_pages_render(self):
+        self.make_expense()
+
+        for url in (reverse("expense_list"), reverse("expense_new"),
+                    reverse("expense_report"),
+                    reverse("expense_category_list")):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, 200)
+
+
+class SamplingTests(TestCase):
+    """Samples come out of the same stock that gets sold, so 2500 packs stay
+    2500 packs across sales and samples together."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.territory = Territory.objects.create(name="Gulberg", city="Lahore")
+        self.mr = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza",
+            designation="mr", territory=self.territory,
+        )
+        self.doctor = CallPoint.objects.create(
+            name="Dr. Ahmed", territory=self.territory, kind="doctor"
+        )
+        self.product = Product.objects.create(code="PAN500", name="Panadol")
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1", quantity=2500,
+            cost_price=Decimal("20.00"),
+            expiry_date=timezone.localdate() + timedelta(days=365),
+        )
+
+    def issue_samples(self, qty=10, batch=None):
+        return self.client.post(reverse("sample_new"), {
+            "employee": self.mr.pk,
+            "call_point": self.doctor.pk,
+            "date": timezone.localdate().isoformat(),
+            "note": "",
+            "batch[]": [str((batch or self.batch).pk)],
+            "qty[]": [str(qty)],
+        })
+
+    def test_sampling_reduces_stock(self):
+        self.issue_samples(10)
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 2490)
+
+    def test_sample_is_recorded_with_its_own_movement_kind(self):
+        self.issue_samples(10)
+
+        movement = StockMovement.objects.get(kind=StockMovement.SAMPLE)
+        self.assertEqual(movement.quantity, -10)
+        self.assertIn("Dr. Ahmed", movement.note)
+
+    def test_issue_records_who_gave_what_to_whom(self):
+        self.issue_samples(10)
+
+        issue_record = SampleIssue.objects.get()
+        self.assertEqual(issue_record.employee, self.mr)
+        self.assertEqual(issue_record.call_point, self.doctor)
+        self.assertEqual(issue_record.total_units, 10)
+        self.assertEqual(issue_record.total_value, Decimal("200.00"))
+
+    def test_references_are_sequential(self):
+        self.issue_samples(1)
+        self.issue_samples(1)
+
+        self.assertEqual(
+            sorted(SampleIssue.objects.values_list("reference", flat=True)),
+            ["SMP-0001", "SMP-0002"],
+        )
+
+    def test_cannot_sample_more_than_is_in_stock(self):
+        response = self.issue_samples(3000)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(SampleIssue.objects.count(), 0)
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 2500)
+
+    def test_two_lines_of_the_same_batch_are_checked_together(self):
+        """Each line fits alone, but their sum does not."""
+        response = self.client.post(reverse("sample_new"), {
+            "employee": self.mr.pk, "call_point": self.doctor.pk,
+            "date": timezone.localdate().isoformat(), "note": "",
+            "batch[]": [str(self.batch.pk), str(self.batch.pk)],
+            "qty[]": ["1500", "1500"],
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(SampleIssue.objects.count(), 0)
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 2500)
+
+    def test_expired_stock_cannot_be_sampled(self):
+        expired = Batch.objects.create(
+            product=self.product, batch_no="OLD", quantity=100,
+            expiry_date=timezone.localdate() - timedelta(days=1),
+        )
+
+        response = self.issue_samples(5, batch=expired)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(SampleIssue.objects.count(), 0)
+
+    def test_samples_and_sales_draw_on_the_same_stock(self):
+        issue(self.batch, 500, reference="HHC-9965")
+        self.issue_samples(100)
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 1900)
+
+    def test_report_breaks_samples_down_three_ways(self):
+        self.issue_samples(10)
+
+        response = self.client.get(reverse("sample_report"))
+
+        self.assertEqual(dict(response.context["by_employee"])["Ali Raza"], 10)
+        self.assertEqual(dict(response.context["by_product"])["Panadol"], 10)
+        self.assertEqual(dict(response.context["by_doctor"])["Dr. Ahmed"], 10)
+
+    def test_sampling_pages_render(self):
+        self.issue_samples(5)
+
+        for url in (reverse("sample_list"), reverse("sample_new"),
+                    reverse("sample_report")):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, 200)
+
+
+class PayrollTests(TestCase):
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.employee = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza", designation="mr",
+            basic_salary=Decimal("60000"), fuel_allowance=Decimal("15000"),
+            mobile_allowance=Decimal("2000"),
+        )
+
+    def run_payroll(self, month=None):
+        return self.client.post(reverse("payroll_create"), {
+            "month": (month or timezone.localdate()).isoformat(), "note": "",
+        })
+
+    def test_a_slip_is_generated_for_every_active_employee(self):
+        Employee.objects.create(
+            employee_code="MR-02", full_name="Sara", basic_salary=Decimal("50000")
+        )
+        Employee.objects.create(
+            employee_code="MR-03", full_name="Gone", is_active=False
+        )
+
+        self.run_payroll()
+
+        self.assertEqual(Payslip.objects.count(), 2)
+
+    def test_gross_and_net_are_calculated(self):
+        self.run_payroll()
+
+        slip = Payslip.objects.get()
+        self.assertEqual(slip.gross_pay, Decimal("77000.00"))
+        self.assertEqual(slip.net_pay, Decimal("77000.00"))
+
+    def test_approved_expenses_are_reimbursed_with_salary(self):
+        fuel = ExpenseCategory.objects.get(name="Fuel Allowance")
+        Expense.objects.create(
+            category=fuel, employee=self.employee, date=timezone.localdate(),
+            amount=Decimal("4500"), status=Expense.APPROVED,
+            submitted_by=self.user,
+        )
+
+        self.run_payroll()
+
+        slip = Payslip.objects.get()
+        self.assertEqual(slip.expense_reimbursement, Decimal("4500.00"))
+        self.assertEqual(slip.gross_pay, Decimal("81500.00"))
+
+    def test_unapproved_expenses_are_not_reimbursed(self):
+        fuel = ExpenseCategory.objects.get(name="Fuel Allowance")
+        Expense.objects.create(
+            category=fuel, employee=self.employee, date=timezone.localdate(),
+            amount=Decimal("9999"), status=Expense.PENDING,
+            submitted_by=self.user,
+        )
+
+        self.run_payroll()
+
+        self.assertEqual(Payslip.objects.get().expense_reimbursement, ZERO)
+
+    def test_deductions_reduce_net_pay(self):
+        self.run_payroll()
+        slip = Payslip.objects.get()
+
+        self.client.post(reverse("payslip_edit", args=[slip.pk]), {
+            "basic_salary": "60000", "fuel_allowance": "15000",
+            "mobile_allowance": "2000", "other_allowance": "0",
+            "expense_reimbursement": "0", "tax_deduction": "5000",
+            "advance_deduction": "2000", "other_deduction": "0", "note": "",
+        })
+
+        slip.refresh_from_db()
+        self.assertEqual(slip.total_deductions, Decimal("7000.00"))
+        self.assertEqual(slip.net_pay, Decimal("70000.00"))
+
+    def test_a_slip_snapshots_pay_so_later_raises_do_not_rewrite_it(self):
+        self.run_payroll()
+
+        self.employee.basic_salary = Decimal("90000")
+        self.employee.save()
+
+        self.assertEqual(Payslip.objects.get().basic_salary, Decimal("60000.00"))
+
+    def test_only_one_run_per_month(self):
+        self.run_payroll()
+        self.run_payroll()
+
+        self.assertEqual(PayrollRun.objects.count(), 1)
+
+    def test_the_month_is_stored_as_the_first(self):
+        self.run_payroll(date(2026, 8, 17))
+
+        self.assertEqual(PayrollRun.objects.get().month, date(2026, 8, 1))
+
+    def test_a_finalised_run_cannot_be_edited(self):
+        self.run_payroll()
+        run = PayrollRun.objects.get()
+        slip = Payslip.objects.get()
+
+        self.client.post(reverse("payroll_finalise", args=[run.pk]))
+
+        response = self.client.post(reverse("payslip_edit", args=[slip.pk]), {
+            "basic_salary": "1", "fuel_allowance": "0", "mobile_allowance": "0",
+            "other_allowance": "0", "expense_reimbursement": "0",
+            "tax_deduction": "0", "advance_deduction": "0",
+            "other_deduction": "0", "note": "",
+        })
+
+        self.assertRedirects(response, reverse("payroll_detail", args=[run.pk]))
+        self.assertEqual(Payslip.objects.get().basic_salary, Decimal("60000.00"))
+
+    def test_payslip_pdf_carries_the_details_and_the_logo(self):
+        import pymupdf
+
+        self.run_payroll()
+        slip = Payslip.objects.get()
+
+        response = self.client.get(reverse("payslip_pdf", args=[slip.pk]))
+
+        self.assertEqual(response["Content-Type"], "application/pdf")
+
+        document = pymupdf.open(stream=response.content, filetype="pdf")
+        text = document[0].get_text()
+
+        self.assertIn("SALARY SLIP", text)
+        self.assertIn("Ali Raza", text)
+        self.assertIn("MR-01", text)
+        self.assertIn("NET PAY", text)
+        self.assertIn("77,000.00", text)
+        # The LifeMed logo is embedded, not just named
+        self.assertEqual(len(document[0].get_images()), 1)
+
+    def test_payroll_pages_render(self):
+        self.run_payroll()
+        run = PayrollRun.objects.get()
+        slip = Payslip.objects.get()
+
+        for url in (reverse("payroll_list"),
+                    reverse("payroll_detail", args=[run.pk]),
+                    reverse("payslip_edit", args=[slip.pk])):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, 200)

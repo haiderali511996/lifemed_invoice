@@ -148,6 +148,54 @@ urlpatterns = [
         name='return_create',
     ),
 
+    path('expenses/', views.expense_list, name='expense_list'),
+    path('expenses/new/', views.expense_edit, name='expense_new'),
+    path('expenses/report/', views.expense_report, name='expense_report'),
+    path(
+        'expenses/<int:expense_id>/edit/',
+        views.expense_edit,
+        name='expense_edit',
+    ),
+    path(
+        'expenses/<int:expense_id>/<str:action>/',
+        views.expense_status,
+        name='expense_status',
+    ),
+    path(
+        'expense-categories/',
+        views.expense_category_list,
+        name='expense_category_list',
+    ),
+    path(
+        'expense-categories/new/',
+        views.expense_category_edit,
+        name='expense_category_new',
+    ),
+    path(
+        'expense-categories/<int:category_id>/edit/',
+        views.expense_category_edit,
+        name='expense_category_edit',
+    ),
+
+    path('samples/', views.sample_list, name='sample_list'),
+    path('samples/new/', views.sample_create, name='sample_new'),
+    path('samples/report/', views.sample_report, name='sample_report'),
+
+    path('payroll/', views.payroll_list, name='payroll_list'),
+    path('payroll/create/', views.payroll_create, name='payroll_create'),
+    path('payroll/<int:run_id>/', views.payroll_detail, name='payroll_detail'),
+    path(
+        'payroll/<int:run_id>/finalise/',
+        views.payroll_finalise,
+        name='payroll_finalise',
+    ),
+    path(
+        'payslips/<int:payslip_id>/edit/',
+        views.payslip_edit,
+        name='payslip_edit',
+    ),
+    path('payslips/<int:payslip_id>/pdf/', views.payslip_pdf, name='payslip_pdf'),
+
     path('stock/', views.stock_report, name='stock_report'),
     path('stock/movements/', views.stock_movements, name='stock_movements'),
     path('stock/ledger/', views.stock_ledger, name='stock_ledger'),

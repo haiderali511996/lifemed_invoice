@@ -7,8 +7,12 @@ from .models import (
     Customer,
     Distributor,
     Employee,
+    Expense,
+    ExpenseCategory,
     Invoice,
     Manufacturer,
+    PayrollRun,
+    SampleIssue,
     Payment,
     Product,
     Purchase,
@@ -172,6 +176,8 @@ class EmployeeForm(forms.ModelForm):
         fields = [
             "employee_code", "full_name", "designation", "phone", "email",
             "territory", "reports_to", "user", "joined_on", "is_active",
+            "basic_salary", "fuel_allowance", "mobile_allowance",
+            "other_allowance",
         ]
         widgets = {
             "joined_on": forms.DateInput(attrs={"type": "date"}),
@@ -369,3 +375,114 @@ class StockAdjustmentForm(forms.Form):
         max_length=255, required=False,
         widget=forms.TextInput(attrs={"placeholder": "Reason for the adjustment"}),
     )
+
+
+class ExpenseCategoryForm(forms.ModelForm):
+    class Meta:
+        model = ExpenseCategory
+        fields = ["name", "code", "per_employee", "note", "is_active"]
+        widgets = {"note": forms.Textarea(attrs={"rows": 2})}
+
+
+class ExpenseForm(forms.ModelForm):
+    class Meta:
+        model = Expense
+        fields = [
+            "category", "employee", "territory", "date", "amount",
+            "description", "reference", "receipt",
+        ]
+        widgets = {
+            "date": forms.DateInput(attrs={"type": "date"}),
+            "amount": forms.NumberInput(attrs={"step": "0.01", "min": "0.01"}),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.fields["category"].queryset = ExpenseCategory.objects.filter(
+            is_active=True
+        )
+        self.fields["employee"].queryset = Employee.objects.filter(is_active=True)
+        self.fields["employee"].required = False
+        self.fields["employee"].empty_label = "— Company cost, not a claim —"
+        self.fields["territory"].required = False
+        self.fields["description"].required = False
+        self.fields["reference"].required = False
+
+    def clean_amount(self):
+        amount = self.cleaned_data["amount"]
+
+        if amount is None or amount <= Decimal("0"):
+            raise forms.ValidationError("Amount must be greater than zero.")
+
+        return amount
+
+    def clean(self):
+        cleaned = super().clean()
+
+        category = cleaned.get("category")
+        employee = cleaned.get("employee")
+
+        # A fuel allowance with nobody attached cannot be reported per person,
+        # which is the whole point of tracking it.
+        if category and category.per_employee and not employee:
+            self.add_error(
+                "employee",
+                f"{category.name} is claimed by a team member - pick one.",
+            )
+
+        return cleaned
+
+
+class SampleIssueForm(forms.ModelForm):
+    class Meta:
+        model = SampleIssue
+        fields = ["employee", "call_point", "date", "note"]
+        widgets = {
+            "date": forms.DateInput(attrs={"type": "date"}),
+            "note": forms.Textarea(attrs={"rows": 2}),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.fields["employee"].queryset = Employee.objects.filter(is_active=True)
+        self.fields["call_point"].queryset = CallPoint.objects.filter(
+            is_active=True
+        ).select_related("territory")
+        self.fields["call_point"].required = False
+        self.fields["call_point"].empty_label = "— Not recorded —"
+        self.fields["note"].required = False
+
+
+class PayrollRunForm(forms.ModelForm):
+    class Meta:
+        model = PayrollRun
+        fields = ["month", "note"]
+        widgets = {
+            "month": forms.DateInput(attrs={"type": "date"}),
+            "note": forms.Textarea(attrs={"rows": 2}),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.fields["note"].required = False
+        self.fields["month"].help_text = (
+            "Any date in the month - it is stored as the 1st."
+        )
+
+    def clean_month(self):
+        month = self.cleaned_data["month"].replace(day=1)
+
+        clash = PayrollRun.objects.filter(month=month)
+
+        if self.instance.pk:
+            clash = clash.exclude(pk=self.instance.pk)
+
+        if clash.exists():
+            raise forms.ValidationError(
+                f"Payroll for {month:%B %Y} already exists."
+            )
+
+        return month

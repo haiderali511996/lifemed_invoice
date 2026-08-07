@@ -1,0 +1,75 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Sampling{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>🧪 Sampling</h1>
+  <div style="display:flex;gap:9px">
+    <a href="{% url 'sample_report' %}" class="btn btn-grey">🔬 Report</a>
+    <a href="{% url 'sample_new' %}" class="btn btn-green">＋ Issue Samples</a>
+  </div>
+</div>
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Units Sampled</span>
+    <span class="stat-value">{{ total_units }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Value at Cost</span>
+    <span class="stat-value">{{ total_value|floatformat:2 }}</span>
+  </div>
+</div>
+
+<div class="card">
+  <form method="GET" style="display:flex;gap:10px;margin-bottom:16px">
+    <select name="employee" style="flex:1;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
+      <option value="">All team members</option>
+      {% for e in employees %}
+      <option value="{{ e.id }}" {% if selected_employee == e.id|stringformat:"s" %}selected{% endif %}>{{ e.full_name }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit" class="btn">Filter</button>
+    {% if selected_employee %}<a href="{% url 'sample_list' %}" class="btn btn-grey">Clear</a>{% endif %}
+  </form>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Reference</th><th>Date</th><th>MR</th><th>Given To</th>
+        <th>Products</th><th class="num">Units</th><th class="num">Value</th>
+      </tr></thead>
+      <tbody>
+        {% for i in issues %}
+        <tr>
+          <td><strong>{{ i.reference }}</strong></td>
+          <td>{{ i.date|date:"d-m-Y" }}</td>
+          <td>{{ i.employee.full_name }}</td>
+          <td>{% if i.call_point %}{{ i.call_point.name }}
+              {% else %}<span class="muted">not recorded</span>{% endif %}</td>
+          <td style="font-size:13px;color:#55657a">
+            {% for line in i.items.all %}{{ line.product.name }} ×{{ line.qty }}{% if not forloop.last %}, {% endif %}{% endfor %}
+          </td>
+          <td class="num"><strong>{{ i.total_units }}</strong></td>
+          <td class="num">{{ i.total_value|floatformat:2 }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" style="text-align:center;padding:26px">
+          No samples issued yet.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .stat-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+    gap:15px;margin-bottom:20px; }
+  .stat { display:flex;flex-direction:column;gap:5px; }
+  .stat-label { font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8595a8; }
+  .stat-value { font-size:25px;font-weight:700;color:var(--brand-dark);
+    font-variant-numeric:tabular-nums; }
+</style>
+{% endblock %}

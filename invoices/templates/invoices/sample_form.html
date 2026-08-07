@@ -1,0 +1,171 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Issue Samples{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Issue Samples</h1>
+  <a href="{% url 'sample_list' %}" class="btn btn-grey">All Sample Issues</a>
+</div>
+
+<div class="alert alert-warn">
+  Samples come out of the same stock you sell from. Each line deducts the
+  batch and is recorded in the stock ledger, so 2,500 packs stay 2,500 packs
+  across sales and samples together.
+</div>
+
+<form method="POST">
+  {% csrf_token %}
+
+  <div class="card" style="margin-bottom:16px">
+    <div class="row">
+      <div class="field">
+        <label for="{{ form.employee.id_for_label }}">Issued By (MR)</label>
+        {{ form.employee }} {{ form.employee.errors }}
+      </div>
+      <div class="field">
+        <label for="{{ form.call_point.id_for_label }}">Given To (Doctor / Hospital)</label>
+        {{ form.call_point }} {{ form.call_point.errors }}
+      </div>
+      <div class="field">
+        <label for="{{ form.date.id_for_label }}">Date</label>
+        {{ form.date }} {{ form.date.errors }}
+      </div>
+    </div>
+    <div class="field">
+      <label for="{{ form.note.id_for_label }}">Note</label>
+      {{ form.note }} {{ form.note.errors }}
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">Samples</h3>
+
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr>
+          <th style="min-width:210px">Product</th><th style="min-width:210px">Batch</th>
+          <th style="width:120px">Quantity</th><th></th>
+        </tr></thead>
+        <tbody id="lines"></tbody>
+      </table>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:16px;align-items:center">
+      <button type="button" class="btn btn-grey" onclick="addLine()">＋ Add Line</button>
+      <span style="margin-left:auto;font-size:15px">
+        Total units: <strong id="grand" style="font-size:19px">0</strong>
+      </span>
+    </div>
+
+    <div style="margin-top:16px">
+      <button type="submit" class="btn btn-green">Issue Samples</button>
+    </div>
+  </div>
+</form>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .field { margin-bottom:14px; }
+  .field label { display:block;margin-bottom:5px;font-size:13px;font-weight:600;color:#55657a; }
+  .field input, .field select, .field textarea {
+    width:100%;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;
+    font-size:14px;font-family:inherit; }
+  .row { display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0 14px; }
+  #lines input, #lines select {
+    width:100%;padding:6px 8px;border:1px solid #dbe2ea;border-radius:5px;font-size:13px; }
+  #lines td { padding:5px; }
+  .delete-btn { background:#dc3545;color:#fff;border:none;border-radius:5px;
+    padding:6px 10px;cursor:pointer; }
+  .stock-note { display:block;font-size:11px;color:#8595a8;margin-top:3px; }
+</style>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+  const PRODUCTS = [
+    {% for p in products %}
+    { id: "{{ p.id }}", label: "{{ p.name|escapejs }}" },
+    {% endfor %}
+  ];
+
+  const BATCHES_URL = "{% url 'product_batches' 0 %}";
+
+  function addLine() {
+    const tr = document.createElement("tr");
+
+    tr.innerHTML = `
+      <td><select class="product" onchange="loadBatches(this)">
+            <option value="">-- select product --</option>
+          </select></td>
+      <td><select name="batch[]" class="batch"><option value="">-- pick product first --</option></select>
+          <span class="stock-note"></span></td>
+      <td><input name="qty[]" type="number" min="1" value="1" oninput="updateTotal()"></td>
+      <td><button type="button" class="delete-btn" onclick="removeLine(this)">✕</button></td>
+    `;
+
+    document.getElementById("lines").appendChild(tr);
+
+    const select = tr.querySelector(".product");
+
+    PRODUCTS.forEach(function (p) {
+      const option = document.createElement("option");
+      option.value = p.id;
+      /* Text, never markup, so a product name cannot inject HTML */
+      option.textContent = p.label;
+      select.appendChild(option);
+    });
+  }
+
+  function loadBatches(select) {
+    const row = select.closest("tr");
+    const batches = row.querySelector(".batch");
+    const note = row.querySelector(".stock-note");
+
+    batches.innerHTML = "";
+    note.textContent = "";
+
+    if (!select.value) return;
+
+    fetch(BATCHES_URL.replace("/0/", "/" + select.value + "/"))
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data.batches.length) {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = "-- no sellable stock --";
+          batches.appendChild(option);
+          note.textContent = "Nothing in stock to sample.";
+          return;
+        }
+
+        data.batches.forEach(function (b) {
+          const option = document.createElement("option");
+          option.value = b.id;
+          option.textContent = b.batch_no + " · exp " + b.expiry + " · " + b.quantity + " left";
+          option.dataset.quantity = b.quantity;
+          batches.appendChild(option);
+        });
+
+        note.textContent = data.batches[0].quantity + " in stock";
+      })
+      .catch(function () { note.textContent = "Could not load batches."; });
+  }
+
+  function removeLine(button) {
+    button.closest("tr").remove();
+    updateTotal();
+  }
+
+  function updateTotal() {
+    let total = 0;
+
+    document.querySelectorAll('#lines [name="qty[]"]').forEach(function (el) {
+      total += parseInt(el.value, 10) || 0;
+    });
+
+    document.getElementById("grand").textContent = total;
+  }
+
+  window.addEventListener("load", function () { addLine(); updateTotal(); });
+</script>
+{% endblock %}

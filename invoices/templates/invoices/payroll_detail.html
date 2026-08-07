@@ -1,0 +1,83 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Payroll {{ run.month|date:"F Y" }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Payroll — {{ run.month|date:"F Y" }}</h1>
+  <div style="display:flex;gap:9px" class="no-print">
+    {% if run.is_editable %}
+    <form method="POST" action="{% url 'payroll_finalise' run.id %}">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-green">Finalise</button>
+    </form>
+    {% endif %}
+    <button onclick="window.print()" class="btn btn-grey">Print</button>
+    <a href="{% url 'payroll_list' %}" class="btn btn-grey">All Runs</a>
+  </div>
+</div>
+
+{% if not run.is_editable %}
+<div class="alert alert-success">
+  This run is finalised. Payslips can still be downloaded, but not edited.
+</div>
+{% endif %}
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Payslips</span>
+    <span class="stat-value">{{ payslips|length }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Gross</span>
+    <span class="stat-value">{{ run.total_gross|floatformat:2 }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Net Payable</span>
+    <span class="stat-value" style="color:#1e7b24">{{ run.total_net|floatformat:2 }}</span>
+  </div>
+</div>
+
+<div class="card"><div style="overflow-x:auto">
+  <table>
+    <thead><tr>
+      <th>Employee</th><th>Designation</th><th class="num">Basic</th>
+      <th class="num">Allowances</th><th class="num">Expenses</th>
+      <th class="num">Deductions</th><th class="num">Net Pay</th><th class="no-print"></th>
+    </tr></thead>
+    <tbody>
+      {% for p in payslips %}
+      <tr>
+        <td><strong>{{ p.employee.full_name }}</strong><br>
+          <span style="font-size:12px;color:#8595a8">{{ p.employee.employee_code }}</span></td>
+        <td>{{ p.employee.get_designation_display }}</td>
+        <td class="num">{{ p.basic_salary|floatformat:2 }}</td>
+        <td class="num">{{ p.total_allowances|floatformat:2 }}</td>
+        <td class="num">{{ p.expense_reimbursement|floatformat:2 }}</td>
+        <td class="num" style="color:#a71d2a">{{ p.total_deductions|floatformat:2 }}</td>
+        <td class="num"><strong>{{ p.net_pay|floatformat:2 }}</strong></td>
+        <td class="no-print" style="white-space:nowrap">
+          <a href="{% url 'payslip_pdf' p.id %}" class="btn btn-sm">Slip PDF</a>
+          {% if run.is_editable %}
+          <a href="{% url 'payslip_edit' p.id %}" class="btn btn-sm btn-grey">Edit</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="8" style="text-align:center;padding:26px">
+        No payslips. Add team members with a salary, then re-run payroll.
+      </td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div></div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .stat-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+    gap:15px;margin-bottom:20px; }
+  .stat { display:flex;flex-direction:column;gap:5px; }
+  .stat-label { font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8595a8; }
+  .stat-value { font-size:25px;font-weight:700;color:var(--brand-dark);
+    font-variant-numeric:tabular-nums; }
+</style>
+{% endblock %}

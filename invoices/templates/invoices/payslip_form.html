@@ -1,0 +1,70 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Edit Payslip{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>{{ payslip.employee.full_name }} — {{ payslip.run.month|date:"F Y" }}</h1>
+  <a href="{% url 'payslip_pdf' payslip.id %}" class="btn btn-grey">Slip PDF</a>
+</div>
+
+<div class="card" style="max-width:640px">
+  <form method="POST">
+    {% csrf_token %}
+
+    <div class="section-title">Earnings</div>
+    <div class="row">
+      <div class="field"><label for="basic_salary">Basic Salary</label>
+        <input type="number" step="0.01" min="0" name="basic_salary" id="basic_salary"
+               value="{{ payslip.basic_salary }}" /></div>
+      <div class="field"><label for="fuel_allowance">Fuel Allowance</label>
+        <input type="number" step="0.01" min="0" name="fuel_allowance" id="fuel_allowance"
+               value="{{ payslip.fuel_allowance }}" /></div>
+      <div class="field"><label for="mobile_allowance">Mobile Allowance</label>
+        <input type="number" step="0.01" min="0" name="mobile_allowance" id="mobile_allowance"
+               value="{{ payslip.mobile_allowance }}" /></div>
+      <div class="field"><label for="other_allowance">Other Allowance</label>
+        <input type="number" step="0.01" min="0" name="other_allowance" id="other_allowance"
+               value="{{ payslip.other_allowance }}" /></div>
+      <div class="field"><label for="expense_reimbursement">Expense Reimbursement</label>
+        <input type="number" step="0.01" min="0" name="expense_reimbursement"
+               id="expense_reimbursement" value="{{ payslip.expense_reimbursement }}" />
+        <p class="help">Pulled from approved expenses for this month.</p></div>
+    </div>
+
+    <div class="section-title">Deductions</div>
+    <div class="row">
+      <div class="field"><label for="tax_deduction">Income Tax</label>
+        <input type="number" step="0.01" min="0" name="tax_deduction" id="tax_deduction"
+               value="{{ payslip.tax_deduction }}" /></div>
+      <div class="field"><label for="advance_deduction">Advance Recovery</label>
+        <input type="number" step="0.01" min="0" name="advance_deduction"
+               id="advance_deduction" value="{{ payslip.advance_deduction }}" /></div>
+      <div class="field"><label for="other_deduction">Other Deductions</label>
+        <input type="number" step="0.01" min="0" name="other_deduction"
+               id="other_deduction" value="{{ payslip.other_deduction }}" /></div>
+    </div>
+
+    <div class="field">
+      <label for="note">Note (printed on the slip)</label>
+      <input type="text" name="note" id="note" maxlength="255" value="{{ payslip.note }}" />
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:22px">
+      <button type="submit" class="btn">Save</button>
+      <a href="{% url 'payroll_detail' payslip.run.id %}" class="btn btn-grey">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .field { margin-bottom:14px; }
+  .field label { display:block;margin-bottom:5px;font-size:13px;font-weight:600;color:#55657a; }
+  .field input { width:100%;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;
+    font-size:14px;font-family:inherit; }
+  .row { display:grid;grid-template-columns:1fr 1fr;gap:0 14px; }
+  .section-title { font-size:12px;text-transform:uppercase;letter-spacing:.6px;
+    color:var(--brand);border-bottom:1px solid #eef2f6;padding-bottom:6px;margin:22px 0 14px; }
+  .help { font-size:12px;color:#8595a8;margin:5px 0 0; }
+</style>
+{% endblock %}

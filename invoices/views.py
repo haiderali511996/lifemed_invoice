@@ -19,7 +19,11 @@ from .forms import (
     CustomerForm,
     DistributorForm,
     EmployeeForm,
+    ExpenseCategoryForm,
+    ExpenseForm,
     ManufacturerForm,
+    PayrollRunForm,
+    SampleIssueForm,
     PaymentForm,
     PlanGenerateForm,
     ProductForm,
@@ -40,14 +44,20 @@ from .models import (
     Customer,
     Distributor,
     Employee,
+    Expense,
+    ExpenseCategory,
     EXPIRY_WARNING_DAYS,
     Invoice,
     Item,
     InvoiceLog,
     Manufacturer,
     Payment,
+    PayrollRun,
+    Payslip,
     PlanVisit,
     Product,
+    SampleIssue,
+    SampleIssueItem,
     SalesReturn,
     SalesReturnItem,
     Purchase,
@@ -63,6 +73,7 @@ from .models import (
 )
 
 from .pdf import TemplateError, render_invoice
+from .payslip import render_payslip
 
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
@@ -2043,3 +2054,553 @@ def _apply_purchase_edits(changes, user):
             batch.save(update_fields=["cost_price"])
 
     return applied
+
+
+# ---------------------------------------------------------------- EXPENSES
+
+@login_required
+def expense_list(request):
+    expenses = Expense.objects.select_related(
+        "category", "employee", "territory", "submitted_by"
+    )
+
+    category_id = request.GET.get("category", "").strip()
+    employee_id = request.GET.get("employee", "").strip()
+    status = request.GET.get("status", "").strip()
+    month = request.GET.get("month", "").strip()
+
+    if category_id:
+        expenses = expenses.filter(category_id=category_id)
+
+    if employee_id:
+        expenses = expenses.filter(employee_id=employee_id)
+
+    if status:
+        expenses = expenses.filter(status=status)
+
+    if month:
+        parsed = parse_date(f"{month}-01")
+
+        if parsed:
+            expenses = expenses.filter(
+                date__year=parsed.year, date__month=parsed.month
+            )
+
+    expenses = list(expenses)
+
+    # Rejected claims never leave the bank, so they are not spend.
+    counted = [e for e in expenses if e.counts_towards_spend]
+
+    return render(
+        request,
+        "invoices/expense_list.html",
+        {
+            "expenses": expenses,
+            "total": sum((e.amount for e in counted), ZERO),
+            "pending_total": sum(
+                (e.amount for e in expenses if e.status == Expense.PENDING), ZERO
+            ),
+            "categories": ExpenseCategory.objects.filter(is_active=True),
+            "employees": Employee.objects.filter(is_active=True),
+            "statuses": Expense.STATUS_CHOICES,
+            "selected": {
+                "category": category_id, "employee": employee_id,
+                "status": status, "month": month,
+            },
+        }
+    )
+
+
+@login_required
+def expense_edit(request, expense_id=None):
+    expense = get_object_or_404(Expense, pk=expense_id) if expense_id else None
+
+    if request.method == "POST":
+        form = ExpenseForm(request.POST, request.FILES, instance=expense)
+
+        if form.is_valid():
+            saved = form.save(commit=False)
+
+            if saved.submitted_by_id is None:
+                saved.submitted_by = request.user
+
+            saved.save()
+
+            messages.success(
+                request, f"Saved {saved.category.name} — {saved.amount}."
+            )
+
+            return redirect("expense_list")
+
+    else:
+        form = ExpenseForm(instance=expense)
+
+    return render(
+        request,
+        "invoices/expense_form.html",
+        {
+            "form": form,
+            "expense": expense,
+            "heading": "Edit Expense" if expense else "New Expense",
+        }
+    )
+
+
+@login_required
+def expense_status(request, expense_id, action):
+    expense = get_object_or_404(Expense, pk=expense_id)
+
+    transitions = {
+        "approve": Expense.APPROVED,
+        "reject": Expense.REJECTED,
+        "paid": Expense.PAID,
+    }
+
+    if action not in transitions:
+        messages.error(request, "Unknown action.")
+
+    else:
+        expense.status = transitions[action]
+        expense.reviewed_by = request.user
+        expense.reviewed_at = timezone.now()
+        expense.review_note = request.POST.get("review_note", "")[:255]
+        expense.save()
+
+        messages.success(
+            request, f"{expense.category.name} marked {expense.get_status_display().lower()}."
+        )
+
+    return redirect("expense_list")
+
+
+@login_required
+def expense_report(request):
+    """Spend by category and by team member, for a chosen month or all time."""
+    month = request.GET.get("month", "").strip()
+
+    expenses = Expense.objects.exclude(status=Expense.REJECTED).select_related(
+        "category", "employee"
+    )
+
+    if month:
+        parsed = parse_date(f"{month}-01")
+
+        if parsed:
+            expenses = expenses.filter(
+                date__year=parsed.year, date__month=parsed.month
+            )
+
+    by_category = {}
+    by_employee = {}
+
+    for expense in expenses:
+        by_category[expense.category.name] = (
+            by_category.get(expense.category.name, ZERO) + expense.amount
+        )
+
+        who = expense.employee.full_name if expense.employee else "Company"
+        by_employee[who] = by_employee.get(who, ZERO) + expense.amount
+
+    return render(
+        request,
+        "invoices/expense_report.html",
+        {
+            "by_category": sorted(
+                by_category.items(), key=lambda row: row[1], reverse=True
+            ),
+            "by_employee": sorted(
+                by_employee.items(), key=lambda row: row[1], reverse=True
+            ),
+            "total": sum(by_category.values(), ZERO),
+            "month": month,
+        }
+    )
+
+
+@login_required
+def expense_category_list(request):
+    return render(
+        request,
+        "invoices/expense_category_list.html",
+        {
+            "categories": ExpenseCategory.objects.annotate(
+                claim_count=Count("expenses"),
+                spend=Coalesce(Sum("expenses__amount"), ZERO, output_field=MONEY),
+            )
+        }
+    )
+
+
+@login_required
+def expense_category_edit(request, category_id=None):
+    category = (
+        get_object_or_404(ExpenseCategory, pk=category_id) if category_id else None
+    )
+
+    if request.method == "POST":
+        form = ExpenseCategoryForm(request.POST, instance=category)
+
+        if form.is_valid():
+            saved = form.save()
+            messages.success(request, f"Saved {saved.name}.")
+
+            return redirect("expense_category_list")
+
+    else:
+        form = ExpenseCategoryForm(instance=category)
+
+    return render(
+        request,
+        "invoices/simple_form.html",
+        {
+            "form": form,
+            "heading": "Edit Category" if category else "New Expense Category",
+            "cancel_url": reverse("expense_category_list"),
+        }
+    )
+
+
+# ---------------------------------------------------------------- SAMPLING
+
+@login_required
+def sample_list(request):
+    issues = SampleIssue.objects.select_related(
+        "employee", "call_point", "created_by"
+    ).prefetch_related("items__product", "items__batch")
+
+    employee_id = request.GET.get("employee", "").strip()
+
+    if employee_id:
+        issues = issues.filter(employee_id=employee_id)
+
+    issues = list(issues)
+
+    return render(
+        request,
+        "invoices/sample_list.html",
+        {
+            "issues": issues,
+            "employees": Employee.objects.filter(is_active=True),
+            "selected_employee": employee_id,
+            "total_units": sum(issue.total_units for issue in issues),
+            "total_value": sum((issue.total_value for issue in issues), ZERO),
+        }
+    )
+
+
+@login_required
+def sample_create(request):
+    """Hand samples to a doctor, taken straight out of sellable stock."""
+    if request.method == "POST":
+        form = SampleIssueForm(request.POST)
+
+        batch_ids = request.POST.getlist("batch[]")
+        quantities = post_column(request, "qty[]", len(batch_ids))
+
+        lines, errors = _clean_sample_lines(batch_ids, quantities)
+
+        if form.is_valid() and lines and not errors:
+            issue_record = form.save(commit=False)
+            issue_record.created_by = request.user
+            issue_record.save()
+
+            units = _issue_samples(issue_record, lines, request.user)
+
+            messages.success(
+                request,
+                f"{issue_record.reference}: {units} sample(s) issued to "
+                f"{issue_record.call_point or 'the field'}.",
+            )
+
+            return redirect("sample_list")
+
+        for error in errors:
+            messages.error(request, error)
+
+        if not lines and not errors:
+            messages.error(request, "Add at least one product line.")
+
+    else:
+        form = SampleIssueForm(initial={"date": timezone.localdate()})
+
+    return render(
+        request,
+        "invoices/sample_form.html",
+        {
+            "form": form,
+            "products": Product.objects.filter(is_active=True),
+        }
+    )
+
+
+def _clean_sample_lines(batch_ids, quantities):
+    """Check every line against live stock before issuing any of it."""
+    lines = []
+    errors = []
+
+    wanted = {}
+
+    for index, raw_id in enumerate(batch_ids):
+        if not raw_id:
+            continue
+
+        batch = Batch.objects.select_related("product").filter(pk=raw_id).first()
+
+        if batch is None:
+            errors.append(f"Row {index + 1}: unknown batch.")
+            continue
+
+        qty = safe_int(quantities[index])
+
+        if qty <= 0:
+            errors.append(f"Row {index + 1}: quantity must be at least 1.")
+            continue
+
+        if batch.is_expired:
+            errors.append(
+                f"{batch.product.name} batch {batch.batch_no} expired on "
+                f"{batch.expiry_date:%d-%m-%Y} and cannot be sampled."
+            )
+            continue
+
+        # Two rows can name the same batch; check the combined total.
+        wanted[batch.pk] = wanted.get(batch.pk, 0) + qty
+
+        if wanted[batch.pk] > batch.quantity:
+            errors.append(
+                f"{batch.product.name} batch {batch.batch_no}: only "
+                f"{batch.quantity} in stock."
+            )
+            continue
+
+        lines.append({"batch": batch, "qty": qty})
+
+    return lines, errors
+
+
+@transaction.atomic
+def _issue_samples(issue_record, lines, user):
+    units = 0
+
+    for line in lines:
+        batch = line["batch"]
+
+        SampleIssueItem.objects.create(
+            sample_issue=issue_record,
+            product=batch.product,
+            batch=batch,
+            qty=line["qty"],
+        )
+
+        issue(
+            batch,
+            line["qty"],
+            reference=issue_record.reference,
+            note=(
+                f"Sample to {issue_record.call_point}"
+                if issue_record.call_point else "Sample issued"
+            ),
+            user=user,
+            kind=StockMovement.SAMPLE,
+        )
+
+        units += line["qty"]
+
+    return units
+
+
+@login_required
+def sample_report(request):
+    """Samples by team member, by product and by doctor."""
+    items = SampleIssueItem.objects.select_related(
+        "product", "batch", "sample_issue__employee", "sample_issue__call_point"
+    )
+
+    by_employee = {}
+    by_product = {}
+    by_doctor = {}
+
+    for line in items:
+        issue_record = line.sample_issue
+
+        who = issue_record.employee.full_name
+        by_employee[who] = by_employee.get(who, 0) + line.qty
+
+        by_product[line.product.name] = (
+            by_product.get(line.product.name, 0) + line.qty
+        )
+
+        doctor = (
+            issue_record.call_point.name if issue_record.call_point
+            else "Not recorded"
+        )
+        by_doctor[doctor] = by_doctor.get(doctor, 0) + line.qty
+
+    def ranked(mapping):
+        return sorted(mapping.items(), key=lambda row: row[1], reverse=True)
+
+    return render(
+        request,
+        "invoices/sample_report.html",
+        {
+            "by_employee": ranked(by_employee),
+            "by_product": ranked(by_product),
+            "by_doctor": ranked(by_doctor)[:25],
+            "total_units": sum(by_product.values()),
+        }
+    )
+
+
+# ---------------------------------------------------------------- PAYROLL
+
+@login_required
+def payroll_list(request):
+    runs = PayrollRun.objects.prefetch_related("payslips")
+
+    return render(
+        request,
+        "invoices/payroll_list.html",
+        {
+            "runs": runs,
+            "form": PayrollRunForm(initial={"month": timezone.localdate()}),
+        }
+    )
+
+
+@login_required
+def payroll_create(request):
+    if request.method != "POST":
+        return redirect("payroll_list")
+
+    form = PayrollRunForm(request.POST)
+
+    if not form.is_valid():
+        for errors in form.errors.values():
+            for error in errors:
+                messages.error(request, error)
+
+        return redirect("payroll_list")
+
+    run = form.save(commit=False)
+    run.created_by = request.user
+    run.save()
+
+    created = _generate_payslips(run)
+
+    messages.success(
+        request, f"{run}: generated {created} payslip(s)."
+    )
+
+    return redirect("payroll_detail", run_id=run.pk)
+
+
+@transaction.atomic
+def _generate_payslips(run):
+    """One slip per active employee, with the month's approved expenses."""
+    created = 0
+
+    for employee in Employee.objects.filter(is_active=True):
+        reimbursement = (
+            Expense.objects.filter(
+                employee=employee,
+                status=Expense.APPROVED,
+                date__year=run.month.year,
+                date__month=run.month.month,
+            ).aggregate(t=Sum("amount"))["t"] or ZERO
+        )
+
+        payslip = Payslip(
+            run=run,
+            employee=employee,
+            basic_salary=employee.basic_salary,
+            fuel_allowance=employee.fuel_allowance,
+            mobile_allowance=employee.mobile_allowance,
+            other_allowance=employee.other_allowance,
+            expense_reimbursement=reimbursement,
+        )
+
+        payslip.recalculate().save()
+        created += 1
+
+    return created
+
+
+@login_required
+def payroll_detail(request, run_id):
+    run = get_object_or_404(PayrollRun, pk=run_id)
+
+    return render(
+        request,
+        "invoices/payroll_detail.html",
+        {
+            "run": run,
+            "payslips": run.payslips.select_related("employee"),
+        }
+    )
+
+
+@login_required
+def payroll_finalise(request, run_id):
+    run = get_object_or_404(PayrollRun, pk=run_id)
+
+    run.status = PayrollRun.FINALISED
+    run.save(update_fields=["status"])
+
+    messages.success(request, f"{run} finalised.")
+
+    return redirect("payroll_detail", run_id=run.pk)
+
+
+@login_required
+def payslip_edit(request, payslip_id):
+    """Adjust deductions before the run is finalised."""
+    payslip = get_object_or_404(
+        Payslip.objects.select_related("run", "employee"), pk=payslip_id
+    )
+
+    if not payslip.run.is_editable:
+        messages.error(request, "This payroll run has been finalised.")
+
+        return redirect("payroll_detail", run_id=payslip.run_id)
+
+    if request.method == "POST":
+        for field in ("basic_salary", "fuel_allowance", "mobile_allowance",
+                      "other_allowance", "expense_reimbursement",
+                      "tax_deduction", "advance_deduction", "other_deduction"):
+            setattr(
+                payslip, field,
+                safe_decimal(request.POST.get(field, "0"), max_value=MAX_TOTAL),
+            )
+
+        payslip.note = clip(request.POST.get("note", ""), 255)
+        payslip.recalculate().save()
+
+        messages.success(request, f"Updated {payslip.employee.full_name}'s slip.")
+
+        return redirect("payroll_detail", run_id=payslip.run_id)
+
+    return render(
+        request,
+        "invoices/payslip_form.html",
+        {"payslip": payslip}
+    )
+
+
+@login_required
+def payslip_pdf(request, payslip_id):
+    payslip = get_object_or_404(
+        Payslip.objects.select_related("run", "employee", "employee__territory"),
+        pk=payslip_id,
+    )
+
+    response = HttpResponse(
+        render_payslip(payslip), content_type="application/pdf"
+    )
+
+    name = payslip.employee.employee_code or payslip.employee_id
+
+    response["Content-Disposition"] = (
+        f'attachment; filename="payslip-{name}-{payslip.run.month:%Y-%m}.pdf"'
+    )
+
+    return response

@@ -516,6 +516,9 @@
         </a>
 
         <div class="nav-section">Field Force</div>
+        <a href="{% url 'sample_list' %}" class="{% if active == 'samples' %}active{% endif %}">
+          🧪 <span>Sampling</span>
+        </a>
         <a href="{% url 'team_list' %}" class="{% if active == 'team' %}active{% endif %}">
           🧑‍💼 <span>Team</span>
         </a>
@@ -529,7 +532,21 @@
           🗺️ <span>Territories</span>
         </a>
 
+        <div class="nav-section">Money Out</div>
+        <a href="{% url 'expense_list' %}" class="{% if active == 'expenses' %}active{% endif %}">
+          🧾 <span>Expenses</span>
+        </a>
+        <a href="{% url 'payroll_list' %}" class="{% if active == 'payroll' %}active{% endif %}">
+          💵 <span>Payroll</span>
+        </a>
+
         <div class="nav-section">Reports</div>
+        <a href="{% url 'expense_report' %}" class="{% if active == 'expense_report' %}active{% endif %}">
+          📈 <span>Expense Report</span>
+        </a>
+        <a href="{% url 'sample_report' %}" class="{% if active == 'sample_report' %}active{% endif %}">
+          🔬 <span>Sample Report</span>
+        </a>
         <a href="{% url 'territory_report' %}" class="{% if active == 'territory_report' %}active{% endif %}">
           📍 <span>Location-wise</span>
         </a>
@@ -540,6 +557,9 @@
         <div class="nav-section">Setup</div>
         <a href="{% url 'distributor_list' %}" class="{% if active == 'distributors' %}active{% endif %}">
           🏢 <span>Distributors</span>
+        </a>
+        <a href="{% url 'expense_category_list' %}" class="{% if active == 'expense_categories' %}active{% endif %}">
+          🗂️ <span>Expense Categories</span>
         </a>
       </nav>
     </aside>

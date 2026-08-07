@@ -395,6 +395,13 @@ class Employee(models.Model):
     joined_on = models.DateField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
+    basic_salary = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    fuel_allowance = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    mobile_allowance = models.DecimalField(
+        max_digits=12, decimal_places=2, default=ZERO
+    )
+    other_allowance = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+
     class Meta:
         ordering = ["full_name"]
 
@@ -851,12 +858,14 @@ class StockMovement(models.Model):
     SALE = "sale"
     ADJUSTMENT = "adjustment"
     RETURN = "return"
+    SAMPLE = "sample"
 
     KIND_CHOICES = (
         (PURCHASE, "Purchase"),
         (SALE, "Sale"),
         (ADJUSTMENT, "Adjustment"),
         (RETURN, "Return"),
+        (SAMPLE, "Sample"),
     )
 
     product = models.ForeignKey(
@@ -965,3 +974,272 @@ class SalesReturnItem(models.Model):
         net = self.price - (self.price * self.discount / Decimal("100"))
 
         return (net * self.qty).quantize(ZERO)
+
+
+# ------------------------------------------------------------------ EXPENSES
+
+class ExpenseCategory(models.Model):
+    """A kind of spend: fuel allowance, doctor refreshment, DRAP fees..."""
+
+    name = models.CharField(max_length=120, unique=True)
+    code = models.CharField(max_length=20, blank=True)
+
+    per_employee = models.BooleanField(
+        default=True,
+        help_text="Tick when this is normally claimed by a team member. "
+                  "Company costs such as DRAP fees are not.",
+    )
+    is_active = models.BooleanField(default=True)
+    note = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name_plural = "expense categories"
+
+    def __str__(self):
+        return self.name
+
+
+class Expense(models.Model):
+    """One claim or company cost."""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    PAID = "paid"
+
+    STATUS_CHOICES = (
+        (PENDING, "Pending"),
+        (APPROVED, "Approved"),
+        (REJECTED, "Rejected"),
+        (PAID, "Paid"),
+    )
+
+    category = models.ForeignKey(
+        ExpenseCategory, on_delete=models.PROTECT, related_name="expenses"
+    )
+    employee = models.ForeignKey(
+        Employee, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="expenses",
+        help_text="Leave blank for a company cost that is not claimed by anyone.",
+    )
+    territory = models.ForeignKey(
+        Territory, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="expenses",
+    )
+
+    date = models.DateField(default=timezone.localdate)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+
+    description = models.CharField(max_length=255, blank=True)
+    reference = models.CharField(
+        max_length=100, blank=True, help_text="Bill or voucher number."
+    )
+    receipt = models.FileField(upload_to="expense_receipts/", blank=True)
+
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=PENDING)
+
+    submitted_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, related_name="submitted_expenses"
+    )
+    reviewed_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="reviewed_expenses",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_note = models.CharField(max_length=255, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date", "-id"]
+
+    def __str__(self):
+        return f"{self.category.name} - {self.amount}"
+
+    @property
+    def is_settled(self):
+        return self.status == self.PAID
+
+    @property
+    def counts_towards_spend(self):
+        """Rejected claims are not money out of the door."""
+        return self.status != self.REJECTED
+
+
+# ------------------------------------------------------------------ SAMPLING
+
+class SampleIssue(models.Model):
+    """Samples an MR handed to a doctor, taken out of sellable stock."""
+
+    SAMPLE_PREFIX = "SMP"
+
+    employee = models.ForeignKey(
+        Employee, on_delete=models.PROTECT, related_name="sample_issues"
+    )
+    call_point = models.ForeignKey(
+        CallPoint, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="sample_issues",
+        help_text="The doctor or hospital the samples were left with.",
+    )
+
+    reference = models.CharField(max_length=20, unique=True)
+    date = models.DateField(default=timezone.localdate)
+    note = models.TextField(blank=True)
+
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date", "-id"]
+
+    def __str__(self):
+        return self.reference
+
+    @classmethod
+    def next_reference(cls):
+        numbers = []
+
+        for value in cls.objects.values_list("reference", flat=True):
+            suffix = str(value).rsplit("-", 1)[-1]
+
+            if suffix.isdigit():
+                numbers.append(int(suffix))
+
+        return f"{cls.SAMPLE_PREFIX}-{(max(numbers) + 1 if numbers else 1):04d}"
+
+    def save(self, *args, **kwargs):
+        if not self.reference:
+            self.reference = self.next_reference()
+
+        super().save(*args, **kwargs)
+
+    @property
+    def total_units(self):
+        return self.items.aggregate(t=Sum("qty"))["t"] or 0
+
+    @property
+    def total_value(self):
+        """What the samples cost, valued at batch cost."""
+        return sum(
+            (line.batch.cost_price * line.qty for line in self.items.all()),
+            ZERO,
+        )
+
+
+class SampleIssueItem(models.Model):
+    sample_issue = models.ForeignKey(
+        SampleIssue, on_delete=models.CASCADE, related_name="items"
+    )
+    product = models.ForeignKey(
+        Product, on_delete=models.PROTECT, related_name="sampled_items"
+    )
+    batch = models.ForeignKey(
+        Batch, on_delete=models.PROTECT, related_name="sampled_items"
+    )
+    qty = models.IntegerField()
+
+
+# ------------------------------------------------------------------ PAYROLL
+
+class PayrollRun(models.Model):
+    """One month's payroll."""
+
+    DRAFT = "draft"
+    FINALISED = "finalised"
+
+    STATUS_CHOICES = ((DRAFT, "Draft"), (FINALISED, "Finalised"))
+
+    month = models.DateField(help_text="Any date in the month; stored as the 1st.")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=DRAFT)
+    note = models.TextField(blank=True)
+
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-month"]
+        unique_together = [("month",)]
+
+    def __str__(self):
+        return self.month.strftime("%B %Y")
+
+    def save(self, *args, **kwargs):
+        # Normalise to the first of the month so one run per month is unique.
+        if self.month:
+            self.month = self.month.replace(day=1)
+
+        super().save(*args, **kwargs)
+
+    @property
+    def is_editable(self):
+        return self.status == self.DRAFT
+
+    @property
+    def total_net(self):
+        return self.payslips.aggregate(t=Sum("net_pay"))["t"] or ZERO
+
+    @property
+    def total_gross(self):
+        return self.payslips.aggregate(t=Sum("gross_pay"))["t"] or ZERO
+
+
+class Payslip(models.Model):
+    """One employee's pay for one month.
+
+    Amounts are copied from the employee at generation time so a later raise
+    never rewrites a slip that has already been handed out.
+    """
+
+    run = models.ForeignKey(
+        PayrollRun, on_delete=models.CASCADE, related_name="payslips"
+    )
+    employee = models.ForeignKey(
+        Employee, on_delete=models.PROTECT, related_name="payslips"
+    )
+
+    basic_salary = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    fuel_allowance = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    mobile_allowance = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    other_allowance = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+
+    expense_reimbursement = models.DecimalField(
+        max_digits=12, decimal_places=2, default=ZERO,
+        help_text="Approved expenses for the month, paid with salary.",
+    )
+
+    tax_deduction = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    advance_deduction = models.DecimalField(
+        max_digits=12, decimal_places=2, default=ZERO
+    )
+    other_deduction = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+
+    gross_pay = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    net_pay = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+
+    note = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["employee__full_name"]
+        unique_together = [("run", "employee")]
+
+    def __str__(self):
+        return f"{self.employee.full_name} - {self.run}"
+
+    @property
+    def total_allowances(self):
+        return (
+            self.fuel_allowance + self.mobile_allowance + self.other_allowance
+        )
+
+    @property
+    def total_deductions(self):
+        return self.tax_deduction + self.advance_deduction + self.other_deduction
+
+    def recalculate(self):
+        self.gross_pay = (
+            self.basic_salary + self.total_allowances + self.expense_reimbursement
+        )
+        self.net_pay = self.gross_pay - self.total_deductions
+
+        return self

@@ -1,0 +1,63 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Payroll{% endblock %}
+{% block content %}
+<div class="page-head"><h1>💵 Payroll</h1></div>
+
+<div class="card" style="margin-bottom:18px">
+  <h3 style="margin-top:0">Run Payroll</h3>
+  <p style="color:#8595a8;font-size:13px;margin-top:0">
+    Creates a payslip for every active team member using their salary and
+    allowances, plus any approved expenses claimed that month.
+  </p>
+
+  <form method="POST" action="{% url 'payroll_create' %}" class="gen-form">
+    {% csrf_token %}
+    <div class="field">
+      <label for="{{ form.month.id_for_label }}">Month</label>
+      {{ form.month }}
+    </div>
+    <div class="field" style="flex:1">
+      <label for="{{ form.note.id_for_label }}">Note</label>
+      {{ form.note }}
+    </div>
+    <button type="submit" class="btn btn-green">Generate Payslips</button>
+  </form>
+</div>
+
+<div class="card"><div style="overflow-x:auto">
+  <table>
+    <thead><tr>
+      <th>Month</th><th class="num">Payslips</th><th class="num">Gross</th>
+      <th class="num">Net</th><th>Status</th><th></th>
+    </tr></thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td><strong>{{ run.month|date:"F Y" }}</strong></td>
+        <td class="num">{{ run.payslips.count }}</td>
+        <td class="num">{{ run.total_gross|floatformat:2 }}</td>
+        <td class="num"><strong>{{ run.total_net|floatformat:2 }}</strong></td>
+        <td>{% if run.status == "finalised" %}<span class="pill pill-paid">finalised</span>
+            {% else %}<span class="pill pill-due">draft</span>{% endif %}</td>
+        <td><a href="{% url 'payroll_detail' run.id %}" class="btn btn-sm">Open</a></td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="6" style="text-align:center;padding:26px">
+        No payroll runs yet.
+      </td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div></div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .gen-form { display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap; }
+  .gen-form .field { margin:0; }
+  .gen-form label { display:block;margin-bottom:5px;font-size:13px;font-weight:600;color:#55657a; }
+  .gen-form input, .gen-form textarea {
+    padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px;
+    font-family:inherit;width:100%; }
+</style>
+{% endblock %}
