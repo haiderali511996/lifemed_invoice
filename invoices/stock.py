@@ -140,3 +140,58 @@ def allocate_fefo(product, quantity):
         remaining -= take
 
     return picks, remaining
+
+
+@transaction.atomic
+def record_sales_return(sales_return, lines, user=None):
+    """Credit an invoice and, unless the goods are unsaleable, restock them.
+
+    `lines` is [{item, qty, batch}]. Returns (created_count, restocked_units).
+    """
+    from .models import SalesReturnItem
+    from decimal import Decimal
+
+    created = 0
+    restocked = 0
+    total = Decimal("0.00")
+
+    for line in lines:
+        item = line["item"]
+        qty = int(line["qty"])
+
+        if qty <= 0:
+            continue
+
+        batch = line.get("batch") or item.stock_batch
+
+        returned = SalesReturnItem.objects.create(
+            sales_return=sales_return,
+            item=item,
+            name=item.name,
+            qty=qty,
+            price=item.price,
+            discount=item.discount,
+            batch=batch if sales_return.restock else None,
+        )
+
+        total += returned.line_total
+        created += 1
+
+        # Damaged or expired goods are credited but never put back on the
+        # shelf, so the customer is made whole without corrupting stock.
+        if sales_return.restock and batch is not None:
+            receive(
+                batch,
+                qty,
+                reference=sales_return.return_no,
+                note=f"Return against {sales_return.invoice.invoice_no}",
+                user=user,
+                kind=StockMovement.RETURN,
+            )
+
+            restocked += qty
+
+    sales_return.total = total
+    sales_return.save(update_fields=["total"])
+
+    return created, restocked

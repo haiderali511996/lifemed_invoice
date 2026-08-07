@@ -1,0 +1,74 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Stock Ledger{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Stock Ledger</h1>
+  <div style="display:flex;gap:9px" class="no-print">
+    <a href="{% url 'stock_report' %}" class="btn btn-grey">Stock on Hand</a>
+    <button onclick="window.print()" class="btn btn-grey">Print</button>
+  </div>
+</div>
+
+<div class="card">
+  <p style="color:#8595a8;font-size:13px;margin-top:0">
+    Every movement with a running balance per batch — the stock equivalent of
+    a customer statement. Newest first.
+  </p>
+
+  <form method="GET" style="display:flex;gap:10px;margin-bottom:16px" class="no-print">
+    <select name="product" style="flex:1;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
+      <option value="">All products</option>
+      {% for p in products %}
+      <option value="{{ p.id }}" {% if selected_product == p.id|stringformat:"s" %}selected{% endif %}>
+        {{ p.name }}
+      </option>
+      {% endfor %}
+    </select>
+    <button type="submit" class="btn">Filter</button>
+    {% if selected_product %}<a href="{% url 'stock_ledger' %}" class="btn btn-grey">Clear</a>{% endif %}
+  </form>
+
+  <div style="display:flex;gap:24px;margin-bottom:14px;font-size:14px">
+    <span>In: <strong style="color:#1e7b24">{{ total_in }}</strong></span>
+    <span>Out: <strong style="color:#a71d2a">{{ total_out }}</strong></span>
+  </div>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>When</th><th>Product</th><th>Batch</th><th>Type</th>
+        <th>Reference</th><th class="num">In</th><th class="num">Out</th>
+        <th class="num">Batch Balance</th><th>By</th>
+      </tr></thead>
+      <tbody>
+        {% for e in entries %}
+        <tr>
+          <td>{{ e.movement.created_at|date:"d-m-Y H:i" }}</td>
+          <td>{{ e.movement.product.name }}</td>
+          <td>{{ e.movement.batch.batch_no }}</td>
+          <td>
+            {% if e.movement.kind == "sale" %}<span class="pill pill-due">Sale</span>
+            {% elif e.movement.kind == "purchase" %}<span class="pill pill-paid">Purchase</span>
+            {% elif e.movement.kind == "return" %}<span class="pill pill-paid">Return</span>
+            {% else %}<span class="pill">Adjustment</span>{% endif %}
+          </td>
+          <td>{{ e.movement.reference|default:"-" }}
+            {% if e.movement.note %}<br /><span style="font-size:11px;color:#8595a8">{{ e.movement.note }}</span>{% endif %}
+          </td>
+          <td class="num" style="color:#1e7b24">
+            {% if e.movement.quantity > 0 %}{{ e.movement.quantity }}{% endif %}</td>
+          <td class="num" style="color:#a71d2a">
+            {% if e.movement.quantity < 0 %}{{ e.movement.quantity|slice:"1:" }}{% endif %}</td>
+          <td class="num"><strong>{{ e.balance }}</strong></td>
+          <td>{{ e.movement.created_by.username|default:"-" }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="9" style="text-align:center;padding:26px">
+          No stock movements yet.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

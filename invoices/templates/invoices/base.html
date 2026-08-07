@@ -491,10 +491,16 @@
         <a href="{% url 'payment_list' %}" class="{% if active == 'payments' %}active{% endif %}">
           💰 <span>Payments</span>
         </a>
+        <a href="{% url 'return_list' %}" class="{% if active == 'returns' %}active{% endif %}">
+          ↩️ <span>Sales Returns</span>
+        </a>
 
         <div class="nav-section">Purchasing &amp; Stock</div>
         <a href="{% url 'stock_report' %}" class="{% if active == 'stock' %}active{% endif %}">
           📦 <span>Stock on Hand</span>
+        </a>
+        <a href="{% url 'stock_ledger' %}" class="{% if active == 'stock_ledger' %}active{% endif %}">
+          📑 <span>Stock Ledger</span>
         </a>
         <a href="{% url 'purchase_list' %}" class="{% if active == 'purchases' %}active{% endif %}">
           🚚 <span>Purchases</span>

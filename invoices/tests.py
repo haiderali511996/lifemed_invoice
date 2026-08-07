@@ -40,6 +40,7 @@ from .models import (
     Product,
     Purchase,
     PurchaseItem,
+    SalesReturn,
     StockMovement,
     Supplier,
     Territory,
@@ -2423,3 +2424,356 @@ class DeleteInvoiceDataTests(TestCase):
         # The series restarts once the table is empty again - flagged rather
         # than silently reissued, since the deleted invoice was never sent.
         self.assertEqual(replacement.invoice_no, first_number)
+
+
+class SalesReturnTests(TestCase):
+    """A return credits the ledger and restocks the goods, without deleting
+    the invoice - the customer still has their copy of it."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.customer = Customer.objects.create(name="Shifa Pharmacy", address="x")
+        self.product = Product.objects.create(
+            code="PAN500", name="Panadol", trade_price=Decimal("100.00")
+        )
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1", quantity=50,
+            expiry_date=timezone.localdate() + timedelta(days=365),
+        )
+        self.invoice = Invoice.objects.create(
+            customer=self.customer, license_no="L", total=Decimal("900.00")
+        )
+        self.item = Item.objects.create(
+            invoice=self.invoice, name="Panadol", qty=10,
+            price=Decimal("100.00"), discount=Decimal("10.00"),
+            product=self.product, stock_batch=self.batch,
+        )
+        issue(self.batch, 10, reference=self.invoice.invoice_no)
+
+    def post_return(self, qty=10, restock=True, **extra):
+        payload = {
+            f"qty_{self.item.pk}": str(qty),
+            "date": timezone.localdate().isoformat(),
+            "reason": "Damaged in transit",
+        }
+
+        if restock:
+            payload["restock"] = "on"
+
+        payload.update(extra)
+
+        return self.client.post(
+            reverse("return_create", args=[self.invoice.pk]), payload
+        )
+
+    def test_return_credits_the_customer_ledger(self):
+        self.post_return(10)
+
+        self.assertEqual(self.customer.total_returned, Decimal("900.00"))
+        self.assertEqual(self.customer.outstanding_balance, Decimal("0.00"))
+
+    def test_return_restocks_the_batch(self):
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 40)
+
+        self.post_return(10)
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 50)
+
+    def test_the_invoice_is_not_deleted(self):
+        self.post_return(10)
+
+        self.assertTrue(Invoice.objects.filter(pk=self.invoice.pk).exists())
+        self.assertEqual(Invoice.objects.get(pk=self.invoice.pk).total,
+                         Decimal("900.00"))
+
+    def test_invoice_balance_drops_to_zero(self):
+        self.post_return(10)
+
+        invoice = Invoice.objects.get(pk=self.invoice.pk)
+        self.assertEqual(invoice.amount_returned, Decimal("900.00"))
+        self.assertEqual(invoice.balance, Decimal("0.00"))
+        self.assertTrue(invoice.is_paid)
+
+    def test_partial_return_credits_only_that_part(self):
+        self.post_return(4)          # 4 x (100 - 10%) = 360
+
+        invoice = Invoice.objects.get(pk=self.invoice.pk)
+        self.assertEqual(invoice.amount_returned, Decimal("360.00"))
+        self.assertEqual(invoice.balance, Decimal("540.00"))
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 44)
+
+    def test_returning_more_than_sold_is_refused(self):
+        response = self.post_return(11)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(SalesReturn.objects.count(), 0)
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 40)
+
+    def test_second_return_cannot_exceed_the_remainder(self):
+        self.post_return(6)
+        response = self.post_return(6)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(SalesReturn.objects.count(), 1)
+
+    def test_two_partial_returns_add_up(self):
+        self.post_return(4)
+        self.post_return(6)
+
+        invoice = Invoice.objects.get(pk=self.invoice.pk)
+        self.assertEqual(invoice.amount_returned, Decimal("900.00"))
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 50)
+
+    def test_damaged_goods_are_credited_but_not_restocked(self):
+        """Expired or damaged stock must never go back on the shelf."""
+        self.post_return(10, restock=False)
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 40)
+        self.assertEqual(self.customer.total_returned, Decimal("900.00"))
+
+    def test_the_restock_is_recorded_in_the_stock_ledger(self):
+        self.post_return(10)
+
+        movement = StockMovement.objects.get(kind=StockMovement.RETURN)
+        self.assertEqual(movement.quantity, 10)
+        self.assertIn(self.invoice.invoice_no, movement.note)
+
+    def test_return_appears_on_the_statement_as_a_credit(self):
+        self.post_return(10)
+
+        response = self.client.get(
+            reverse("customer_ledger", args=[self.customer.pk])
+        )
+        kinds = [entry["kind"] for entry in response.context["entries"]]
+
+        self.assertIn("return", kinds)
+        self.assertEqual(response.context["balance"], Decimal("0.00"))
+
+    def test_ledger_list_totals_account_for_credits(self):
+        self.post_return(4)
+
+        row = customers_with_balances().get(pk=self.customer.pk)
+
+        self.assertEqual(row.invoiced, Decimal("900.00"))
+        self.assertEqual(row.returned, Decimal("360.00"))
+        self.assertEqual(row.invoiced - row.paid - row.returned, Decimal("540.00"))
+
+    def test_a_fully_returned_invoice_is_not_overdue(self):
+        Invoice.objects.filter(pk=self.invoice.pk).update(
+            date=timezone.localdate() - timedelta(days=OVERDUE_DAYS + 5)
+        )
+        self.assertIn(
+            self.invoice.invoice_no,
+            [i.invoice_no for i in overdue_invoices()],
+        )
+
+        self.post_return(10)
+
+        self.assertNotIn(
+            self.invoice.invoice_no,
+            [i.invoice_no for i in overdue_invoices()],
+        )
+
+    def test_credit_notes_are_numbered_in_sequence(self):
+        self.post_return(4)
+        self.post_return(6)
+
+        numbers = sorted(SalesReturn.objects.values_list("return_no", flat=True))
+        self.assertEqual(numbers, ["CN-0001", "CN-0002"])
+
+    def test_an_empty_return_is_rejected(self):
+        response = self.client.post(
+            reverse("return_create", args=[self.invoice.pk]),
+            {"date": timezone.localdate().isoformat(), "restock": "on"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(SalesReturn.objects.count(), 0)
+
+    def test_return_pages_render(self):
+        self.post_return(2)
+
+        for url in (reverse("return_list"),
+                    reverse("return_create", args=[self.invoice.pk])):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, 200)
+
+
+class PurchaseEditTests(TestCase):
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.supplier = Supplier.objects.create(name="ABC Pharma")
+        self.product = Product.objects.create(code="PAN500", name="Panadol")
+
+        self.client.post(reverse("purchase_new"), {
+            "supplier": self.supplier.pk, "reference": "SUP-1",
+            "date": timezone.localdate().isoformat(), "note": "",
+            "product[]": [self.product.pk], "batch_no[]": ["B-1"],
+            "expiry_date[]": [
+                (timezone.localdate() + timedelta(days=400)).isoformat()
+            ],
+            "quantity[]": ["50"], "cost_price[]": ["80.00"],
+        })
+
+        self.purchase = Purchase.objects.get()
+        self.line = PurchaseItem.objects.get()
+        self.batch = Batch.objects.get()
+
+    def edit(self, qty=None, cost=None):
+        return self.client.post(
+            reverse("purchase_edit", args=[self.purchase.pk]),
+            {
+                "supplier": self.supplier.pk,
+                "reference": self.purchase.reference,
+                "date": self.purchase.date.isoformat(),
+                "note": "",
+                # `or` would swallow a deliberate 0, which is the case under test
+                f"qty_{self.line.pk}": str(
+                    self.line.quantity if qty is None else qty
+                ),
+                f"cost_{self.line.pk}": str(
+                    self.line.cost_price if cost is None else cost
+                ),
+            },
+        )
+
+    def test_cost_price_can_be_corrected(self):
+        response = self.edit(cost="95.50")
+
+        self.assertRedirects(response, reverse("purchase_list"))
+        self.line.refresh_from_db()
+        self.assertEqual(self.line.cost_price, Decimal("95.50"))
+
+    def test_correcting_the_cost_restates_the_batch(self):
+        self.edit(cost="95.50")
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.cost_price, Decimal("95.50"))
+
+    def test_purchase_total_follows_the_new_cost(self):
+        self.edit(cost="100.00")
+
+        self.assertEqual(Purchase.objects.get().total, Decimal("5000.00"))
+
+    def test_increasing_the_quantity_adds_stock(self):
+        self.edit(qty=60)
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 60)
+        self.assertEqual(self.batch.received_quantity, 60)
+
+    def test_decreasing_the_quantity_removes_stock(self):
+        self.edit(qty=30)
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 30)
+
+    def test_the_correction_is_recorded_in_the_ledger(self):
+        self.edit(qty=60)
+
+        movement = StockMovement.objects.filter(
+            kind=StockMovement.ADJUSTMENT
+        ).latest("id")
+
+        self.assertEqual(movement.quantity, 10)
+        self.assertIn("corrected", movement.note)
+
+    def test_cannot_reduce_below_what_has_been_sold(self):
+        """40 of the 50 have gone out; cutting the receipt to 5 is impossible."""
+        issue(self.batch, 40, reference="HHC-9965")
+
+        response = self.edit(qty=5)
+
+        self.assertEqual(response.status_code, 200)
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 10)
+        self.assertEqual(PurchaseItem.objects.get().quantity, 50)
+
+    def test_zero_quantity_is_rejected(self):
+        response = self.edit(qty=0)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(PurchaseItem.objects.get().quantity, 50)
+
+    def test_editing_nothing_changes_nothing(self):
+        before = StockMovement.objects.count()
+
+        self.edit()
+
+        self.assertEqual(StockMovement.objects.count(), before)
+
+
+class StockLedgerTests(TestCase):
+
+    def setUp(self):
+        User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.product = Product.objects.create(code="PAN500", name="Panadol")
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1", quantity=0,
+            expiry_date=timezone.localdate() + timedelta(days=365),
+        )
+
+    def test_running_balance_tracks_each_movement(self):
+        receive(self.batch, 100, reference="GRN-1")
+        issue(self.batch, 30, reference="HHC-9965")
+        issue(self.batch, 20, reference="HHC-9966")
+
+        entries = self.client.get(reverse("stock_ledger")).context["entries"]
+
+        # Newest first, so the top row carries the closing balance.
+        self.assertEqual(entries[0]["balance"], 50)
+        self.assertEqual([e["balance"] for e in entries], [50, 70, 100])
+
+    def test_totals_split_in_and_out(self):
+        receive(self.batch, 100)
+        issue(self.batch, 30)
+
+        response = self.client.get(reverse("stock_ledger"))
+
+        self.assertEqual(response.context["total_in"], 100)
+        self.assertEqual(response.context["total_out"], 30)
+
+    def test_balances_are_kept_per_batch(self):
+        other = Batch.objects.create(
+            product=self.product, batch_no="B-2", quantity=0,
+            expiry_date=timezone.localdate() + timedelta(days=365),
+        )
+        receive(self.batch, 10)
+        receive(other, 5)
+
+        entries = self.client.get(reverse("stock_ledger")).context["entries"]
+        balances = {e["movement"].batch.batch_no: e["balance"] for e in entries}
+
+        self.assertEqual(balances, {"B-1": 10, "B-2": 5})
+
+    def test_can_be_filtered_to_one_product(self):
+        other_product = Product.objects.create(code="BRU", name="Brufen")
+        other_batch = Batch.objects.create(
+            product=other_product, batch_no="X", quantity=0,
+            expiry_date=timezone.localdate() + timedelta(days=365),
+        )
+        receive(self.batch, 10)
+        receive(other_batch, 7)
+
+        entries = self.client.get(
+            reverse("stock_ledger"), {"product": self.product.pk}
+        ).context["entries"]
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["movement"].product, self.product)

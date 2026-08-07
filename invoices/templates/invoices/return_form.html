@@ -1,0 +1,118 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Return {{ invoice.invoice_no }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Sales Return — {{ invoice.invoice_no }}</h1>
+  <a href="{% url 'customer_ledger' invoice.customer.id %}" class="btn btn-grey">
+    Back to Ledger
+  </a>
+</div>
+
+<div class="alert alert-warn">
+  The invoice stays exactly as issued. This raises a credit note against it,
+  reduces what {{ invoice.customer.name }} owes, and puts the goods back into
+  stock.
+</div>
+
+{% if fully_returned %}
+<div class="alert alert-error">
+  Every line on this invoice has already been returned in full.
+</div>
+{% endif %}
+
+<form method="POST">
+  {% csrf_token %}
+
+  <div class="card" style="margin-bottom:16px">
+    <div class="summary">
+      <div><span class="k">Customer</span><span class="v">{{ invoice.customer.name }}</span></div>
+      <div><span class="k">Invoice Total</span><span class="v">{{ invoice.total|floatformat:2 }}</span></div>
+      <div><span class="k">Already Credited</span><span class="v">{{ invoice.amount_returned|floatformat:2 }}</span></div>
+      <div><span class="k">Still Collectable</span><span class="v total">{{ invoice.balance|floatformat:2 }}</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">What came back</h3>
+
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr>
+          <th>Item</th><th>Batch</th><th class="num">Sold</th>
+          <th class="num">Already Returned</th><th class="num">Returnable</th>
+          <th style="width:130px">Return Qty</th>
+        </tr></thead>
+        <tbody>
+          {% for line in lines %}
+          <tr>
+            <td><strong>{{ line.item.name }}</strong></td>
+            <td>
+              {% if line.item.stock_batch %}{{ line.item.stock_batch.batch_no }}
+              {% else %}<span class="muted">not from stock</span>{% endif %}
+            </td>
+            <td class="num">{{ line.item.qty }}</td>
+            <td class="num">{{ line.already_returned }}</td>
+            <td class="num"><strong>{{ line.returnable }}</strong></td>
+            <td>
+              {% if line.returnable %}
+              <input type="number" name="qty_{{ line.item.pk }}" min="0"
+                     max="{{ line.returnable }}" placeholder="0" />
+              {% else %}<span class="muted">—</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="row" style="margin-top:18px">
+      <div class="field">
+        <label for="date">Return Date</label>
+        <input type="date" name="date" id="date" value="{{ today|date:'Y-m-d' }}" />
+      </div>
+      <div class="field check">
+        <label for="restock">Put the goods back into stock</label>
+        <input type="checkbox" name="restock" id="restock" checked />
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="reason">Reason</label>
+      <textarea name="reason" id="reason" rows="2"
+        placeholder="Damaged in transit, wrong item supplied, near expiry..."></textarea>
+    </div>
+
+    <p class="help">
+      Leave "put back into stock" unticked for damaged or expired goods — the
+      customer is still credited, but nothing unsaleable re-enters stock.
+    </p>
+
+    <div style="display:flex;gap:10px;margin-top:18px">
+      <button type="submit" class="btn btn-green">Record Return</button>
+      <a href="{% url 'customer_ledger' invoice.customer.id %}" class="btn btn-grey">Cancel</a>
+    </div>
+  </div>
+</form>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .summary { display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px; }
+  .summary .k { display:block;font-size:11px;text-transform:uppercase;
+    letter-spacing:.5px;color:#8595a8;margin-bottom:4px; }
+  .summary .v { font-size:14px; }
+  .summary .total { font-size:22px;font-weight:700;color:var(--brand-dark); }
+  .field { margin-bottom:14px; }
+  .field label { display:block;margin-bottom:5px;font-size:13px;font-weight:600;color:#55657a; }
+  .field input[type="date"], .field textarea {
+    width:100%;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;
+    font-size:14px;font-family:inherit; }
+  .field.check { display:flex;align-items:center;gap:9px;flex-direction:row-reverse;
+    justify-content:flex-end; }
+  .field.check label { margin:0; }
+  .row { display:grid;grid-template-columns:1fr 1fr;gap:14px; }
+  #items input, td input[type="number"] {
+    width:100%;padding:6px 8px;border:1px solid #dbe2ea;border-radius:5px;font-size:13px; }
+  .help { font-size:12px;color:#8595a8;margin:5px 0 0; }
+</style>
+{% endblock %}

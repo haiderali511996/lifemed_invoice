@@ -30,7 +30,9 @@ from .forms import (
     TerritoryForm,
 )
 from .layout import LayoutError, describe, detect_layout
-from .stock import StockError, adjust, allocate_fefo, issue, receive
+from .stock import (
+    StockError, adjust, allocate_fefo, issue, receive, record_sales_return,
+)
 from .planning import current_week_start, generate_plan
 from .models import (
     Batch,
@@ -46,6 +48,8 @@ from .models import (
     Payment,
     PlanVisit,
     Product,
+    SalesReturn,
+    SalesReturnItem,
     Purchase,
     PurchaseItem,
     StockMovement,
@@ -545,7 +549,7 @@ def invoice_logs_view(request):
 MONEY = DecimalField(max_digits=14, decimal_places=2)
 
 
-def _sum_subquery(model, field):
+def _sum_subquery(model, field, parent="customer"):
     """Per-customer SUM as a correlated subquery.
 
     Two aggregates over different joins in one query multiply each other out,
@@ -554,8 +558,8 @@ def _sum_subquery(model, field):
     total independent.
     """
     return Subquery(
-        model.objects.filter(customer=OuterRef("pk"))
-        .values("customer")
+        model.objects.filter(**{parent: OuterRef("pk")})
+        .values(parent)
         .annotate(total=Sum(field))
         .values("total"),
         output_field=MONEY,
@@ -569,16 +573,26 @@ def customers_with_balances(queryset=None):
     return customers.annotate(
         invoiced=Coalesce(_sum_subquery(Invoice, "total"), ZERO, output_field=MONEY),
         paid=Coalesce(_sum_subquery(Payment, "amount"), ZERO, output_field=MONEY),
+        returned=Coalesce(
+            _sum_subquery(SalesReturn, "total"), ZERO, output_field=MONEY
+        ),
     )
 
 
 def overdue_invoices():
+    """Unpaid past the threshold, net of anything credited back."""
     cutoff = timezone.localdate() - timedelta(days=OVERDUE_DAYS)
+
+    settled = Coalesce(
+        _sum_subquery(Payment, "amount", "invoice"), ZERO, output_field=MONEY
+    ) + Coalesce(
+        _sum_subquery(SalesReturn, "total", "invoice"), ZERO, output_field=MONEY
+    )
 
     return (
         Invoice.objects.filter(date__lte=cutoff)
-        .annotate(received=Coalesce(Sum("payments__amount"), ZERO))
-        .filter(total__gt=F("received"))
+        .annotate(settled=settled)
+        .filter(total__gt=F("settled"))
         .select_related("customer")
         .order_by("date")
     )
@@ -623,7 +637,8 @@ def ledger_list(request):
 
     rows = [
         {"customer": c, "invoiced": c.invoiced, "paid": c.paid,
-         "balance": c.invoiced - c.paid}
+         "returned": c.returned,
+         "balance": c.invoiced - c.paid - c.returned}
         for c in customers
     ]
 
@@ -673,7 +688,18 @@ def customer_ledger(request, customer_id):
             "object": payment,
         })
 
-    entries.sort(key=lambda e: (e["date"], e["kind"] == "payment"))
+    for credit_note in customer.returns.select_related("invoice"):
+        entries.append({
+            "date": credit_note.date,
+            "kind": "return",
+            "reference": credit_note.return_no,
+            "detail": f"Return against {credit_note.invoice.invoice_no}",
+            "debit": ZERO,
+            "credit": credit_note.total,
+            "object": credit_note,
+        })
+
+    entries.sort(key=lambda e: (e["date"], e["kind"] != "invoice"))
 
     running = ZERO
 
@@ -1733,3 +1759,287 @@ def manufacturer_detail(request, manufacturer_id):
             "total_stock": sum(row["stock"] for row in rows),
         }
     )
+
+
+# ---------------------------------------------------------------- SALES RETURNS
+
+@login_required
+def return_list(request):
+    returns = SalesReturn.objects.select_related(
+        "customer", "invoice", "created_by"
+    ).prefetch_related("items")
+
+    return render(
+        request,
+        "invoices/return_list.html",
+        {
+            "returns": returns,
+            "total": returns.aggregate(t=Sum("total"))["t"] or ZERO,
+        }
+    )
+
+
+@login_required
+def return_create(request, invoice_id):
+    """Credit an invoice and put its goods back, without deleting anything."""
+    invoice = get_object_or_404(
+        Invoice.objects.select_related("customer"), pk=invoice_id
+    )
+
+    lines = []
+
+    for item in invoice.items.select_related("stock_batch", "product"):
+        already = invoice.returned_qty(item)
+
+        lines.append({
+            "item": item,
+            "already_returned": already,
+            "returnable": max(0, item.qty - already),
+        })
+
+    if request.method == "POST":
+        selected, errors = _clean_return_lines(request, lines)
+
+        if not selected and not errors:
+            errors.append("Enter a quantity against at least one line.")
+
+        if errors:
+            for error in errors:
+                messages.error(request, error)
+
+        else:
+            sales_return = SalesReturn.objects.create(
+                invoice=invoice,
+                customer=invoice.customer,
+                date=parse_date(request.POST.get("date", "")) or timezone.localdate(),
+                reason=request.POST.get("reason", "").strip(),
+                restock=request.POST.get("restock") == "on",
+                created_by=request.user,
+            )
+
+            created, restocked = record_sales_return(
+                sales_return, selected, user=request.user
+            )
+
+            messages.success(
+                request,
+                f"{sales_return.return_no}: credited {sales_return.total} "
+                f"across {created} line(s)"
+                + (f", {restocked} unit(s) back in stock." if restocked
+                   else " (not restocked).")
+            )
+
+            return redirect("customer_ledger", customer_id=invoice.customer_id)
+
+    return render(
+        request,
+        "invoices/return_form.html",
+        {
+            "invoice": invoice,
+            "lines": lines,
+            "today": timezone.localdate(),
+            "fully_returned": all(line["returnable"] == 0 for line in lines),
+        }
+    )
+
+
+def _clean_return_lines(request, lines):
+    """Validate quantities against what is actually still returnable."""
+    selected = []
+    errors = []
+
+    for index, line in enumerate(lines):
+        raw = request.POST.get(f"qty_{line['item'].pk}", "").strip()
+
+        if not raw:
+            continue
+
+        qty = safe_int(raw)
+
+        if qty <= 0:
+            continue
+
+        if qty > line["returnable"]:
+            errors.append(
+                f"{line['item'].name}: only {line['returnable']} left to "
+                f"return (sold {line['item'].qty}, already returned "
+                f"{line['already_returned']})."
+            )
+            continue
+
+        selected.append({"item": line["item"], "qty": qty})
+
+    return selected, errors
+
+
+# ---------------------------------------------------------------- STOCK LEDGER
+
+@login_required
+def stock_ledger(request):
+    """Running balance per batch, the stock equivalent of a customer statement."""
+    movements = StockMovement.objects.select_related(
+        "product", "batch", "created_by"
+    ).order_by("created_at", "id")
+
+    product_id = request.GET.get("product", "").strip()
+    batch_id = request.GET.get("batch", "").strip()
+
+    if product_id:
+        movements = movements.filter(product_id=product_id)
+
+    if batch_id:
+        movements = movements.filter(batch_id=batch_id)
+
+    running = {}
+    entries = []
+
+    for movement in movements:
+        key = movement.batch_id
+        running[key] = running.get(key, 0) + movement.quantity
+
+        entries.append({
+            "movement": movement,
+            "balance": running[key],
+        })
+
+    entries.reverse()
+
+    return render(
+        request,
+        "invoices/stock_ledger.html",
+        {
+            "entries": entries,
+            "products": Product.objects.filter(is_active=True),
+            "selected_product": product_id,
+            "total_in": sum(
+                e["movement"].quantity for e in entries
+                if e["movement"].quantity > 0
+            ),
+            "total_out": sum(
+                -e["movement"].quantity for e in entries
+                if e["movement"].quantity < 0
+            ),
+        }
+    )
+
+
+# ---------------------------------------------------------------- PURCHASE EDIT
+
+@login_required
+def purchase_edit(request, purchase_id):
+    """Correct a received purchase.
+
+    Changing a cost restates the batch; changing a quantity moves stock by the
+    difference rather than overwriting it, so the ledger stays truthful.
+    """
+    purchase = get_object_or_404(
+        Purchase.objects.select_related("supplier"), pk=purchase_id
+    )
+
+    items = list(
+        purchase.items.select_related("product", "batch").order_by("id")
+    )
+
+    if request.method == "POST":
+        form = PurchaseForm(request.POST, instance=purchase)
+
+        changes, errors = _clean_purchase_edits(request, items)
+
+        if form.is_valid() and not errors:
+            form.save()
+
+            applied = _apply_purchase_edits(changes, request.user)
+
+            messages.success(
+                request,
+                f"Updated {len(changes)} line(s)."
+                + (f" Stock adjusted by {applied:+d} unit(s)." if applied else "")
+            )
+
+            return redirect("purchase_list")
+
+        for error in errors:
+            messages.error(request, error)
+
+    else:
+        form = PurchaseForm(instance=purchase)
+
+    return render(
+        request,
+        "invoices/purchase_edit.html",
+        {
+            "form": form,
+            "purchase": purchase,
+            "items": items,
+        }
+    )
+
+
+def _clean_purchase_edits(request, items):
+    changes = []
+    errors = []
+
+    for item in items:
+        cost = safe_decimal(
+            request.POST.get(f"cost_{item.pk}", item.cost_price),
+            max_value=MAX_PRICE,
+        )
+        qty = safe_int(request.POST.get(f"qty_{item.pk}", item.quantity))
+
+        if qty <= 0:
+            errors.append(f"{item.product.name}: quantity must be at least 1.")
+            continue
+
+        delta = qty - item.quantity
+
+        # Reducing a receipt below what is left on the shelf would drive the
+        # batch negative - that stock has already been sold.
+        if delta < 0 and item.batch.quantity + delta < 0:
+            errors.append(
+                f"{item.product.name} batch {item.batch.batch_no}: only "
+                f"{item.batch.quantity} in stock, cannot reduce the receipt "
+                f"by {abs(delta)}."
+            )
+            continue
+
+        if delta or cost != item.cost_price:
+            changes.append({"item": item, "cost": cost, "qty": qty, "delta": delta})
+
+    return changes, errors
+
+
+@transaction.atomic
+def _apply_purchase_edits(changes, user):
+    applied = 0
+
+    for change in changes:
+        item = change["item"]
+        batch = item.batch
+
+        if change["delta"]:
+            Batch.objects.filter(pk=batch.pk).update(
+                quantity=F("quantity") + change["delta"],
+                received_quantity=F("received_quantity") + change["delta"],
+            )
+
+            StockMovement.objects.create(
+                product=item.product,
+                batch=batch,
+                quantity=change["delta"],
+                kind=StockMovement.ADJUSTMENT,
+                reference=item.purchase.reference or f"GRN-{item.purchase_id}",
+                note="Purchase quantity corrected",
+                created_by=user,
+            )
+
+            applied += change["delta"]
+
+        item.quantity = change["qty"]
+        item.cost_price = change["cost"]
+        item.save(update_fields=["quantity", "cost_price"])
+
+        if batch.cost_price != change["cost"]:
+            batch.cost_price = change["cost"]
+            batch.save(update_fields=["cost_price"])
+
+    return applied

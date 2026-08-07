@@ -135,9 +135,22 @@ urlpatterns = [
 
     path('purchases/', views.purchase_list, name='purchase_list'),
     path('purchases/new/', views.purchase_create, name='purchase_new'),
+    path(
+        'purchases/<int:purchase_id>/edit/',
+        views.purchase_edit,
+        name='purchase_edit',
+    ),
+
+    path('returns/', views.return_list, name='return_list'),
+    path(
+        'returns/invoice/<int:invoice_id>/',
+        views.return_create,
+        name='return_create',
+    ),
 
     path('stock/', views.stock_report, name='stock_report'),
     path('stock/movements/', views.stock_movements, name='stock_movements'),
+    path('stock/ledger/', views.stock_ledger, name='stock_ledger'),
     path(
         'stock/batches/<int:batch_id>/adjust/',
         views.batch_adjust,

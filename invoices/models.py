@@ -63,9 +63,13 @@ class Customer(models.Model):
         return self.payments.aggregate(t=Sum("amount"))["t"] or ZERO
 
     @property
+    def total_returned(self):
+        return self.returns.aggregate(t=Sum("total"))["t"] or ZERO
+
+    @property
     def outstanding_balance(self):
-        """What the customer owes across every invoice, less everything paid."""
-        return self.total_invoiced - self.total_paid
+        """Invoiced, less what has been paid and what has been credited back."""
+        return self.total_invoiced - self.total_paid - self.total_returned
 
     def overdue_invoices(self):
         cutoff = timezone.now().date() - timedelta(days=OVERDUE_DAYS)
@@ -108,8 +112,20 @@ class Invoice(models.Model):
         return self.payments.aggregate(t=Sum("amount"))["t"] or ZERO
 
     @property
+    def amount_returned(self):
+        return self.returns.aggregate(t=Sum("total"))["t"] or ZERO
+
+    @property
     def balance(self):
-        return self.total - self.amount_paid
+        """What is still collectable: credited goods are no longer owed."""
+        return self.total - self.amount_paid - self.amount_returned
+
+    def returned_qty(self, item):
+        """How much of one invoice line has already come back."""
+        return (
+            SalesReturnItem.objects.filter(item=item)
+            .aggregate(t=Sum("qty"))["t"] or 0
+        )
 
     @property
     def is_paid(self):
@@ -863,3 +879,89 @@ class StockMovement(models.Model):
 
     def __str__(self):
         return f"{self.batch} {self.quantity:+d} ({self.kind})"
+
+
+# ------------------------------------------------------------------ RETURNS
+
+class SalesReturn(models.Model):
+    """Goods a customer sent back: a credit note.
+
+    Deliberately not a deletion. The invoice stays as issued, the return
+    credits the customer's ledger, and any restocked lines move back into
+    stock through the same ledger as every other movement.
+    """
+
+    RETURN_PREFIX = "CN"
+
+    invoice = models.ForeignKey(
+        Invoice, on_delete=models.PROTECT, related_name="returns"
+    )
+    customer = models.ForeignKey(
+        Customer, on_delete=models.CASCADE, related_name="returns"
+    )
+
+    return_no = models.CharField(max_length=20, unique=True)
+    date = models.DateField(default=timezone.localdate)
+
+    reason = models.TextField(blank=True)
+    restock = models.BooleanField(
+        default=True,
+        help_text="Uncheck for damaged or expired goods that cannot be resold.",
+    )
+
+    # Credited amount, stored so the ledger never recomputes it.
+    total = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date", "-id"]
+
+    def __str__(self):
+        return self.return_no
+
+    @classmethod
+    def next_return_no(cls):
+        numbers = []
+
+        for value in cls.objects.values_list("return_no", flat=True):
+            suffix = str(value).rsplit("-", 1)[-1]
+
+            if suffix.isdigit():
+                numbers.append(int(suffix))
+
+        return f"{cls.RETURN_PREFIX}-{(max(numbers) + 1 if numbers else 1):04d}"
+
+    def save(self, *args, **kwargs):
+        if not self.return_no:
+            self.return_no = self.next_return_no()
+
+        super().save(*args, **kwargs)
+
+
+class SalesReturnItem(models.Model):
+    sales_return = models.ForeignKey(
+        SalesReturn, on_delete=models.CASCADE, related_name="items"
+    )
+    item = models.ForeignKey(
+        Item, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="returned_lines",
+        help_text="The invoice line this came off.",
+    )
+
+    name = models.CharField(max_length=255)
+    qty = models.IntegerField()
+    price = models.DecimalField(max_digits=10, decimal_places=2, default=ZERO)
+    discount = models.DecimalField(max_digits=5, decimal_places=2, default=ZERO)
+
+    batch = models.ForeignKey(
+        Batch, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="returned_lines",
+    )
+
+    @property
+    def line_total(self):
+        net = self.price - (self.price * self.discount / Decimal("100"))
+
+        return (net * self.qty).quantize(ZERO)

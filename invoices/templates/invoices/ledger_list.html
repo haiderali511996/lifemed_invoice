@@ -40,6 +40,7 @@
           <th>Pharmacy Licence</th>
           <th class="num">Invoiced</th>
           <th class="num">Received</th>
+          <th class="num">Credited</th>
           <th class="num">Balance</th>
           <th></th>
         </tr>
@@ -62,6 +63,9 @@
           <td class="num" style="color: #1e7b24">
             {{ row.paid|floatformat:2 }}
           </td>
+          <td class="num" style="color: #a71d2a">
+            {% if row.returned %}{{ row.returned|floatformat:2 }}{% endif %}
+          </td>
           <td class="num">
             {% if row.balance > 0 %}
             <strong style="color: #a71d2a">{{ row.balance|floatformat:2 }}</strong>
@@ -82,7 +86,7 @@
         </tr>
         {% empty %}
         <tr>
-          <td colspan="6" style="text-align: center; padding: 26px">
+          <td colspan="7" style="text-align: center; padding: 26px">
             {% if query %} No customers match "{{ query }}". {% else %} No
             customers yet. {% endif %}
           </td>

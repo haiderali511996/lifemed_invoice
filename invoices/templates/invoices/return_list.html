@@ -1,0 +1,38 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Sales Returns{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Sales Returns</h1>
+  <span style="font-size:15px">
+    Total credited: <strong style="color:#a71d2a">{{ total|floatformat:2 }}</strong>
+  </span>
+</div>
+<div class="card"><div style="overflow-x:auto">
+  <table>
+    <thead><tr>
+      <th>Credit Note</th><th>Date</th><th>Customer</th><th>Against Invoice</th>
+      <th class="num">Lines</th><th class="num">Credited</th>
+      <th>Restocked</th><th>By</th>
+    </tr></thead>
+    <tbody>
+      {% for r in returns %}
+      <tr>
+        <td><strong>{{ r.return_no }}</strong></td>
+        <td>{{ r.date|date:"d-m-Y" }}</td>
+        <td><a href="{% url 'customer_ledger' r.customer.id %}">{{ r.customer.name }}</a></td>
+        <td>{{ r.invoice.invoice_no }}</td>
+        <td class="num">{{ r.items.count }}</td>
+        <td class="num" style="color:#a71d2a;font-weight:bold">{{ r.total|floatformat:2 }}</td>
+        <td>{% if r.restock %}<span class="pill pill-paid">yes</span>
+            {% else %}<span class="pill pill-overdue">written off</span>{% endif %}</td>
+        <td>{{ r.created_by.username|default:"-" }}</td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="8" style="text-align:center;padding:26px">
+        No returns recorded. Raise one from a customer's ledger.
+      </td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div></div>
+{% endblock %}
