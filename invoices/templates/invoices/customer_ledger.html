@@ -89,6 +89,10 @@
           <td class="num"><strong>{{ entry.balance|floatformat:2 }}</strong></td>
           <td class="no-print">
             {% if entry.kind == "invoice" %}
+            <a href="{% url 'invoice_reprint' entry.object.id %}" class="btn btn-sm btn-grey"
+               title="Download this invoice again, exactly as it was issued">
+              Reprint
+            </a>
             <a href="{% url 'return_create' entry.object.id %}" class="btn btn-sm btn-grey">
               Return
             </a>

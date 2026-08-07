@@ -9,6 +9,13 @@ urlpatterns = [
     path('logout/', views.logout_view, name='logout'),
     path('logs/', views.invoice_logs_view, name='invoice_logs'),
 
+    path('invoices/', views.invoice_list, name='invoice_list'),
+    path(
+        'invoices/<int:invoice_id>/reprint/',
+        views.invoice_reprint,
+        name='invoice_reprint',
+    ),
+
     path('search/', views.global_search, name='search'),
     path('profile/', views.profile, name='profile'),
 

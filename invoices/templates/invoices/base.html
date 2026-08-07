@@ -479,6 +479,9 @@
           🧾 <span>New Invoice</span>
         </a>
         {% endif %}
+        <a href="{% url 'invoice_list' %}" class="{% if active == 'invoices' %}active{% endif %}">
+          📄 <span>All Invoices</span>
+        </a>
         <a href="{% url 'customer_list' %}" class="{% if active == 'customers' %}active{% endif %}">
           👥 <span>Customers</span>
         </a>

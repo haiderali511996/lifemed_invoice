@@ -3467,3 +3467,243 @@ class CallReportTests(TestCase):
                     reverse("call_report_summary")):
             with self.subTest(url=url):
                 self.assertEqual(self.client.get(url).status_code, 200)
+
+
+class InvoiceReprintTests(TestCase):
+    """A reprint is a copy of the original document, not a fresh invoice."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.product = Product.objects.create(code="PAN500", name="Panadol")
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1", quantity=100,
+            cost_price=Decimal("20.00"),
+            expiry_date=timezone.localdate() + timedelta(days=365),
+        )
+
+    def generate(self, stock=False, qty="2"):
+        return self.client.post(reverse("generate"), {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "1", "sales_tax": "2", "license_no": "L-9",
+            "item_name[]": ["Panadol"], "qty[]": [qty], "price[]": ["100"],
+            "discount[]": ["10"], "batch[]": ["B-1"], "expiry[]": ["12/26"],
+            "stock_batch[]": [str(self.batch.pk) if stock else ""],
+        })
+
+    def reprint(self, invoice):
+        return self.client.get(reverse("invoice_reprint", args=[invoice.pk]))
+
+    def text_of(self, response):
+        import pymupdf
+
+        document = pymupdf.open(stream=response.content, filetype="pdf")
+
+        return "\n".join(page.get_text() for page in document)
+
+    # -------------------------------------------------------- the document
+
+    def test_a_reprint_matches_the_original_download(self):
+        original = self.text_of(self.generate())
+        invoice = Invoice.objects.get()
+
+        copy = self.text_of(self.reprint(invoice))
+
+        self.assertEqual(copy, original)
+
+    def test_the_reprint_is_a_pdf_named_after_the_invoice(self):
+        self.generate()
+        invoice = Invoice.objects.get()
+
+        response = self.reprint(invoice)
+
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertIn(f'filename="{invoice.invoice_no}.pdf"',
+                      response["Content-Disposition"])
+
+    def test_the_reprint_carries_the_original_date_not_today(self):
+        self.generate()
+
+        invoice = Invoice.objects.get()
+        Invoice.objects.filter(pk=invoice.pk).update(date=date(2026, 1, 15))
+        invoice.refresh_from_db()
+
+        self.assertIn("15/01/2026", self.text_of(self.reprint(invoice)))
+
+    def test_the_lines_come_back_verbatim(self):
+        self.generate()
+        invoice = Invoice.objects.get()
+
+        text = self.text_of(self.reprint(invoice))
+
+        self.assertIn("Panadol", text)
+        self.assertIn("B-1", text)
+        self.assertIn("12/26", text)
+        self.assertIn("180.00", text)      # 2 x 100 less 10%
+
+    # ------------------------------------------------- changes nothing else
+
+    def test_reprinting_does_not_move_stock(self):
+        self.generate(stock=True)
+        invoice = Invoice.objects.get()
+
+        self.batch.refresh_from_db()
+        after_sale = self.batch.quantity
+
+        self.reprint(invoice)
+        self.reprint(invoice)
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, after_sale)
+        self.assertEqual(
+            StockMovement.objects.filter(kind=StockMovement.SALE).count(), 1
+        )
+
+    def test_reprinting_creates_no_second_invoice(self):
+        self.generate()
+        invoice = Invoice.objects.get()
+        number = invoice.invoice_no
+
+        self.reprint(invoice)
+
+        self.assertEqual(Invoice.objects.count(), 1)
+        self.assertEqual(Item.objects.count(), 1)
+        self.assertEqual(Invoice.objects.get().invoice_no, number)
+
+    def test_reprinting_leaves_the_ledger_alone(self):
+        self.generate()
+        invoice = Invoice.objects.get()
+        owed = invoice.customer.outstanding_balance
+
+        self.reprint(invoice)
+
+        invoice.customer.refresh_from_db()
+        self.assertEqual(invoice.customer.outstanding_balance, owed)
+
+    def test_every_reprint_is_logged(self):
+        self.generate()
+        invoice = Invoice.objects.get()
+
+        self.reprint(invoice)
+        self.reprint(invoice)
+
+        logs = InvoiceLog.objects.filter(action="Invoice Reprinted")
+        self.assertEqual(logs.count(), 2)
+        self.assertEqual(logs.first().user, self.user)
+        self.assertEqual(logs.first().amount, invoice.total)
+
+    # ------------------------------------------------- the previous balance
+
+    def test_the_copy_shows_the_balance_the_customer_saw_then(self):
+        """A payment made after the invoice must not change its reprint."""
+        self.generate()                     # HHC-9965, 180.00
+        self.generate()                     # HHC-9966, carries 180.00
+
+        first, second = Invoice.objects.order_by("id")
+        Invoice.objects.filter(pk=first.pk).update(date=date(2026, 1, 1))
+        Invoice.objects.filter(pk=second.pk).update(date=date(2026, 1, 10))
+
+        Payment.objects.create(
+            customer=first.customer, invoice=first,
+            amount=Decimal("180.00"), paid_on=date(2026, 2, 1),
+        )
+
+        text = self.text_of(self.reprint(Invoice.objects.get(pk=second.pk)))
+
+        self.assertIn("PREVIOUS OUTSTANDING", text)
+        self.assertIn(first.invoice_no, text)
+        self.assertIn("360.00", text)       # 180 carried + 180 this invoice
+
+    def test_a_payment_made_before_the_invoice_still_counts(self):
+        self.generate()
+        self.generate()
+
+        first, second = Invoice.objects.order_by("id")
+        Invoice.objects.filter(pk=first.pk).update(date=date(2026, 1, 1))
+        Invoice.objects.filter(pk=second.pk).update(date=date(2026, 1, 10))
+
+        Payment.objects.create(
+            customer=first.customer, invoice=first,
+            amount=Decimal("100.00"), paid_on=date(2026, 1, 5),
+        )
+
+        text = self.text_of(self.reprint(Invoice.objects.get(pk=second.pk)))
+
+        self.assertIn("80.00", text)        # 180 - 100 outstanding at the time
+
+    def test_later_invoices_stay_off_an_earlier_reprint(self):
+        self.generate()
+        self.generate()
+
+        first, second = Invoice.objects.order_by("id")
+        Invoice.objects.filter(pk=first.pk).update(date=date(2026, 1, 1))
+        Invoice.objects.filter(pk=second.pk).update(date=date(2026, 1, 10))
+
+        text = self.text_of(self.reprint(Invoice.objects.get(pk=first.pk)))
+
+        self.assertNotIn("PREVIOUS OUTSTANDING", text)
+        self.assertNotIn(second.invoice_no, text)
+
+    def test_goods_returned_later_stay_on_the_reprint(self):
+        """A credit note is its own paperwork; the invoice was still issued."""
+        self.generate(stock=True)
+        invoice = Invoice.objects.get()
+
+        self.client.post(reverse("return_create", args=[invoice.pk]), {
+            "reason": "Damaged", "restock": "on",
+            "item": [str(invoice.items.first().pk)], "qty": ["2"],
+        })
+
+        text = self.text_of(self.reprint(invoice))
+
+        self.assertIn("Panadol", text)
+        self.assertIn("180.00", text)
+
+    # ------------------------------------------------------------- the list
+
+    def test_the_invoice_list_finds_an_invoice_by_number(self):
+        self.generate()
+        invoice = Invoice.objects.get()
+
+        response = self.client.get(
+            reverse("invoice_list"), {"q": invoice.invoice_no}
+        )
+
+        self.assertEqual(list(response.context["invoices"]), [invoice])
+
+    def test_the_invoice_list_finds_an_invoice_by_customer(self):
+        self.generate()
+
+        response = self.client.get(reverse("invoice_list"), {"q": "shifa"})
+
+        self.assertEqual(len(response.context["invoices"]), 1)
+
+    def test_the_invoice_list_filters_by_settlement(self):
+        self.generate()
+        self.generate()
+
+        first = Invoice.objects.order_by("id").first()
+        Payment.objects.create(
+            customer=first.customer, invoice=first, amount=first.total
+        )
+
+        unpaid = self.client.get(reverse("invoice_list"), {"status": "unpaid"})
+        paid = self.client.get(reverse("invoice_list"), {"status": "paid"})
+
+        self.assertEqual(len(unpaid.context["invoices"]), 1)
+        self.assertEqual(list(paid.context["invoices"]), [first])
+
+    def test_the_invoice_list_totals_what_it_shows(self):
+        self.generate()
+        self.generate()
+
+        response = self.client.get(reverse("invoice_list"))
+
+        self.assertEqual(response.context["total"], Decimal("360.00"))
+        self.assertEqual(response.context["outstanding"], Decimal("360.00"))
+
+    def test_the_invoice_list_renders(self):
+        self.generate()
+
+        self.assertEqual(self.client.get(reverse("invoice_list")).status_code, 200)

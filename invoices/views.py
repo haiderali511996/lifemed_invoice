@@ -122,11 +122,16 @@ def safe_int(value, default=0, max_value=1_000_000):
     return max(0, min(result, max_value))
 
 
-def previous_balance_breakdown(customer, current_invoice):
+def previous_balance_breakdown(customer, current_invoice, as_at=None):
     """What the customer owed before this invoice, itemised by invoice number.
 
     Returns None when nothing is outstanding, so the block is left off the PDF
     entirely rather than printing a row of zeroes.
+
+    Pass `as_at` to rebuild the figure as it stood at the start of a past day.
+    A reprint uses it so the copy carries the same balance as the original,
+    rather than today's — two copies of one invoice number that disagree about
+    what was owed are worse than no copy at all.
     """
     rows = []
 
@@ -136,18 +141,30 @@ def previous_balance_breakdown(customer, current_invoice):
         .order_by("date", "id")
     )
 
+    if as_at is not None:
+        # Anything raised on or after the invoice date was not "previous".
+        unpaid = unpaid.filter(date__lt=as_at)
+
     for invoice in unpaid:
-        if invoice.balance > ZERO:
+        balance = (
+            _balance_as_at(invoice, as_at) if as_at is not None
+            else invoice.balance
+        )
+
+        if balance > ZERO:
             rows.append({
                 "invoice_no": invoice.invoice_no,
                 "date": invoice.date,
-                "balance": invoice.balance,
+                "balance": balance,
             })
 
     # Authoritative figure: the account balance less the invoice just raised.
     # Payments recorded against the account rather than a specific invoice mean
     # the per-invoice balances can add up to more than is actually owed.
-    total = customer.outstanding_balance - current_invoice.total
+    total = (
+        _account_balance_as_at(customer, as_at) if as_at is not None
+        else customer.outstanding_balance - current_invoice.total
+    )
 
     if total <= ZERO and not rows:
         return None
@@ -160,6 +177,46 @@ def previous_balance_breakdown(customer, current_invoice):
         "total": total,
         "grand_total": total + current_invoice.total,
     }
+
+
+def _balance_as_at(invoice, as_at):
+    """One invoice's balance at the start of `as_at`.
+
+    Credits are dated, so a payment or a return that landed later must not
+    reduce the balance a past document reported.
+    """
+    paid = (
+        invoice.payments.filter(paid_on__lt=as_at)
+        .aggregate(t=Sum("amount"))["t"] or ZERO
+    )
+    returned = (
+        invoice.returns.filter(date__lt=as_at)
+        .aggregate(t=Sum("total"))["t"] or ZERO
+    )
+
+    return invoice.total - paid - returned
+
+
+def _account_balance_as_at(customer, as_at):
+    """Everything the account owed at the start of `as_at`.
+
+    Account-level credits belong here and not in `_balance_as_at`, which is
+    why the printed total is this figure rather than the sum of the rows.
+    """
+    invoiced = (
+        customer.invoice_set.filter(date__lt=as_at)
+        .aggregate(t=Sum("total"))["t"] or ZERO
+    )
+    paid = (
+        customer.payments.filter(paid_on__lt=as_at)
+        .aggregate(t=Sum("amount"))["t"] or ZERO
+    )
+    returned = (
+        customer.returns.filter(date__lt=as_at)
+        .aggregate(t=Sum("total"))["t"] or ZERO
+    )
+
+    return invoiced - paid - returned
 
 
 def _stock_batch(raw_id):
@@ -516,19 +573,157 @@ def generate_invoice(request):
             distributor=distributor,
         )
 
-        # Deliberately not FileResponse: it hands the object to the server's
-        # wsgi.file_wrapper, and Passenger's implementation calls fileno() on
-        # it. BytesIO has no file descriptor, so that raises
-        # "io.UnsupportedOperation: fileno" and the download 500s under cPanel.
-        response = HttpResponse(pdf_bytes, content_type="application/pdf")
-
-        response["Content-Disposition"] = (
-            f'attachment; filename="{invoice.invoice_no}.pdf"'
-        )
-
-        return response
+        return pdf_download(pdf_bytes, invoice.invoice_no)
 
     return redirect("index")
+
+
+def pdf_download(pdf_bytes, name):
+    """Send a PDF back as a download.
+
+    Deliberately not FileResponse: it hands the object to the server's
+    wsgi.file_wrapper, and Passenger's implementation calls fileno() on it.
+    BytesIO has no file descriptor, so that raises
+    "io.UnsupportedOperation: fileno" and the download 500s under cPanel.
+    """
+    response = HttpResponse(pdf_bytes, content_type="application/pdf")
+
+    response["Content-Disposition"] = f'attachment; filename="{name}.pdf"'
+
+    return response
+
+
+def rebuild_invoice_pdf(invoice):
+    """Redraw a stored invoice exactly as it was issued.
+
+    Everything comes from the saved lines, the saved date and the distributor
+    the invoice was raised on, so a reprint is a copy of the original document
+    and not a fresh one that happens to share its number. Goods returned since
+    stay off it too: a credit note is its own paperwork.
+    """
+    rows = []
+
+    total_gross = ZERO
+    total_discount = ZERO
+    total_net = ZERO
+
+    for item in invoice.items.all():
+        # Same parse the original went through, so the copy prints the
+        # quantity the same way ("2.00", not "2").
+        qty = safe_decimal(item.qty, max_value=MAX_PRICE)
+        price = Decimal(item.price)
+        disc = Decimal(item.discount)
+
+        gross = price * qty
+        discount_amount = (price * disc / Decimal("100")) * qty
+        amount = (price - (price * disc / Decimal("100"))) * qty
+
+        total_gross += gross
+        total_discount += discount_amount
+        total_net += amount
+
+        rows.append({
+            "name": item.name,
+            "qty": qty,
+            "batch": item.batch or "",
+            "expiry": item.expiry or "",
+            "price": price,
+            "discount": disc,
+            "amount": amount,
+        })
+
+    customer = invoice.customer
+
+    return render_invoice(
+        previous=previous_balance_breakdown(
+            customer, invoice, as_at=invoice.date
+        ),
+        header={
+            "customer_name": customer.name,
+            "address": customer.address,
+            "invoice_no": invoice.invoice_no,
+            "date": invoice.date.strftime("%d/%m/%Y"),
+            "license_no": invoice.license_no,
+            "ntn": customer.ntn or "",
+            "sales_tax": customer.sales_tax or "",
+            "area": customer.territory.city if customer.territory else "",
+        },
+        rows=rows,
+        totals={
+            "gross": total_gross,
+            "discount": total_discount,
+            "net": total_net,
+        },
+        distributor=invoice.distributor,
+    )
+
+
+@login_required
+def invoice_list(request):
+    """Every invoice raised, so any of them can be printed again."""
+    invoices = Invoice.objects.select_related(
+        "customer", "distributor"
+    ).prefetch_related("items", "payments", "returns")
+
+    query = request.GET.get("q", "").strip()
+    distributor_id = request.GET.get("distributor", "").strip()
+    status = request.GET.get("status", "").strip()
+
+    if query:
+        invoices = invoices.filter(
+            Q(invoice_no__icontains=query)
+            | Q(customer__name__icontains=query)
+            | Q(license_no__icontains=query)
+        )
+
+    if distributor_id:
+        invoices = invoices.filter(distributor_id=distributor_id)
+
+    invoices = list(invoices)
+
+    if status == "unpaid":
+        invoices = [i for i in invoices if i.balance > ZERO]
+    elif status == "paid":
+        invoices = [i for i in invoices if i.balance <= ZERO]
+
+    return render(
+        request,
+        "invoices/invoice_list.html",
+        {
+            "active": "invoices",
+            "invoices": invoices,
+            "distributors": Distributor.objects.filter(is_active=True),
+            "query": query,
+            "selected_distributor": distributor_id,
+            "status": status,
+            "total": sum((i.total for i in invoices), ZERO),
+            "outstanding": sum(
+                (i.balance for i in invoices if i.balance > ZERO), ZERO
+            ),
+        }
+    )
+
+
+@login_required
+def invoice_reprint(request, invoice_id):
+    """Download a stored invoice again, unchanged and under its own number."""
+    invoice = get_object_or_404(
+        Invoice.objects.select_related("customer", "distributor"), pk=invoice_id
+    )
+
+    pdf_bytes = rebuild_invoice_pdf(invoice)
+
+    # Reprints are worth a trail: a second copy of an invoice in circulation
+    # is a collection risk, so it should be as visible as the original.
+    InvoiceLog.objects.create(
+        invoice=invoice,
+        user=request.user,
+        customer_name=clip(invoice.customer.name, 255),
+        amount=invoice.total,
+        action="Invoice Reprinted",
+    )
+
+    return pdf_download(pdf_bytes, invoice.invoice_no)
 
 
 # SUPER ADMIN LOGS VIEW
