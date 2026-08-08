@@ -10,3 +10,4 @@ sqlparse==0.5.5
 typing_extensions==4.15.0
 tzdata==2026.1
 whitenoise==6.11.0
+djangorestframework==3.18.0

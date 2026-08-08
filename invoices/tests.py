@@ -33,6 +33,8 @@ from .models import (
     CallPoint,
     CallReport,
     Distributor,
+    Doctor,
+    DoctorMove,
     Customer,
     Employee,
     Expense,
@@ -47,6 +49,7 @@ from .models import (
     Payslip,
     PlanVisit,
     Product,
+    ProductTarget,
     Purchase,
     PurchaseItem,
     SalesReturn,
@@ -54,6 +57,7 @@ from .models import (
     SampleIssueItem,
     StockMovement,
     Supplier,
+    Target,
     Territory,
     UserRolls,
     WeeklyPlan,
@@ -5040,3 +5044,483 @@ class BatchCorrectionNoteTests(TestCase):
             record_batch_correction(batch, ("B-1", date(2028, 1, 31)), None)
         )
         self.assertEqual(StockMovement.objects.count(), 0)
+
+
+class MobileApiTests(TestCase):
+    """The API the Flutter app talks to, from an MR's token."""
+
+    def setUp(self):
+        self.territory = Territory.objects.create(name="Gulberg", city="Lahore")
+        self.other_territory = Territory.objects.create(name="Model Town")
+
+        self.account = User.objects.create_user("ali", password="pw12345678")
+        UserRolls.objects.filter(user=self.account).update(
+            role=UserRolls.ROLE_FIELD
+        )
+
+        self.mr = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza", designation="mr",
+            territory=self.territory, user=self.account,
+            commission_percent=Decimal("10.00"),
+        )
+        self.other = Employee.objects.create(
+            employee_code="MR-02", full_name="Sara Khan", designation="mr",
+            territory=self.other_territory,
+        )
+
+        self.clinic = CallPoint.objects.create(
+            name="Shifa Clinic", territory=self.territory, kind="doctor"
+        )
+        self.far_clinic = CallPoint.objects.create(
+            name="Far Clinic", territory=self.other_territory, kind="doctor"
+        )
+
+        self.doctor = Doctor.objects.create(
+            name="Dr. Ahmed", speciality="Cardiology", call_point=self.clinic
+        )
+
+        self.token = self.sign_in()
+
+    def sign_in(self, username="ali", password="pw12345678"):
+        response = self.client.post(
+            "/api/v1/auth/login/",
+            {"username": username, "password": password},
+            content_type="application/json",
+        )
+
+        return response.json().get("token")
+
+    def get(self, path, token=None):
+        return self.client.get(
+            path, HTTP_AUTHORIZATION=f"Token {token or self.token}"
+        )
+
+    def post(self, path, payload, token=None):
+        return self.client.post(
+            path, payload, content_type="application/json",
+            HTTP_AUTHORIZATION=f"Token {token or self.token}",
+        )
+
+    def patch(self, path, payload):
+        return self.client.patch(
+            path, payload, content_type="application/json",
+            HTTP_AUTHORIZATION=f"Token {self.token}",
+        )
+
+    # ---------------------------------------------------------------- auth
+
+    def test_signing_in_returns_a_token_and_the_employee(self):
+        response = self.client.post(
+            "/api/v1/auth/login/",
+            {"username": "ali", "password": "pw12345678"},
+            content_type="application/json",
+        )
+
+        body = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(body["token"])
+        self.assertEqual(body["employee"]["full_name"], "Ali Raza")
+        self.assertEqual(body["employee"]["territory_name"], "Gulberg")
+
+    def test_a_wrong_password_is_refused(self):
+        response = self.client.post(
+            "/api/v1/auth/login/",
+            {"username": "ali", "password": "nope"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_a_login_with_no_team_member_cannot_use_the_app(self):
+        User.objects.create_user("ghost", password="pw12345678")
+
+        response = self.client.post(
+            "/api/v1/auth/login/",
+            {"username": "ghost", "password": "pw12345678"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_no_token_means_no_data(self):
+        self.assertEqual(self.client.get("/api/v1/bootstrap/").status_code, 401)
+
+    def test_the_field_middleware_does_not_swallow_the_api(self):
+        """An MR login must get JSON, not a redirect to the web dashboard."""
+        response = self.get("/api/v1/schedule/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/json")
+
+    def test_signing_out_kills_the_token(self):
+        self.post("/api/v1/auth/logout/", {})
+
+        self.assertEqual(self.get("/api/v1/bootstrap/").status_code, 401)
+
+    # ----------------------------------------------------------- the cache
+
+    def test_bootstrap_carries_only_the_mrs_own_territory(self):
+        body = self.get("/api/v1/bootstrap/").json()
+
+        names = [c["name"] for c in body["call_points"]]
+
+        self.assertIn("Shifa Clinic", names)
+        self.assertNotIn("Far Clinic", names)
+
+    def test_bootstrap_nests_doctors_under_their_call_point(self):
+        body = self.get("/api/v1/bootstrap/").json()
+
+        clinic = next(c for c in body["call_points"] if c["name"] == "Shifa Clinic")
+
+        self.assertEqual(clinic["doctors"][0]["name"], "Dr. Ahmed")
+        self.assertEqual(clinic["doctors"][0]["speciality"], "Cardiology")
+
+    # ------------------------------------------------------- call points
+
+    def test_an_mr_can_add_a_call_point_to_their_own_patch(self):
+        response = self.post("/api/v1/call-points/", {
+            "name": "New Hospital", "kind": "hospital", "address": "Mall Rd",
+        })
+
+        self.assertEqual(response.status_code, 201)
+
+        created = CallPoint.objects.get(name="New Hospital")
+        self.assertEqual(created.territory, self.territory)
+
+    def test_a_call_point_cannot_be_filed_into_another_territory(self):
+        self.post("/api/v1/call-points/", {
+            "name": "New Hospital", "territory": self.other_territory.pk,
+        })
+
+        self.assertEqual(
+            CallPoint.objects.get(name="New Hospital").territory,
+            self.territory,
+        )
+
+    def test_sending_the_same_call_point_twice_makes_one(self):
+        self.post("/api/v1/call-points/", {"name": "New Hospital"})
+        response = self.post("/api/v1/call-points/", {"name": "New Hospital"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CallPoint.objects.filter(name="New Hospital").count(), 1)
+
+    # ----------------------------------------------------------- doctors
+
+    def test_a_doctor_can_be_added_at_a_call_point(self):
+        response = self.post("/api/v1/doctors/", {
+            "name": "Dr. Sana Malik", "call_point": self.clinic.pk,
+            "speciality": "Paediatrics", "potential": "high",
+        })
+
+        self.assertEqual(response.status_code, 201)
+
+        doctor = Doctor.objects.get(name="Dr. Sana Malik")
+        self.assertEqual(doctor.call_point, self.clinic)
+        self.assertEqual(doctor.potential, "high")
+
+    def test_a_doctor_cannot_be_added_outside_the_territory(self):
+        response = self.post("/api/v1/doctors/", {
+            "name": "Dr. Nobody", "call_point": self.far_clinic.pk,
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Doctor.objects.filter(name="Dr. Nobody").count(), 0)
+
+    def test_a_doctors_details_can_be_corrected(self):
+        response = self.patch(f"/api/v1/doctors/{self.doctor.pk}/", {
+            "speciality": "Interventional Cardiology", "phone": "0300-1234567",
+        })
+
+        self.assertEqual(response.status_code, 200)
+
+        self.doctor.refresh_from_db()
+        self.assertEqual(self.doctor.speciality, "Interventional Cardiology")
+        self.assertEqual(self.doctor.phone, "0300-1234567")
+
+    def test_a_doctor_who_leaves_moves_rather_than_being_duplicated(self):
+        new_place = CallPoint.objects.create(
+            name="City Hospital", territory=self.territory, kind="hospital"
+        )
+
+        response = self.post(f"/api/v1/doctors/{self.doctor.pk}/move/", {
+            "to_call_point": new_place.pk, "reason": "Left Shifa",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["moved"])
+
+        self.doctor.refresh_from_db()
+        self.assertEqual(self.doctor.call_point, new_place)
+        self.assertEqual(Doctor.objects.filter(name="Dr. Ahmed").count(), 1)
+
+        move = DoctorMove.objects.get()
+        self.assertEqual(move.from_call_point, self.clinic)
+        self.assertEqual(move.to_call_point, new_place)
+        self.assertEqual(move.reason, "Left Shifa")
+
+    def test_moving_a_doctor_where_they_already_are_records_nothing(self):
+        response = self.post(f"/api/v1/doctors/{self.doctor.pk}/move/", {
+            "to_call_point": self.clinic.pk,
+        })
+
+        self.assertFalse(response.json()["moved"])
+        self.assertEqual(DoctorMove.objects.count(), 0)
+
+    def test_visit_history_follows_a_doctor_who_moves(self):
+        CallReport.objects.create(
+            employee=self.mr, call_point=self.clinic, doctor=self.doctor
+        )
+
+        new_place = CallPoint.objects.create(
+            name="City Hospital", territory=self.territory, kind="hospital"
+        )
+        self.doctor.move_to(new_place)
+
+        self.assertEqual(self.doctor.visits.count(), 1)
+
+    def test_a_doctor_in_another_territory_cannot_be_touched(self):
+        theirs = Doctor.objects.create(
+            name="Dr. Far", call_point=self.far_clinic
+        )
+
+        self.assertEqual(
+            self.patch(f"/api/v1/doctors/{theirs.pk}/", {"name": "X"}).status_code,
+            404,
+        )
+
+    # ------------------------------------------------------------ visits
+
+    def test_a_visit_can_be_recorded(self):
+        product = Product.objects.create(code="PAN", name="Panadol")
+
+        response = self.post("/api/v1/visits/", {
+            "client_uuid": "abc-123",
+            "call_point": self.clinic.pk,
+            "doctor": self.doctor.pk,
+            "visit_date": timezone.localdate().isoformat(),
+            "outcome": "met",
+            "products": [product.pk],
+            "feedback": "Agreed to trial",
+        })
+
+        self.assertEqual(response.status_code, 201)
+
+        report = CallReport.objects.get()
+        self.assertEqual(report.employee, self.mr)
+        self.assertEqual(report.doctor, self.doctor)
+        self.assertEqual(report.doctor_name, "Dr. Ahmed")
+        self.assertEqual(list(report.products.all()), [product])
+
+    def test_the_same_visit_sent_twice_is_recorded_once(self):
+        """A dropped reply must not become a second call on the doctor."""
+        payload = {
+            "client_uuid": "abc-123",
+            "call_point": self.clinic.pk,
+            "visit_date": timezone.localdate().isoformat(),
+            "outcome": "met",
+        }
+
+        first = self.post("/api/v1/visits/", payload)
+        second = self.post("/api/v1/visits/", payload)
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(CallReport.objects.count(), 1)
+        self.assertEqual(first.json()["id"], second.json()["id"])
+
+    def test_two_different_visits_both_land(self):
+        for uuid in ("a", "b"):
+            self.post("/api/v1/visits/", {
+                "client_uuid": uuid, "call_point": self.clinic.pk,
+                "visit_date": timezone.localdate().isoformat(), "outcome": "met",
+            })
+
+        self.assertEqual(CallReport.objects.count(), 2)
+
+    def test_a_visit_outside_the_territory_is_refused(self):
+        response = self.post("/api/v1/visits/", {
+            "call_point": self.far_clinic.pk,
+            "visit_date": timezone.localdate().isoformat(),
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(CallReport.objects.count(), 0)
+
+    def test_reporting_against_a_scheduled_call_closes_it(self):
+        plan = WeeklyPlan.objects.create(
+            employee=self.mr, week_start=monday_of(timezone.localdate()),
+            status="approved",
+        )
+        visit = PlanVisit.objects.create(
+            plan=plan, call_point=self.clinic, day=0
+        )
+
+        self.post("/api/v1/visits/", {
+            "call_point": self.clinic.pk, "plan_visit": visit.pk,
+            "visit_date": visit.visit_date.isoformat(), "outcome": "met",
+            "feedback": "Good meeting",
+        })
+
+        visit.refresh_from_db()
+        self.assertEqual(visit.status, "done")
+        self.assertEqual(visit.remarks, "Good meeting")
+
+    def test_another_mrs_scheduled_call_cannot_be_closed(self):
+        plan = WeeklyPlan.objects.create(
+            employee=self.other, week_start=monday_of(timezone.localdate())
+        )
+        visit = PlanVisit.objects.create(
+            plan=plan, call_point=self.far_clinic, day=0
+        )
+
+        self.post("/api/v1/visits/", {
+            "call_point": self.clinic.pk, "plan_visit": visit.pk,
+            "visit_date": timezone.localdate().isoformat(), "outcome": "met",
+        })
+
+        visit.refresh_from_db()
+        self.assertEqual(visit.status, "planned")
+
+    def test_visits_list_returns_only_their_own(self):
+        CallReport.objects.create(employee=self.mr, call_point=self.clinic)
+        CallReport.objects.create(employee=self.other, call_point=self.far_clinic)
+
+        body = self.get("/api/v1/visits/").json()
+
+        self.assertEqual(len(body), 1)
+
+    # ---------------------------------------------------------- schedule
+
+    def test_an_mr_can_generate_their_own_week(self):
+        response = self.post("/api/v1/schedule/generate/", {
+            "week_start": monday_of(timezone.localdate()).isoformat(),
+            "calls_per_day": 2,
+        })
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.json()["created"])
+
+        plan = WeeklyPlan.objects.get()
+        self.assertEqual(plan.employee, self.mr)
+
+    def test_an_approved_week_is_not_regenerated(self):
+        WeeklyPlan.objects.create(
+            employee=self.mr, week_start=monday_of(timezone.localdate()),
+            status="approved",
+        )
+
+        response = self.post("/api/v1/schedule/generate/", {
+            "week_start": monday_of(timezone.localdate()).isoformat(),
+        })
+
+        self.assertEqual(response.status_code, 409)
+
+    def test_the_schedule_comes_back_with_its_visits(self):
+        plan = WeeklyPlan.objects.create(
+            employee=self.mr, week_start=monday_of(timezone.localdate())
+        )
+        PlanVisit.objects.create(plan=plan, call_point=self.clinic, day=0)
+
+        body = self.get(
+            f"/api/v1/schedule/?week={plan.week_start.isoformat()}"
+        ).json()
+
+        self.assertEqual(len(body["plan"]["visits"]), 1)
+        self.assertEqual(body["plan"]["visits"][0]["call_point_name"],
+                         "Shifa Clinic")
+
+    def test_an_empty_week_says_so_rather_than_erroring(self):
+        body = self.get("/api/v1/schedule/?week=2030-01-07").json()
+
+        self.assertIsNone(body["plan"])
+
+    # ------------------------------------------------------- performance
+
+    def test_performance_reports_all_four_measures_against_target(self):
+        Invoice.objects.create(
+            customer=Customer.objects.create(name="Shifa Pharmacy"),
+            sales_rep=self.mr, total=Decimal("50000.00"), license_no="L",
+        )
+        CallReport.objects.create(employee=self.mr, call_point=self.clinic)
+
+        target = Target.objects.create(
+            employee=self.mr, month=timezone.localdate(),
+            sales_value=Decimal("100000.00"), call_count=4, doctor_count=2,
+        )
+
+        body = self.get("/api/v1/performance/").json()
+
+        self.assertEqual(Decimal(body["actual"]["sales_value"]),
+                         Decimal("50000.00"))
+        self.assertEqual(Decimal(body["actual"]["commission"]),
+                         Decimal("5000.00"))
+        self.assertEqual(body["actual"]["call_count"], 1)
+        self.assertEqual(body["actual"]["doctor_count"], 1)
+
+        achievement = body["target"]["achievement"]
+        self.assertEqual(achievement["sales_value"]["percent"], 50)
+        self.assertEqual(achievement["call_count"]["percent"], 25)
+        self.assertEqual(achievement["doctor_count"]["percent"], 50)
+
+    def test_product_targets_are_measured_in_units_sold(self):
+        product = Product.objects.create(code="PAN", name="Panadol")
+        invoice = Invoice.objects.create(
+            customer=Customer.objects.create(name="Shifa Pharmacy"),
+            sales_rep=self.mr, total=Decimal("1000.00"), license_no="L",
+        )
+        Item.objects.create(
+            invoice=invoice, name="Panadol", qty=30, price=Decimal("100"),
+            discount=ZERO, product=product,
+        )
+
+        target = Target.objects.create(
+            employee=self.mr, month=timezone.localdate()
+        )
+        ProductTarget.objects.create(target=target, product=product, units=60)
+
+        body = self.get("/api/v1/performance/").json()
+
+        line = body["target"]["achievement"]["products"][0]
+
+        self.assertEqual(line["product"], "Panadol")
+        self.assertEqual(line["actual"], 30)
+        self.assertEqual(line["percent"], 50)
+
+    def test_no_target_set_still_reports_the_actuals(self):
+        body = self.get("/api/v1/performance/").json()
+
+        self.assertIsNone(body["target"])
+        self.assertEqual(body["actual"]["call_count"], 0)
+
+    def test_a_target_month_is_always_stored_as_the_first(self):
+        target = Target.objects.create(
+            employee=self.mr, month=date(2026, 8, 17), call_count=10
+        )
+
+        self.assertEqual(target.month, date(2026, 8, 1))
+
+    # ---------------------------------------------------------- expenses
+
+    def test_an_expense_can_be_claimed_and_starts_pending(self):
+        category = ExpenseCategory.objects.create(name="Fuel")
+
+        response = self.post("/api/v1/expenses/", {
+            "category": category.pk, "amount": "750.00",
+            "date": timezone.localdate().isoformat(), "description": "Petrol",
+        })
+
+        self.assertEqual(response.status_code, 201)
+
+        expense = Expense.objects.get()
+        self.assertEqual(expense.employee, self.mr)
+        self.assertEqual(expense.status, Expense.PENDING)
+
+    def test_expenses_list_only_their_own(self):
+        category = ExpenseCategory.objects.create(name="Fuel")
+        Expense.objects.create(
+            category=category, employee=self.other, amount=Decimal("900"),
+            date=timezone.localdate(),
+        )
+
+        self.assertEqual(len(self.get("/api/v1/expenses/").json()), 0)

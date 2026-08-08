@@ -56,6 +56,9 @@ FIELD_ALLOWED = frozenset({
     "logout",
 })
 
+# Everything under this URL namespace is exempt: see process_view.
+API_NAMESPACE = "api"
+
 
 class FieldStaffMiddleware:
     """Keep an MR login inside the portal."""
@@ -70,7 +73,14 @@ class FieldStaffMiddleware:
         if not is_field_staff(request.user):
             return None
 
-        name = getattr(request.resolver_match, "url_name", None)
+        match = request.resolver_match
+
+        # The mobile API does its own scoping and must answer in JSON. Bouncing
+        # it to an HTML dashboard would leave the app parsing a login page.
+        if getattr(match, "namespace", "") == API_NAMESPACE:
+            return None
+
+        name = getattr(match, "url_name", None)
 
         if name is None or name in FIELD_ALLOWED:
             return None

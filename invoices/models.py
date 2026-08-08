@@ -537,6 +537,236 @@ class CallPoint(models.Model):
         return visit.visit_date if visit else None
 
 
+
+class Doctor(models.Model):
+    """A person an MR details, as distinct from the place they sit in.
+
+    A call point is a place - a clinic, a hospital, a pharmacy. Doctors move
+    between them: they change hospital, open their own clinic, or retire and
+    are replaced by someone else at the same desk. Keeping the person separate
+    from the place means a move is an edit rather than a duplicate record, and
+    the visit history stays attached to whoever was actually seen.
+    """
+
+    name = models.CharField(max_length=200)
+    speciality = models.CharField(max_length=120, blank=True)
+    qualification = models.CharField(
+        max_length=120, blank=True, help_text="e.g. MBBS, FCPS."
+    )
+
+    call_point = models.ForeignKey(
+        CallPoint, on_delete=models.CASCADE, related_name="doctors",
+        help_text="Where this doctor currently sits.",
+    )
+
+    phone = models.CharField(max_length=50, blank=True)
+    email = models.EmailField(blank=True)
+
+    # Rough prescribing weight, so a plan can favour the doctors worth seeing.
+    potential = models.CharField(
+        max_length=20, blank=True,
+        choices=(("high", "High"), ("medium", "Medium"), ("low", "Low")),
+    )
+
+    notes = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="doctors_added",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        unique_together = [("name", "call_point")]
+
+    def __str__(self):
+        return self.name
+
+    @property
+    def territory(self):
+        return self.call_point.territory
+
+    def move_to(self, call_point, *, reason="", user=None, on=None):
+        """Record a change of place, keeping where they came from.
+
+        Returns None when the doctor is already there, so a repeated sync from
+        a phone cannot fill the history with moves that never happened.
+        """
+        if call_point == self.call_point:
+            return None
+
+        move = DoctorMove.objects.create(
+            doctor=self,
+            from_call_point=self.call_point,
+            to_call_point=call_point,
+            moved_on=on or timezone.localdate(),
+            reason=reason,
+            recorded_by=user,
+        )
+
+        self.call_point = call_point
+        self.save(update_fields=["call_point", "updated_at"])
+
+        return move
+
+
+class DoctorMove(models.Model):
+    """One doctor leaving one place for another."""
+
+    doctor = models.ForeignKey(
+        Doctor, on_delete=models.CASCADE, related_name="moves"
+    )
+    from_call_point = models.ForeignKey(
+        CallPoint, on_delete=models.SET_NULL, null=True,
+        related_name="doctors_left",
+    )
+    to_call_point = models.ForeignKey(
+        CallPoint, on_delete=models.CASCADE, related_name="doctors_joined"
+    )
+
+    moved_on = models.DateField(default=timezone.localdate)
+    reason = models.TextField(blank=True)
+
+    recorded_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    recorded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-moved_on", "-id"]
+
+    def __str__(self):
+        return f"{self.doctor} → {self.to_call_point} ({self.moved_on})"
+
+
+# ------------------------------------------------------------------ TARGETS
+
+class Target(models.Model):
+    """What one team member is expected to do in one month.
+
+    All four measures live on one row because they are set together in one
+    conversation, and an MR who hits their rupee number by visiting the same
+    three doctors every week has not done the job.
+    """
+
+    employee = models.ForeignKey(
+        Employee, on_delete=models.CASCADE, related_name="targets"
+    )
+    month = models.DateField(help_text="Any date in the month; stored as the 1st.")
+
+    sales_value = models.DecimalField(
+        max_digits=14, decimal_places=2, default=ZERO,
+        help_text="Net sales expected, after discounts and returns.",
+    )
+    call_count = models.PositiveIntegerField(
+        default=0, help_text="Doctor visits expected in the month."
+    )
+    doctor_count = models.PositiveIntegerField(
+        default=0, help_text="Distinct doctors expected to be seen."
+    )
+
+    note = models.TextField(blank=True)
+
+    set_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-month", "employee__full_name"]
+        unique_together = [("employee", "month")]
+
+    def __str__(self):
+        return f"{self.employee.full_name} - {self.month:%b %Y}"
+
+    def save(self, *args, **kwargs):
+        # Stored as the first, so a month is one row however it was entered.
+        self.month = self.month.replace(day=1)
+
+        return super().save(*args, **kwargs)
+
+    @property
+    def month_end(self):
+        return (self.month + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+
+    def achievement(self):
+        """What actually happened against each of the four numbers."""
+        start, end = self.month, self.month_end
+
+        reports = CallReport.objects.filter(
+            employee=self.employee, visit_date__gte=start, visit_date__lte=end
+        )
+
+        sales = self.employee.net_sales(start, end)
+        calls = reports.count()
+        doctors = reports.values("call_point_id").distinct().count()
+
+        return {
+            "sales_value": {
+                "target": self.sales_value, "actual": sales,
+                "percent": _percent(sales, self.sales_value),
+            },
+            "call_count": {
+                "target": self.call_count, "actual": calls,
+                "percent": _percent(calls, self.call_count),
+            },
+            "doctor_count": {
+                "target": self.doctor_count, "actual": doctors,
+                "percent": _percent(doctors, self.doctor_count),
+            },
+            "products": [line.achievement() for line in self.product_targets.all()],
+        }
+
+
+class ProductTarget(models.Model):
+    """Units of one product expected in the month.
+
+    A rupee total says nothing about which brand is being pushed, so targets
+    can be broken down per product where that matters.
+    """
+
+    target = models.ForeignKey(
+        Target, on_delete=models.CASCADE, related_name="product_targets"
+    )
+    product = models.ForeignKey(
+        "Product", on_delete=models.CASCADE, related_name="targets"
+    )
+    units = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["product__name"]
+        unique_together = [("target", "product")]
+
+    def __str__(self):
+        return f"{self.product.name} x{self.units}"
+
+    def achievement(self):
+        sold = (
+            Item.objects.filter(
+                product=self.product,
+                invoice__sales_rep=self.target.employee,
+                invoice__date__gte=self.target.month,
+                invoice__date__lte=self.target.month_end,
+            ).aggregate(t=Sum("qty"))["t"] or 0
+        )
+
+        return {
+            "product": self.product.name,
+            "product_id": self.product_id,
+            "target": self.units,
+            "actual": sold,
+            "percent": _percent(sold, self.units),
+        }
+
+
+def _percent(actual, target):
+    """Achievement as a whole number, and 0 rather than a crash when unset."""
+    if not target:
+        return 0
+
+    return int(round(Decimal(actual) * 100 / Decimal(target)))
+
+
 # ------------------------------------------------------------------ WEEKLY PLAN
 
 class WeeklyPlan(models.Model):
@@ -1400,8 +1630,25 @@ class CallReport(models.Model):
     feedback = models.TextField(blank=True)
     next_visit_date = models.DateField(null=True, blank=True)
 
+    # Which doctor was actually seen, once the round is on the phone and doctors
+    # are real records. Nullable because every visit filed before this existed
+    # only ever named a call point.
+    doctor = models.ForeignKey(
+        "Doctor", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="visits",
+    )
+
+    # Set by the mobile app before the row leaves the phone. A patchy line
+    # means the same visit can be sent twice; matching on this makes the
+    # second send a no-op instead of a duplicate call.
+    client_uuid = models.CharField(
+        max_length=64, blank=True, db_index=True,
+        help_text="Identifier generated on the device, for offline sync.",
+    )
+
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True)
 
     class Meta:
         ordering = ["-visit_date", "-visit_time", "-id"]
