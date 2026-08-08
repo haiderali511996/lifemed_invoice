@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 #
-# Adds the INTERNET permission to the Android release manifest.
+# Post-`flutter create` fixes for the Android project.
 #
-# `flutter create` writes that permission into the debug and profile manifests
-# only, never the main one. So a debug build has network and a release build
-# silently does not - every request fails before it leaves the phone, and the
-# app reports "No connection" on a device with full signal.
-#
-# android/ is not tracked in git (it is regenerated per machine and per SDK
-# version), so this has to be re-applied after any `flutter create`. Running it
-# twice is safe.
+# android/ is not tracked in git — it is regenerated per machine and per SDK
+# version — so these have to be re-applied after any `flutter create`. Running
+# this twice is safe.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+# ------------------------------------------------------------ INTERNET
+#
+# `flutter create` writes this permission into the debug and profile manifests
+# only, never the main one. So a debug build has network and a release build
+# silently does not: every request fails before it leaves the phone, and the
+# app reports "No connection" on a device with full signal.
 
 MANIFEST="android/app/src/main/AndroidManifest.xml"
 
@@ -24,25 +26,26 @@ fi
 
 if grep -q "android.permission.INTERNET" "$MANIFEST"; then
   echo "✓ INTERNET permission already present."
-  exit 0
+else
+  python3 tool/_patch_manifest.py "$MANIFEST"
+  echo "✓ Added INTERNET permission to $MANIFEST"
 fi
 
-python3 - "$MANIFEST" <<'PY'
-import sys
+# --------------------------------------------------------- Gradle heap
+#
+# Recent Flutter templates ask Gradle for -Xmx8G with a 4G metaspace. On a
+# machine with 8 or 16 GB that reservation exceeds what is actually free once
+# the OS, the IDE and the Dart compiler have taken theirs, and the JVM is
+# killed mid-build. Gradle reports that as "build daemon disappeared
+# unexpectedly", which reads like a crash rather than the memory problem it is.
+#
+# 3 GB builds this app comfortably.
 
-path = sys.argv[1]
-source = open(path).read()
+PROPERTIES="android/gradle.properties"
 
-marker = "<application"
-permission = '    <uses-permission android:name="android.permission.INTERNET"/>\n\n'
+if [ -f "$PROPERTIES" ]; then
+  python3 tool/_patch_gradle_memory.py "$PROPERTIES"
+fi
 
-if marker not in source:
-    sys.exit(f"Could not find <application in {path}; add the permission by hand.")
-
-# Before the first <application, which is where Android expects permissions.
-head, _, tail = source.partition(marker)
-open(path, "w").write(head + permission + marker + tail)
-PY
-
-echo "✓ Added INTERNET permission to $MANIFEST"
-grep -n "INTERNET" "$MANIFEST"
+echo
+echo "Done. Now: flutter pub get && flutter build apk --release"
