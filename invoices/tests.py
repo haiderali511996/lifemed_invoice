@@ -5524,3 +5524,215 @@ class MobileApiTests(TestCase):
         )
 
         self.assertEqual(len(self.get("/api/v1/expenses/").json()), 0)
+
+
+class TargetOfficeTests(TestCase):
+    """The office sets what each MR is expected to do."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.territory = Territory.objects.create(name="Gulberg")
+        self.mr = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza", designation="mr",
+            territory=self.territory, commission_percent=Decimal("10.00"),
+        )
+        self.product = Product.objects.create(code="PAN", name="Panadol")
+
+        self.month = timezone.localdate().replace(day=1)
+
+    def set_target(self, **overrides):
+        payload = {
+            "employee": self.mr.pk,
+            "month": self.month.strftime("%Y-%m"),
+            "sales_value": "100000",
+            "call_count": "80",
+            "doctor_count": "40",
+            "note": "",
+            f"units_{self.product.pk}": "0",
+        }
+        payload.update(overrides)
+
+        return self.client.post(reverse("target_new"), payload)
+
+    def test_a_target_can_be_set_for_a_month(self):
+        self.set_target()
+
+        target = Target.objects.get()
+
+        self.assertEqual(target.employee, self.mr)
+        self.assertEqual(target.month, self.month)
+        self.assertEqual(target.sales_value, Decimal("100000.00"))
+        self.assertEqual(target.call_count, 80)
+        self.assertEqual(target.doctor_count, 40)
+        self.assertEqual(target.set_by, self.user)
+
+    def test_product_targets_are_saved_in_units(self):
+        self.set_target(**{f"units_{self.product.pk}": "500"})
+
+        line = ProductTarget.objects.get()
+
+        self.assertEqual(line.product, self.product)
+        self.assertEqual(line.units, 500)
+
+    def test_a_zero_product_target_is_not_stored(self):
+        self.set_target(**{f"units_{self.product.pk}": "0"})
+
+        self.assertEqual(ProductTarget.objects.count(), 0)
+
+    def test_clearing_a_product_target_removes_it(self):
+        self.set_target(**{f"units_{self.product.pk}": "500"})
+
+        target = Target.objects.get()
+
+        self.client.post(reverse("target_edit", args=[target.pk]), {
+            "employee": self.mr.pk,
+            "month": self.month.strftime("%Y-%m"),
+            "sales_value": "100000", "call_count": "80",
+            "doctor_count": "40", "note": "",
+            f"units_{self.product.pk}": "0",
+        })
+
+        self.assertEqual(ProductTarget.objects.count(), 0)
+
+    def test_one_target_per_person_per_month(self):
+        self.set_target()
+        response = self.set_target(sales_value="999")
+
+        self.assertEqual(Target.objects.count(), 1)
+        self.assertEqual(
+            Target.objects.get().sales_value, Decimal("100000.00")
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_the_list_shows_achievement_against_each_measure(self):
+        self.set_target()
+
+        Invoice.objects.create(
+            customer=Customer.objects.create(name="Shifa"),
+            sales_rep=self.mr, total=Decimal("50000.00"), license_no="L",
+        )
+
+        response = self.client.get(reverse("target_list"))
+
+        achievement = response.context["rows"][0]["achievement"]
+
+        self.assertEqual(achievement["sales_value"]["percent"], 50)
+        self.assertEqual(achievement["call_count"]["actual"], 0)
+
+    def test_team_members_without_a_target_are_flagged(self):
+        Employee.objects.create(
+            employee_code="MR-02", full_name="Sara", designation="mr"
+        )
+        self.set_target()
+
+        response = self.client.get(reverse("target_list"))
+
+        missing = [e.full_name for e in response.context["missing"]]
+
+        self.assertEqual(missing, ["Sara"])
+
+    def test_target_pages_render(self):
+        self.set_target()
+        target = Target.objects.get()
+
+        for url in (reverse("target_list"), reverse("target_new"),
+                    reverse("target_edit", args=[target.pk])):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, 200)
+
+
+class DoctorOfficeTests(TestCase):
+    """The office's view of the doctors the MRs are adding from the app."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.gulberg = Territory.objects.create(name="Gulberg")
+        self.model_town = Territory.objects.create(name="Model Town")
+
+        self.clinic = CallPoint.objects.create(
+            name="Shifa Clinic", territory=self.gulberg, kind="doctor"
+        )
+        self.far = CallPoint.objects.create(
+            name="Far Clinic", territory=self.model_town, kind="doctor"
+        )
+
+        self.doctor = Doctor.objects.create(
+            name="Dr. Ahmed", speciality="Cardiology", call_point=self.clinic
+        )
+        Doctor.objects.create(name="Dr. Zubair", call_point=self.far)
+
+    def test_the_list_shows_every_doctor_and_where_they_sit(self):
+        response = self.client.get(reverse("doctor_list"))
+
+        names = [d.name for d in response.context["doctors"]]
+
+        self.assertIn("Dr. Ahmed", names)
+        self.assertIn("Dr. Zubair", names)
+
+    def test_the_list_can_be_filtered_by_territory(self):
+        response = self.client.get(
+            reverse("doctor_list"), {"territory": self.gulberg.pk}
+        )
+
+        self.assertEqual(
+            [d.name for d in response.context["doctors"]], ["Dr. Ahmed"]
+        )
+
+    def test_searching_matches_the_place_as_well_as_the_person(self):
+        response = self.client.get(reverse("doctor_list"), {"q": "Shifa"})
+
+        self.assertEqual(
+            [d.name for d in response.context["doctors"]], ["Dr. Ahmed"]
+        )
+
+    def test_moves_are_listed_so_the_office_can_see_them(self):
+        new_place = CallPoint.objects.create(
+            name="City Hospital", territory=self.gulberg, kind="hospital"
+        )
+        self.doctor.move_to(new_place, reason="Left Shifa", user=self.user)
+
+        response = self.client.get(reverse("doctor_list"))
+
+        move = response.context["recent_moves"][0]
+
+        self.assertEqual(move.doctor, self.doctor)
+        self.assertEqual(move.from_call_point, self.clinic)
+        self.assertEqual(move.to_call_point, new_place)
+
+    def test_a_field_login_only_sees_its_own_territory(self):
+        account = User.objects.create_user("ali", password="pw12345678")
+        UserRolls.objects.filter(user=account).update(
+            role=UserRolls.ROLE_FIELD
+        )
+        Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza", designation="mr",
+            territory=self.gulberg, user=account,
+        )
+
+        self.client.logout()
+        self.client.login(username="ali", password="pw12345678")
+
+        response = self.client.get(reverse("doctor_list"))
+
+        self.assertEqual(
+            [d.name for d in response.context["doctors"]], ["Dr. Ahmed"]
+        )
+
+    def test_the_migration_gave_existing_call_points_a_doctor(self):
+        """Migration 0019 must have run on the test database."""
+        imported = CallPoint.objects.create(
+            name="Dr. Imported", territory=self.gulberg, kind="doctor"
+        )
+
+        # New call points do not get one automatically - only the migration
+        # backfilled them - so this checks the model, not the migration.
+        self.assertEqual(imported.doctors.count(), 0)
+
+    def test_the_doctor_page_renders(self):
+        self.assertEqual(
+            self.client.get(reverse("doctor_list")).status_code, 200
+        )

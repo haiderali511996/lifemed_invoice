@@ -15,6 +15,12 @@ urlpatterns = [
     path('me/payslips/', views.my_payslips, name='my_payslips'),
     path('commission/', views.commission_report, name='commission_report'),
 
+    path('targets/', views.target_list, name='target_list'),
+    path('targets/new/', views.target_edit, name='target_new'),
+    path('targets/<int:target_id>/edit/', views.target_edit, name='target_edit'),
+
+    path('doctors/', views.doctor_list, name='doctor_list'),
+
     path('invoices/', views.invoice_list, name='invoice_list'),
     path(
         'invoices/<int:invoice_id>/reprint/',

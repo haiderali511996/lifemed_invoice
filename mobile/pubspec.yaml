@@ -1,0 +1,59 @@
+name: lifemed_mr
+description: LifeMed Pharma field app - an MR's day, doctors, targets and calls.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Networking and identity
+  http: ^1.2.0
+  shared_preferences: ^2.2.2
+
+  # Offline store. Visits are queued here first and pushed when there is a
+  # line, so an MR in a hospital basement can still record a call.
+  sqflite: ^2.3.2
+  path: ^1.9.0
+
+  # A device-generated id per queued write, so a retried sync cannot book the
+  # same call twice.
+  uuid: ^4.3.3
+
+  connectivity_plus: ^6.0.1
+  provider: ^6.1.2
+  intl: ^0.19.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  flutter_launcher_icons: ^0.13.1
+  flutter_native_splash: ^2.4.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/
+
+# Run `dart run flutter_launcher_icons` after `flutter pub get`.
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon.png"
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/logo-mark.png"
+  remove_alpha_ios: true
+
+# Run `dart run flutter_native_splash:create` after `flutter pub get`.
+flutter_native_splash:
+  color: "#FFFFFF"
+  image: assets/splash.png
+  android_12:
+    color: "#FFFFFF"
+    image: assets/logo-mark.png
+  android: true
+  ios: true

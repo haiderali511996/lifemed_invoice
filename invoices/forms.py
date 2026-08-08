@@ -19,6 +19,7 @@ from .models import (
     Product,
     Purchase,
     Supplier,
+    Target,
     Territory,
     UserRolls,
 )
@@ -396,6 +397,54 @@ class BatchForm(forms.ModelForm):
             )
 
         return batch_no
+
+
+class TargetForm(forms.ModelForm):
+    """What one MR is expected to do in one month."""
+
+    class Meta:
+        model = Target
+        fields = [
+            "employee", "month", "sales_value", "call_count",
+            "doctor_count", "note",
+        ]
+        widgets = {
+            "month": forms.DateInput(attrs={"type": "month"}),
+            "note": forms.Textarea(attrs={"rows": 2}),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.fields["employee"].queryset = Employee.objects.filter(
+            is_active=True
+        )
+        self.fields["note"].required = False
+
+        # A month input posts "2026-08"; the model wants a date.
+        self.fields["month"].input_formats = ["%Y-%m", "%Y-%m-%d"]
+
+        if self.instance.pk:
+            self.initial["month"] = self.instance.month.strftime("%Y-%m")
+
+    def clean(self):
+        cleaned = super().clean()
+
+        employee = cleaned.get("employee")
+        month = cleaned.get("month")
+
+        if employee and month:
+            clash = Target.objects.filter(
+                employee=employee, month=month.replace(day=1)
+            ).exclude(pk=self.instance.pk)
+
+            if clash.exists():
+                raise forms.ValidationError(
+                    f"{employee.full_name} already has a target for "
+                    f"{month:%B %Y}. Edit that one instead of adding a second."
+                )
+
+        return cleaned
 
 
 class StockAdjustmentForm(forms.Form):

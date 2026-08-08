@@ -33,6 +33,7 @@ from .forms import (
     BatchForm,
     StockAdjustmentForm,
     SupplierForm,
+    TargetForm,
     TerritoryForm,
 )
 from .layout import LayoutError, describe, detect_layout
@@ -69,6 +70,10 @@ from .models import (
     PurchaseItem,
     StockMovement,
     Supplier,
+    Doctor,
+    DoctorMove,
+    ProductTarget,
+    Target,
     Territory,
     UserRolls,
     WeeklyPlan,
@@ -3390,6 +3395,154 @@ def call_report_summary(request):
             "rows": ranked,
             "month": month,
             "total_calls": sum(row["calls"] for row in ranked),
+        }
+    )
+
+
+# ------------------------------------------------------------------ TARGETS
+
+@login_required
+def target_list(request):
+    """What each MR is expected to do this month, and how it is going."""
+    month = request.GET.get("month", "").strip()
+    parsed = parse_date(f"{month}-01") if month else None
+
+    start, end = month_range(parsed or timezone.localdate())
+
+    rows = []
+
+    for target in Target.objects.filter(month=start).select_related("employee"):
+        rows.append({"target": target, "achievement": target.achievement()})
+
+    rows.sort(key=lambda row: row["target"].employee.full_name)
+
+    # Anyone active without a target this month, so a gap is visible rather
+    # than silently meaning "nothing expected".
+    missing = Employee.objects.filter(is_active=True).exclude(
+        pk__in=[row["target"].employee_id for row in rows]
+    )
+
+    return render(
+        request,
+        "invoices/target_list.html",
+        {
+            "active": "targets",
+            "rows": rows,
+            "missing": missing,
+            "month": start.strftime("%Y-%m"),
+            "start": start,
+            "form": TargetForm(initial={"month": start.strftime("%Y-%m")}),
+        }
+    )
+
+
+@login_required
+def target_edit(request, target_id=None):
+    target = get_object_or_404(Target, pk=target_id) if target_id else None
+
+    if request.method == "POST":
+        form = TargetForm(request.POST, instance=target)
+
+        if form.is_valid():
+            saved = form.save(commit=False)
+            saved.set_by = request.user
+            saved.save()
+
+            _save_product_targets(request, saved)
+
+            messages.success(
+                request,
+                f"Target set for {saved.employee.full_name}, "
+                f"{saved.month:%B %Y}.",
+            )
+
+            return redirect(f"{reverse('target_list')}?month={saved.month:%Y-%m}")
+
+        for errors in form.errors.values():
+            for error in errors:
+                messages.error(request, error)
+
+    else:
+        form = TargetForm(instance=target)
+
+    # Paired up here rather than in the template: a template cannot look a
+    # dict up by a variable key, and a product with no target needs to render
+    # as an empty box rather than be missing.
+    existing = {
+        line.product_id: line.units
+        for line in (target.product_targets.all() if target else [])
+    }
+
+    return render(
+        request,
+        "invoices/target_form.html",
+        {
+            "form": form,
+            "target": target,
+            "product_rows": [
+                {"product": product, "units": existing.get(product.pk, "")}
+                for product in Product.objects.filter(is_active=True)
+            ],
+        }
+    )
+
+
+def _save_product_targets(request, target):
+    """Per-product unit targets, entered as one box per product.
+
+    A blank or zero clears the line rather than storing a target of nothing.
+    """
+    for product in Product.objects.filter(is_active=True):
+        units = safe_int(request.POST.get(f"units_{product.pk}", "0"))
+
+        if units > 0:
+            ProductTarget.objects.update_or_create(
+                target=target, product=product, defaults={"units": units}
+            )
+        else:
+            ProductTarget.objects.filter(
+                target=target, product=product
+            ).delete()
+
+
+# ------------------------------------------------------------------ DOCTORS
+
+@login_required
+def doctor_list(request):
+    """Every doctor, and where they currently sit."""
+    doctors = Doctor.objects.select_related(
+        "call_point", "call_point__territory"
+    )
+
+    query = request.GET.get("q", "").strip()
+    territory_id = request.GET.get("territory", "").strip()
+
+    mine = field_employee(request.user)
+
+    if mine is not None and mine.territory_id is not None:
+        doctors = doctors.filter(call_point__territory_id=mine.territory_id)
+    elif territory_id:
+        doctors = doctors.filter(call_point__territory_id=territory_id)
+
+    if query:
+        doctors = doctors.filter(
+            Q(name__icontains=query)
+            | Q(speciality__icontains=query)
+            | Q(call_point__name__icontains=query)
+        )
+
+    return render(
+        request,
+        "invoices/doctor_list.html",
+        {
+            "active": "doctors",
+            "doctors": doctors,
+            "territories": Territory.objects.filter(is_active=True),
+            "query": query,
+            "selected_territory": territory_id,
+            "recent_moves": DoctorMove.objects.select_related(
+                "doctor", "from_call_point", "to_call_point"
+            )[:15],
         }
     )
 

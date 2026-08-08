@@ -1,0 +1,94 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Targets{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>🎯 Targets</h1>
+  <div style="display:flex;gap:9px">
+    <form method="GET" style="display:flex;gap:9px">
+      <input type="month" name="month" value="{{ month }}"
+             style="padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
+      <button type="submit" class="btn">Show</button>
+    </form>
+    <a href="{% url 'target_new' %}" class="btn btn-green">＋ Set a Target</a>
+  </div>
+</div>
+
+{% if missing %}
+<div class="alert alert-warn">
+  No target set for {{ start|date:"F Y" }} for:
+  {% for e in missing %}<strong>{{ e.full_name }}</strong>{% if not forloop.last %}, {% endif %}{% endfor %}.
+  Their app shows actuals with nothing to measure against.
+</div>
+{% endif %}
+
+{% for row in rows %}
+<div class="card" style="margin-bottom:14px">
+  <div class="target-head">
+    <div>
+      <strong style="font-size:15px">{{ row.target.employee.full_name }}</strong>
+      <span class="muted">{{ row.target.employee.territory.name|default:"no territory" }}</span>
+    </div>
+    <a href="{% url 'target_edit' row.target.id %}" class="btn btn-sm btn-grey">Edit</a>
+  </div>
+
+  {% if row.target.note %}
+  <p class="muted" style="font-size:12.5px;margin:0 0 12px">{{ row.target.note }}</p>
+  {% endif %}
+
+  <div class="measures">
+    {% with a=row.achievement %}
+    <div class="measure">
+      <span class="k">Sales</span>
+      <span class="v">{{ a.sales_value.actual|floatformat:2 }}
+        <small>of {{ a.sales_value.target|floatformat:2 }}</small></span>
+      <div class="bar"><i style="width:{% if a.sales_value.percent > 100 %}100{% else %}{{ a.sales_value.percent }}{% endif %}%"></i></div>
+      <span class="p">{{ a.sales_value.percent }}%</span>
+    </div>
+    <div class="measure">
+      <span class="k">Calls</span>
+      <span class="v">{{ a.call_count.actual }}
+        <small>of {{ a.call_count.target }}</small></span>
+      <div class="bar"><i style="width:{% if a.call_count.percent > 100 %}100{% else %}{{ a.call_count.percent }}{% endif %}%"></i></div>
+      <span class="p">{{ a.call_count.percent }}%</span>
+    </div>
+    <div class="measure">
+      <span class="k">Doctors seen</span>
+      <span class="v">{{ a.doctor_count.actual }}
+        <small>of {{ a.doctor_count.target }}</small></span>
+      <div class="bar"><i style="width:{% if a.doctor_count.percent > 100 %}100{% else %}{{ a.doctor_count.percent }}{% endif %}%"></i></div>
+      <span class="p">{{ a.doctor_count.percent }}%</span>
+    </div>
+
+    {% for line in a.products %}
+    <div class="measure">
+      <span class="k">{{ line.product }}</span>
+      <span class="v">{{ line.actual }} <small>of {{ line.target }} units</small></span>
+      <div class="bar"><i style="width:{% if line.percent > 100 %}100{% else %}{{ line.percent }}{% endif %}%"></i></div>
+      <span class="p">{{ line.percent }}%</span>
+    </div>
+    {% endfor %}
+    {% endwith %}
+  </div>
+</div>
+{% empty %}
+<div class="card" style="text-align:center;padding:30px">
+  No targets set for {{ start|date:"F Y" }} yet.
+</div>
+{% endfor %}
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .target-head { display:flex;justify-content:space-between;align-items:center;
+    margin-bottom:12px; }
+  .target-head .muted { display:block;font-size:12px; }
+  .measures { display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px; }
+  .measure .k { display:block;font-size:11px;text-transform:uppercase;
+    letter-spacing:.5px;color:#8595a8; }
+  .measure .v { display:block;font-size:15px;font-weight:600;margin:3px 0 6px; }
+  .measure .v small { font-weight:400;color:#8595a8;font-size:12px; }
+  .measure .bar { height:7px;background:#edf1f5;border-radius:4px;overflow:hidden; }
+  .measure .bar i { display:block;height:100%;background:var(--brand); }
+  .measure .p { font-size:11.5px;color:#8595a8; }
+</style>
+{% endblock %}

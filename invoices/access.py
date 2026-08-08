@@ -36,6 +36,7 @@ FIELD_ALLOWED = frozenset({
     "plan_list",
     "plan_detail",
     "call_point_list",
+    "doctor_list",
 
     # Samples they hand out, scoped to them
     "sample_list",

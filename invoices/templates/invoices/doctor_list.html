@@ -1,0 +1,91 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Doctors{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>👨‍⚕️ Doctors</h1>
+  <span class="muted" style="font-size:13px">
+    Added and moved from the MR app; this is the office's view of it.
+  </span>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+  <form method="GET" style="display:flex;gap:10px;flex-wrap:wrap">
+    <input type="search" name="q" value="{{ query }}"
+           placeholder="Doctor, speciality or place…"
+           style="flex:1;min-width:220px;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
+    {% if not is_field_staff %}
+    <select name="territory" style="padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
+      <option value="">All territories</option>
+      {% for t in territories %}
+      <option value="{{ t.id }}" {% if selected_territory == t.id|stringformat:"s" %}selected{% endif %}>{{ t.name }}</option>
+      {% endfor %}
+    </select>
+    {% endif %}
+    <button type="submit" class="btn">Search</button>
+    {% if query or selected_territory %}
+    <a href="{% url 'doctor_list' %}" class="btn btn-grey">Clear</a>
+    {% endif %}
+  </form>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Doctor</th><th>Speciality</th><th>Currently At</th>
+        <th>Territory</th><th>Phone</th><th class="num">Visits</th>
+      </tr></thead>
+      <tbody>
+        {% for d in doctors %}
+        <tr>
+          <td><strong>{{ d.name }}</strong>
+            {% if d.qualification %}<span class="muted">{{ d.qualification }}</span>{% endif %}
+            {% if not d.is_active %}<span class="pill pill-overdue">inactive</span>{% endif %}</td>
+          <td>{{ d.speciality|default:"—" }}</td>
+          <td>{{ d.call_point.name }}</td>
+          <td>{{ d.call_point.territory.name }}</td>
+          <td>{{ d.phone|default:"—" }}</td>
+          <td class="num">{{ d.visits.count }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6" style="text-align:center;padding:26px">
+          No doctors recorded yet.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if recent_moves %}
+<div class="card">
+  <h3 style="margin-top:0">Recent Moves</h3>
+  <p class="muted" style="font-size:12.5px;margin:0 0 12px">
+    A doctor changing hospital is recorded as a move, so their visit history
+    stays with the person rather than being split across two records.
+  </p>
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr><th>Date</th><th>Doctor</th><th>From</th><th>To</th><th>Reason</th></tr></thead>
+      <tbody>
+        {% for m in recent_moves %}
+        <tr>
+          <td>{{ m.moved_on|date:"d-m-Y" }}</td>
+          <td><strong>{{ m.doctor.name }}</strong></td>
+          <td>{{ m.from_call_point.name|default:"—" }}</td>
+          <td>{{ m.to_call_point.name }}</td>
+          <td style="font-size:13px;color:#55657a">{{ m.reason|default:"—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  td .muted { display:block;font-size:11px; }
+</style>
+{% endblock %}
