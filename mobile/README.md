@@ -16,6 +16,7 @@ You need Flutter 3.19 or newer. From this directory:
 
 ```bash
 flutter create --org com.lifemedpharmaceutical --platforms=android,ios .
+./tool/setup_android.sh                    # INTERNET permission — see below
 flutter pub get
 dart run flutter_launcher_icons            # app icon from the LifeMed mark
 dart run flutter_native_splash:create      # splash from the full logo
@@ -24,6 +25,13 @@ flutter run
 
 `flutter create .` in an existing directory fills in the native project folders
 without touching `lib/`, `pubspec.yaml` or `assets/`.
+
+**Then run `./tool/setup_android.sh`.** `flutter create` puts the INTERNET
+permission in the debug and profile manifests only, never the main one — so a
+debug build has network and a release build silently does not. The symptom is
+"No connection" on a phone with full signal. `android/` is not tracked in git,
+so this has to be re-applied after any `flutter create`; running it twice is
+safe.
 
 **Do not leave off `--org`.** Without it the bundle identifier is
 `com.example.…`, and no Apple account can be issued a provisioning profile for
