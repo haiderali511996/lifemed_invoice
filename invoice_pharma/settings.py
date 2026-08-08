@@ -95,6 +95,10 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+
+    # Must sit after authentication: it reads request.user to decide whether
+    # this login is field staff, and if so keeps it inside the MR portal.
+    'invoices.access.FieldStaffMiddleware',
 ]
 
 ROOT_URLCONF = 'invoice_pharma.urls'

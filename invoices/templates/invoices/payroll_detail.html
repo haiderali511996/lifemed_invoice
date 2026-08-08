@@ -40,7 +40,8 @@
   <table>
     <thead><tr>
       <th>Employee</th><th>Designation</th><th class="num">Basic</th>
-      <th class="num">Allowances</th><th class="num">Expenses</th>
+      <th class="num">Allowances</th><th class="num">Commission</th>
+      <th class="num">Expenses</th>
       <th class="num">Deductions</th><th class="num">Net Pay</th><th class="no-print"></th>
     </tr></thead>
     <tbody>
@@ -51,6 +52,11 @@
         <td>{{ p.employee.get_designation_display }}</td>
         <td class="num">{{ p.basic_salary|floatformat:2 }}</td>
         <td class="num">{{ p.total_allowances|floatformat:2 }}</td>
+        <td class="num">
+          {% if p.commission %}{{ p.commission|floatformat:2 }}
+          <span class="muted">{{ p.commission_percent|floatformat:"-2" }}% of {{ p.sales_amount|floatformat:2 }}</span>
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
         <td class="num">{{ p.expense_reimbursement|floatformat:2 }}</td>
         <td class="num" style="color:#a71d2a">{{ p.total_deductions|floatformat:2 }}</td>
         <td class="num"><strong>{{ p.net_pay|floatformat:2 }}</strong></td>
@@ -62,7 +68,7 @@
         </td>
       </tr>
       {% empty %}
-      <tr><td colspan="8" style="text-align:center;padding:26px">
+      <tr><td colspan="9" style="text-align:center;padding:26px">
         No payslips. Add team members with a salary, then re-run payroll.
       </td></tr>
       {% endfor %}

@@ -4,7 +4,7 @@ The sidebar shows an overdue badge and the header shows the signed-in user's
 avatar and role, so every view would otherwise have to supply them.
 """
 
-from .models import UserRolls, is_super_admin
+from .models import UserRolls, is_field_staff, is_super_admin
 
 
 def erp_shell(request):
@@ -19,6 +19,8 @@ def erp_shell(request):
         # Users created before the role signal existed, or via raw SQL.
         profile = UserRolls.objects.create(user=user)
 
+    field = is_field_staff(user)
+
     # Imported lazily: this module is loaded for every request, and the ledger
     # helpers pull in aggregate machinery that the login page has no use for.
     from .views import overdue_invoices
@@ -26,6 +28,9 @@ def erp_shell(request):
     return {
         "user_profile": profile,
         "is_super_admin": is_super_admin(user),
-        "overdue_count": overdue_invoices().count(),
+        "is_field_staff": field,
+        # Receivables are the office's business, so an MR is neither shown the
+        # badge nor charged the query that builds it.
+        "overdue_count": 0 if field else overdue_invoices().count(),
         "search_query": request.GET.get("q", ""),
     }

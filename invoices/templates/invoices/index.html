@@ -31,6 +31,23 @@
     {% endif %}
 
     <div class="field">
+      <label>Sale Credited To (MR)</label>
+      <select name="sales_rep" id="salesRep">
+        <option value="">-- from the customer's territory --</option>
+        {% for e in sales_reps %}
+        <option value="{{ e.id }}">
+          {{ e.full_name }}{% if e.territory %} · {{ e.territory.name }}{% endif %}
+          {% if e.commission_percent %} · {{ e.commission_percent|floatformat:"-2" }}%{% endif %}
+        </option>
+        {% endfor %}
+      </select>
+      <p class="help-note">
+        Drives commission. Left blank, the sale goes to whoever covers the
+        customer's territory.
+      </p>
+    </div>
+
+    <div class="field">
       <label>Select Existing Customer</label>
       <select id="customerDropdown" onchange="fillCustomer()">
         <option value="">-- Search &amp; select customer --</option>

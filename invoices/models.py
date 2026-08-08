@@ -1,6 +1,6 @@
 import os
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from django.db import models, transaction, IntegrityError
 from django.contrib.auth.models import User
@@ -89,6 +89,15 @@ class Invoice(models.Model):
     distributor = models.ForeignKey(
         "Distributor", on_delete=models.PROTECT, null=True, blank=True,
         related_name="invoices",
+    )
+
+    # Who the sale is credited to. Drives commission, so it is stored on the
+    # invoice rather than inferred from the customer's territory later - a
+    # customer can change hands, but who earned a past sale cannot.
+    sales_rep = models.ForeignKey(
+        "Employee", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="invoices",
+        help_text="Team member credited with this sale.",
     )
 
     # ✅ STRING FORMAT
@@ -260,10 +269,12 @@ class Payment(models.Model):
 class UserRolls(models.Model):
     ROLE_SUPER_ADMIN = 'super_admin'
     ROLE_MANAGER = 'manager'
+    ROLE_FIELD = 'field'
 
     ROLE_CHOICES = (
         (ROLE_SUPER_ADMIN, 'Super Admin'),
         (ROLE_MANAGER, 'Manager'),
+        (ROLE_FIELD, 'Field Staff (MR)'),
     )
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=ROLE_MANAGER)
@@ -301,6 +312,32 @@ def is_super_admin(user):
     role = getattr(user, 'userrolls', None)
 
     return role is not None and role.role == UserRolls.ROLE_SUPER_ADMIN
+
+
+def is_field_staff(user):
+    """True for an MR login: their own work only, nothing company-wide.
+
+    Superusers are excluded even if a role row says otherwise, so an admin
+    can never be locked out of their own system by a mis-set role.
+    """
+    if not user.is_authenticated or user.is_superuser:
+        return False
+
+    role = getattr(user, 'userrolls', None)
+
+    return role is not None and role.role == UserRolls.ROLE_FIELD
+
+
+def field_employee(user):
+    """The Employee record behind an MR login, or None.
+
+    Everything an MR sees is filtered through this, so an MR login with no
+    team member attached sees nothing rather than everything.
+    """
+    if not is_field_staff(user):
+        return None
+
+    return getattr(user, 'employee', None)
 
 
 # Signal: Jab bhi naya user banay, uska profile khud ban jaye
@@ -402,6 +439,14 @@ class Employee(models.Model):
     )
     other_allowance = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
 
+    commission_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=ZERO,
+        help_text=(
+            "Percentage of net sales, on top of salary. Leave at 0 for staff "
+            "on salary only."
+        ),
+    )
+
     class Meta:
         ordering = ["full_name"]
 
@@ -411,6 +456,36 @@ class Employee(models.Model):
     @property
     def is_field_staff(self):
         return self.designation == "mr"
+
+    @property
+    def earns_commission(self):
+        return self.commission_percent > ZERO
+
+    def net_sales(self, start, end):
+        """Sales credited to this employee between two dates, inclusive.
+
+        "Actual sales" means what the customer was billed after every line
+        discount - which is what `Invoice.total` already stores - less any
+        goods that came back. Commission on returned stock would pay twice
+        for one delivery.
+        """
+        invoiced = (
+            self.invoices.filter(date__gte=start, date__lte=end)
+            .aggregate(t=Sum("total"))["t"] or ZERO
+        )
+        returned = (
+            SalesReturn.objects.filter(
+                invoice__sales_rep=self, date__gte=start, date__lte=end
+            ).aggregate(t=Sum("total"))["t"] or ZERO
+        )
+
+        return invoiced - returned
+
+    def commission_on(self, start, end):
+        """What the percentage comes to over a period."""
+        return (
+            self.net_sales(start, end) * self.commission_percent / Decimal("100")
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 # ------------------------------------------------------------------ CALL POINTS
@@ -1208,6 +1283,20 @@ class Payslip(models.Model):
         help_text="Approved expenses for the month, paid with salary.",
     )
 
+    # Sales and rate are copied onto the slip alongside the commission itself,
+    # so a payslip handed out months ago still shows the arithmetic behind it
+    # even after the rate changes or an invoice is credited back.
+    sales_amount = models.DecimalField(
+        max_digits=14, decimal_places=2, default=ZERO,
+        help_text="Net sales credited to this employee for the month.",
+    )
+    commission_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=ZERO
+    )
+    commission = models.DecimalField(
+        max_digits=12, decimal_places=2, default=ZERO
+    )
+
     tax_deduction = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
     advance_deduction = models.DecimalField(
         max_digits=12, decimal_places=2, default=ZERO
@@ -1238,9 +1327,20 @@ class Payslip(models.Model):
 
     def recalculate(self):
         self.gross_pay = (
-            self.basic_salary + self.total_allowances + self.expense_reimbursement
+            self.basic_salary
+            + self.total_allowances
+            + self.commission
+            + self.expense_reimbursement
         )
         self.net_pay = self.gross_pay - self.total_deductions
+
+        return self
+
+    def recalculate_commission(self):
+        """Re-derive the commission from the stored sales and rate."""
+        self.commission = (
+            self.sales_amount * self.commission_percent / Decimal("100")
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         return self
 

@@ -39,6 +39,8 @@ from .stock import (
     StockError, adjust, allocate_fefo, issue, receive, record_sales_return,
 )
 from .planning import current_week_start, generate_plan, monday_of
+from django.contrib.auth.models import User
+
 from .models import (
     Batch,
     CallPoint,
@@ -71,6 +73,8 @@ from .models import (
     WeeklyPlan,
     ZERO,
     OVERDUE_DAYS,
+    field_employee,
+    is_field_staff,
     is_super_admin,
 )
 
@@ -179,6 +183,45 @@ def previous_balance_breakdown(customer, current_invoice, as_at=None):
     }
 
 
+def deny_unless_mine(request, owner):
+    """Stop a field login opening a record that belongs to someone else.
+
+    The allowlist in access.py gates URLs; this gates the records behind them,
+    so a legitimate URL with somebody else's id in it still goes nowhere.
+    Returns a redirect to refuse, or None to allow.
+    """
+    mine = field_employee(request.user)
+
+    if mine is None or owner == mine:
+        return None
+
+    messages.error(request, "🚫 That belongs to another team member.")
+
+    return redirect("my_dashboard")
+
+
+def _sales_rep_for(request, customer):
+    """Who to credit this sale to.
+
+    An explicit pick on the form wins. Otherwise it falls to whoever covers
+    the customer's territory, so the common case needs no thought - and if
+    two people cover it, nobody is credited by guesswork.
+    """
+    chosen = request.POST.get("sales_rep", "").strip()
+
+    if chosen:
+        return Employee.objects.filter(pk=chosen, is_active=True).first()
+
+    if customer.territory_id is None:
+        return None
+
+    covering = Employee.objects.filter(
+        territory_id=customer.territory_id, designation="mr", is_active=True
+    )
+
+    return covering.first() if covering.count() == 1 else None
+
+
 def _balance_as_at(invoice, as_at):
     """One invoice's balance at the start of `as_at`.
 
@@ -257,9 +300,13 @@ def login_view(request):
 
             login(request, user)
 
-            # SUPER ADMIN → LOGS PAGE, EVERYONE ELSE → INVOICE FORM
+            # SUPER ADMIN → LOGS PAGE, MR → THEIR OWN PORTAL,
+            # EVERYONE ELSE → INVOICE FORM
             if is_super_admin(user):
                 return redirect("invoice_logs")
+
+            if is_field_staff(user):
+                return redirect("my_dashboard")
 
             return redirect("index")
 
@@ -295,6 +342,9 @@ def index(request):
             "distributors": Distributor.objects.filter(is_active=True),
             "default_distributor": Distributor.default(),
             "products": Product.objects.filter(is_active=True),
+            "sales_reps": Employee.objects.filter(
+                is_active=True, designation="mr"
+            ).select_related("territory"),
         }
     )
 
@@ -442,7 +492,8 @@ def generate_invoice(request):
         invoice = Invoice.objects.create(
             customer=customer,
             distributor=distributor,
-            license_no=license_no
+            license_no=license_no,
+            sales_rep=_sales_rep_for(request, customer),
         )
 
         names = request.POST.getlist("item_name[]")
@@ -1154,6 +1205,12 @@ def employee_edit(request, employee_id=None):
 def call_point_list(request):
     call_points = CallPoint.objects.select_related("territory", "customer")
 
+    mine = field_employee(request.user)
+
+    if mine is not None:
+        # An MR works one patch, so this is their doctor list, not the company's.
+        call_points = call_points.filter(territory=mine.territory)
+
     query = request.GET.get("q", "").strip()
 
     if query:
@@ -1208,6 +1265,11 @@ def call_point_edit(request, call_point_id=None):
 @login_required
 def plan_list(request):
     plans = WeeklyPlan.objects.select_related("employee", "employee__territory")
+
+    mine = field_employee(request.user)
+
+    if mine is not None:
+        plans = plans.filter(employee=mine)
 
     return render(
         request,
@@ -1269,6 +1331,11 @@ def plan_detail(request, plan_id):
         pk=plan_id,
     )
 
+    refused = deny_unless_mine(request, plan.employee)
+
+    if refused is not None:
+        return refused
+
     return render(
         request,
         "invoices/plan_detail.html",
@@ -1311,7 +1378,14 @@ def plan_status(request, plan_id, action):
 @login_required
 def visit_status(request, visit_id, action):
     """Field reporting: mark a planned call as done or missed."""
-    visit = get_object_or_404(PlanVisit, pk=visit_id)
+    visit = get_object_or_404(
+        PlanVisit.objects.select_related("plan__employee"), pk=visit_id
+    )
+
+    refused = deny_unless_mine(request, visit.plan.employee)
+
+    if refused is not None:
+        return refused
 
     if action in ("done", "missed", "planned"):
         visit.status = action
@@ -2269,7 +2343,11 @@ def expense_list(request):
     if category_id:
         expenses = expenses.filter(category_id=category_id)
 
-    if employee_id:
+    mine = field_employee(request.user)
+
+    if mine is not None:
+        expenses = expenses.filter(employee=mine)
+    elif employee_id:
         expenses = expenses.filter(employee_id=employee_id)
 
     if status:
@@ -2312,6 +2390,12 @@ def expense_list(request):
 def expense_edit(request, expense_id=None):
     expense = get_object_or_404(Expense, pk=expense_id) if expense_id else None
 
+    if expense is not None:
+        refused = deny_unless_mine(request, expense.employee)
+
+        if refused is not None:
+            return refused
+
     if request.method == "POST":
         form = ExpenseForm(request.POST, request.FILES, instance=expense)
 
@@ -2320,6 +2404,14 @@ def expense_edit(request, expense_id=None):
 
             if saved.submitted_by_id is None:
                 saved.submitted_by = request.user
+
+            mine = field_employee(request.user)
+
+            if mine is not None:
+                # An MR claims for themselves, never on another's behalf, and
+                # a claim always starts pending whoever typed it.
+                saved.employee = mine
+                saved.status = Expense.PENDING
 
             saved.save()
 
@@ -2467,7 +2559,12 @@ def sample_list(request):
 
     employee_id = request.GET.get("employee", "").strip()
 
-    if employee_id:
+    mine = field_employee(request.user)
+
+    if mine is not None:
+        # An MR login sees its own sample issues and nobody else's.
+        issues = issues.filter(employee=mine)
+    elif employee_id:
         issues = issues.filter(employee_id=employee_id)
 
     issues = list(issues)
@@ -2499,6 +2596,12 @@ def sample_create(request):
         if form.is_valid() and lines and not errors:
             issue_record = form.save(commit=False)
             issue_record.created_by = request.user
+
+            mine = field_employee(request.user)
+
+            if mine is not None:
+                issue_record.employee = mine
+
             issue_record.save()
 
             units = _issue_samples(issue_record, lines, request.user)
@@ -2691,10 +2794,20 @@ def payroll_create(request):
     return redirect("payroll_detail", run_id=run.pk)
 
 
+def month_range(month):
+    """First and last day of the month `month` falls in."""
+    start = month.replace(day=1)
+    end = (start + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+
+    return start, end
+
+
 @transaction.atomic
 def _generate_payslips(run):
-    """One slip per active employee, with the month's approved expenses."""
+    """One slip per active employee, with the month's expenses and commission."""
     created = 0
+
+    start, end = month_range(run.month)
 
     for employee in Employee.objects.filter(is_active=True):
         reimbursement = (
@@ -2706,6 +2819,12 @@ def _generate_payslips(run):
             ).aggregate(t=Sum("amount"))["t"] or ZERO
         )
 
+        # Salary-only staff carry a 0% rate, so this costs them nothing and
+        # the slip simply leaves the commission lines off.
+        sales = (
+            employee.net_sales(start, end) if employee.earns_commission else ZERO
+        )
+
         payslip = Payslip(
             run=run,
             employee=employee,
@@ -2714,9 +2833,11 @@ def _generate_payslips(run):
             mobile_allowance=employee.mobile_allowance,
             other_allowance=employee.other_allowance,
             expense_reimbursement=reimbursement,
+            sales_amount=sales,
+            commission_percent=employee.commission_percent,
         )
 
-        payslip.recalculate().save()
+        payslip.recalculate_commission().recalculate().save()
         created += 1
 
     return created
@@ -2769,8 +2890,18 @@ def payslip_edit(request, payslip_id):
                 safe_decimal(request.POST.get(field, "0"), max_value=MAX_TOTAL),
             )
 
+        payslip.sales_amount = safe_decimal(
+            request.POST.get("sales_amount", "0"), max_value=MAX_TOTAL
+        )
+        payslip.commission_percent = safe_decimal(
+            request.POST.get("commission_percent", "0"), max_value=MAX_DISCOUNT
+        )
+
         payslip.note = clip(request.POST.get("note", ""), 255)
-        payslip.recalculate().save()
+
+        # Rate and sales are editable, the commission itself is not: it is
+        # always the one times the other, so the slip cannot contradict itself.
+        payslip.recalculate_commission().recalculate().save()
 
         messages.success(request, f"Updated {payslip.employee.full_name}'s slip.")
 
@@ -2789,6 +2920,11 @@ def payslip_pdf(request, payslip_id):
         Payslip.objects.select_related("run", "employee", "employee__territory"),
         pk=payslip_id,
     )
+
+    refused = deny_unless_mine(request, payslip.employee)
+
+    if refused is not None:
+        return refused
 
     response = HttpResponse(
         render_payslip(payslip), content_type="application/pdf"
@@ -2813,7 +2949,12 @@ def daily_calls(request):
     employee_id = request.GET.get("employee", "").strip()
     employee = None
 
-    if employee_id:
+    mine = field_employee(request.user)
+
+    if mine is not None:
+        # An MR login cannot look at anyone else's day.
+        employee = mine
+    elif employee_id:
         employee = Employee.objects.filter(pk=employee_id).first()
     else:
         # Default to the team member linked to whoever is signed in.
@@ -2876,6 +3017,12 @@ def call_report_create(request, visit_id=None):
         if visit_id else None
     )
 
+    if plan_visit is not None:
+        refused = deny_unless_mine(request, plan_visit.plan.employee)
+
+        if refused is not None:
+            return refused
+
     if request.method == "POST":
         form = CallReportForm(request.POST)
 
@@ -2888,6 +3035,13 @@ def call_report_create(request, visit_id=None):
             report = form.save(commit=False)
             report.plan_visit = plan_visit
             report.created_by = request.user
+
+            # A field login files under its own name whatever the form says.
+            mine = field_employee(request.user)
+
+            if mine is not None:
+                report.employee = mine
+
             report.save()
             form.save_m2m()
 
@@ -2968,7 +3122,11 @@ def call_report_list(request):
     employee_id = request.GET.get("employee", "").strip()
     month = request.GET.get("month", "").strip()
 
-    if employee_id:
+    mine = field_employee(request.user)
+
+    if mine is not None:
+        reports = reports.filter(employee=mine)
+    elif employee_id:
         reports = reports.filter(employee_id=employee_id)
 
     if month:
@@ -3050,5 +3208,318 @@ def call_report_summary(request):
             "rows": ranked,
             "month": month,
             "total_calls": sum(row["calls"] for row in ranked),
+        }
+    )
+
+
+# ------------------------------------------------------------- THE MR PORTAL
+#
+# Everything below is what a field login sees. Each view resolves the signed-in
+# user to one Employee and works only from that, so an MR cannot reach another
+# MR's figures by editing a query string.
+
+def _me(request):
+    """The Employee behind this login, field staff or otherwise."""
+    return (
+        field_employee(request.user)
+        or Employee.objects.filter(user=request.user).first()
+    )
+
+
+@login_required
+def my_dashboard(request):
+    """An MR's home page: today, this week, and the month's earnings."""
+    me = _me(request)
+
+    if me is None:
+        return render(request, "invoices/my_dashboard.html", {"me": None})
+
+    today = timezone.localdate()
+    week_start = monday_of(today)
+    month_start, month_end = month_range(today)
+
+    plan = WeeklyPlan.objects.filter(
+        employee=me, week_start=week_start
+    ).first()
+
+    today_planned = (
+        plan.visits.filter(day=today.weekday()).count()
+        if plan is not None and today.weekday() < 6 else 0
+    )
+
+    month_reports = CallReport.objects.filter(
+        employee=me, visit_date__gte=month_start, visit_date__lte=month_end
+    )
+
+    sales = me.net_sales(month_start, month_end)
+
+    return render(
+        request,
+        "invoices/my_dashboard.html",
+        {
+            "active": "my_dashboard",
+            "me": me,
+            "today": today,
+            "plan": plan,
+            "today_planned": today_planned,
+            "today_done": CallReport.objects.filter(
+                employee=me, visit_date=today
+            ).count(),
+            "month_calls": month_reports.count(),
+            "month_met": month_reports.filter(outcome=CallReport.MET).count(),
+            "sales": sales,
+            "commission": me.commission_on(month_start, month_end),
+            "month_start": month_start,
+            "pending_expenses": Expense.objects.filter(
+                employee=me, status=Expense.PENDING
+            ).count(),
+        }
+    )
+
+
+@login_required
+def my_plan(request):
+    """This week's schedule, laid out day by day."""
+    me = _me(request)
+
+    week_start = parse_date(request.GET.get("week", "")) or timezone.localdate()
+    week_start = monday_of(week_start)
+
+    plan = (
+        WeeklyPlan.objects.filter(employee=me, week_start=week_start).first()
+        if me is not None else None
+    )
+
+    days = []
+
+    if plan is not None:
+        visits = list(
+            plan.visits.select_related("call_point").prefetch_related("report")
+        )
+
+        for index, label in enumerate(
+            ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+        ):
+            days.append({
+                "label": label,
+                "date": week_start + timedelta(days=index),
+                "visits": [v for v in visits if v.day == index],
+            })
+
+    return render(
+        request,
+        "invoices/my_plan.html",
+        {
+            "active": "my_plan",
+            "me": me,
+            "plan": plan,
+            "days": days,
+            "week_start": week_start,
+            "previous_week": week_start - timedelta(days=7),
+            "next_week": week_start + timedelta(days=7),
+            "today": timezone.localdate(),
+        }
+    )
+
+
+@login_required
+def my_sales(request):
+    """What an MR sold this month, and what the percentage comes to.
+
+    Deliberately itemised: an MR who can see every invoice behind the figure
+    does not have to take payroll's word for it.
+    """
+    me = _me(request)
+
+    month = request.GET.get("month", "").strip()
+    parsed = parse_date(f"{month}-01") if month else None
+
+    start, end = month_range(parsed or timezone.localdate())
+
+    invoices = []
+    returns = []
+
+    if me is not None:
+        invoices = list(
+            Invoice.objects.filter(sales_rep=me, date__gte=start, date__lte=end)
+            .select_related("customer")
+        )
+        returns = list(
+            SalesReturn.objects.filter(
+                invoice__sales_rep=me, date__gte=start, date__lte=end
+            ).select_related("invoice", "customer")
+        )
+
+    invoiced = sum((i.total for i in invoices), ZERO)
+    credited = sum((r.total for r in returns), ZERO)
+    net = invoiced - credited
+
+    rate = me.commission_percent if me is not None else ZERO
+
+    return render(
+        request,
+        "invoices/my_sales.html",
+        {
+            "active": "my_sales",
+            "me": me,
+            "invoices": invoices,
+            "returns": returns,
+            "invoiced": invoiced,
+            "credited": credited,
+            "net": net,
+            "rate": rate,
+            "commission": (net * rate / Decimal("100")).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            ),
+            "month": start.strftime("%Y-%m"),
+            "start": start,
+            "end": end,
+        }
+    )
+
+
+@login_required
+def my_payslips(request):
+    """Payslips already issued to this employee."""
+    me = _me(request)
+
+    payslips = (
+        Payslip.objects.filter(employee=me).select_related("run")
+        if me is not None else Payslip.objects.none()
+    )
+
+    return render(
+        request,
+        "invoices/my_payslips.html",
+        {
+            "active": "my_payslips",
+            "me": me,
+            "payslips": payslips,
+        }
+    )
+
+
+@login_required
+def commission_report(request):
+    """Every earner's commission for a month, for whoever signs off payroll."""
+    month = request.GET.get("month", "").strip()
+    parsed = parse_date(f"{month}-01") if month else None
+
+    start, end = month_range(parsed or timezone.localdate())
+
+    rows = []
+
+    for employee in Employee.objects.filter(is_active=True):
+        sales = employee.net_sales(start, end)
+
+        if not sales and not employee.earns_commission:
+            continue
+
+        rows.append({
+            "employee": employee,
+            "sales": sales,
+            "rate": employee.commission_percent,
+            "commission": employee.commission_on(start, end),
+            "invoices": Invoice.objects.filter(
+                sales_rep=employee, date__gte=start, date__lte=end
+            ).count(),
+        })
+
+    rows.sort(key=lambda row: row["sales"], reverse=True)
+
+    unattributed = Invoice.objects.filter(
+        sales_rep__isnull=True, date__gte=start, date__lte=end
+    )
+
+    return render(
+        request,
+        "invoices/commission_report.html",
+        {
+            "active": "commission_report",
+            "rows": rows,
+            "month": start.strftime("%Y-%m"),
+            "start": start,
+            "end": end,
+            "total_sales": sum((row["sales"] for row in rows), ZERO),
+            "total_commission": sum((row["commission"] for row in rows), ZERO),
+            "unattributed": unattributed.count(),
+            "unattributed_value": (
+                unattributed.aggregate(t=Sum("total"))["t"] or ZERO
+            ),
+        }
+    )
+
+
+@login_required
+def employee_login_setup(request, employee_id):
+    """Give a team member their own login, or reset the password on it.
+
+    Field logins are deliberately created here rather than in Django's admin:
+    the role and the Employee link have to be set together, and a login with
+    only one of the two either sees everything or sees nothing.
+    """
+    if is_field_staff(request.user):
+        messages.error(request, "🚫 Only the office can manage logins.")
+
+        return redirect("my_dashboard")
+
+    employee = get_object_or_404(Employee, pk=employee_id)
+
+    if request.method == "POST":
+        username = clip(request.POST.get("username", "").strip(), 150)
+        password = request.POST.get("password", "")
+
+        if len(password) < 8:
+            messages.error(request, "Password must be at least 8 characters.")
+
+            return redirect("employee_login", employee_id=employee.pk)
+
+        if employee.user is not None:
+            account = employee.user
+        else:
+            if not username:
+                messages.error(request, "Pick a username for this login.")
+
+                return redirect("employee_login", employee_id=employee.pk)
+
+            if User.objects.filter(username=username).exists():
+                messages.error(request, f"The username “{username}” is taken.")
+
+                return redirect("employee_login", employee_id=employee.pk)
+
+            account = User.objects.create_user(username=username)
+
+            employee.user = account
+            employee.save(update_fields=["user"])
+
+        account.set_password(password)
+        account.first_name = employee.full_name[:150]
+        account.email = employee.email
+        account.save()
+
+        role, _ = UserRolls.objects.get_or_create(user=account)
+        role.role = UserRolls.ROLE_FIELD
+        role.phone = employee.phone
+        role.save()
+
+        messages.success(
+            request,
+            f"{employee.full_name} can now sign in as “{account.username}”.",
+        )
+
+        return redirect("team_list")
+
+    suggested = ""
+
+    if employee.user is None:
+        base = (employee.employee_code or employee.full_name).lower()
+        suggested = "".join(c for c in base if c.isalnum() or c in "-_.")[:150]
+
+    return render(
+        request,
+        "invoices/employee_login.html",
+        {
+            "employee": employee,
+            "suggested": suggested,
         }
     )

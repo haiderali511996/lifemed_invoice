@@ -12,6 +12,7 @@ except ImportError:  # pragma: no cover
 
 import io
 import os
+from decimal import Decimal
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGO_PATH = os.path.join(
@@ -127,6 +128,16 @@ def _amount_table(page, y, title, rows, total_label, total):
     return line_y + 26
 
 
+def _rate(percent):
+    """A percentage without pointless zeroes: 10, not 10.00, but 12.5 stays."""
+    trimmed = percent.normalize()
+
+    if trimmed == trimmed.to_integral_value():
+        trimmed = trimmed.quantize(Decimal("1"))
+
+    return f"{trimmed:f}"
+
+
 def render_payslip(payslip):
     """Return the payslip as PDF bytes."""
     document = fitz.open()
@@ -145,6 +156,15 @@ def render_payslip(payslip):
 
     if payslip.other_allowance:
         earnings.append(("Other Allowance", payslip.other_allowance))
+
+    if payslip.commission:
+        # The rate and the sales it was worked out on, so the MR can check the
+        # figure without asking the office for a breakdown.
+        earnings.append((
+            f"Sales Commission @ {_rate(payslip.commission_percent)}% "
+            f"of {payslip.sales_amount:,.2f}",
+            payslip.commission,
+        ))
 
     if payslip.expense_reimbursement:
         earnings.append(

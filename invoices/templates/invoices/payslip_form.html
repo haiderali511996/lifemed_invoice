@@ -30,6 +30,25 @@
         <p class="help">Pulled from approved expenses for this month.</p></div>
     </div>
 
+    <div class="section-title">Sales Commission</div>
+    <div class="row">
+      <div class="field"><label for="sales_amount">Net Sales This Month</label>
+        <input type="number" step="0.01" min="0" name="sales_amount" id="sales_amount"
+               value="{{ payslip.sales_amount }}" />
+        <p class="help">
+          Invoices credited to this employee after discounts, less returns.
+        </p></div>
+      <div class="field"><label for="commission_percent">Rate (%)</label>
+        <input type="number" step="0.01" min="0" max="100" name="commission_percent"
+               id="commission_percent" value="{{ payslip.commission_percent }}" />
+        <p class="help">Copied from their record when payroll was generated.</p></div>
+      <div class="field"><label>Commission</label>
+        <input type="text" value="{{ payslip.commission }}" disabled />
+        <p class="help">
+          Always the rate times the sales above — saved, not typed.
+        </p></div>
+    </div>
+
     <div class="section-title">Deductions</div>
     <div class="row">
       <div class="field"><label for="tax_deduction">Income Tax</label>

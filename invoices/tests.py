@@ -60,7 +60,7 @@ from .models import (
 from .pdf import rows_per_page
 from .stock import StockError, adjust, allocate_fefo, issue, receive
 from .planning import generate_plan, monday_of
-from .views import customers_with_balances, overdue_invoices
+from .views import customers_with_balances, month_range, overdue_invoices
 
 
 class InvoiceNumberTests(TestCase):
@@ -3650,10 +3650,15 @@ class InvoiceReprintTests(TestCase):
         self.generate(stock=True)
         invoice = Invoice.objects.get()
 
+        item = invoice.items.first()
+
         self.client.post(reverse("return_create", args=[invoice.pk]), {
             "reason": "Damaged", "restock": "on",
-            "item": [str(invoice.items.first().pk)], "qty": ["2"],
+            "date": timezone.localdate().isoformat(),
+            f"qty_{item.pk}": "2",
         })
+
+        self.assertEqual(SalesReturn.objects.count(), 1)
 
         text = self.text_of(self.reprint(invoice))
 
@@ -3707,3 +3712,610 @@ class InvoiceReprintTests(TestCase):
         self.generate()
 
         self.assertEqual(self.client.get(reverse("invoice_list")).status_code, 200)
+
+
+class CommissionTests(TestCase):
+    """MRs on salary plus a percentage of what they actually sell."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.territory = Territory.objects.create(name="Gulberg", city="Lahore")
+
+        self.mr = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza", designation="mr",
+            territory=self.territory, basic_salary=Decimal("60000"),
+            commission_percent=Decimal("10.00"),
+        )
+        self.salaried = Employee.objects.create(
+            employee_code="OF-01", full_name="Bilal Khan", designation="admin",
+            basic_salary=Decimal("40000"),
+        )
+
+        self.product = Product.objects.create(code="PAN500", name="Panadol")
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1", quantity=1000,
+            cost_price=Decimal("20.00"),
+            expiry_date=timezone.localdate() + timedelta(days=365),
+        )
+
+    def generate(self, rep=None, price="1000", qty="1", discount="0",
+                 customer="Shifa Pharmacy", stock=False):
+        return self.client.post(reverse("generate"), {
+            "customer_name": customer, "address": "Lahore",
+            "ntn": "1", "sales_tax": "2", "license_no": "L",
+            "sales_rep": str(rep.pk) if rep else "",
+            "item_name[]": ["Panadol"], "qty[]": [qty], "price[]": [price],
+            "discount[]": [discount], "batch[]": ["B-1"], "expiry[]": ["12/26"],
+            "stock_batch[]": [str(self.batch.pk) if stock else ""],
+        })
+
+    def run_payroll(self, month=None):
+        return self.client.post(reverse("payroll_create"), {
+            "month": (month or timezone.localdate()).isoformat(), "note": "",
+        })
+
+    # ------------------------------------------------ crediting the sale
+
+    def test_an_invoice_is_credited_to_the_chosen_mr(self):
+        self.generate(rep=self.mr)
+
+        self.assertEqual(Invoice.objects.get().sales_rep, self.mr)
+
+    def test_the_territory_mr_is_credited_when_none_is_picked(self):
+        customer = Customer.objects.create(
+            name="Shifa Pharmacy", territory=self.territory
+        )
+
+        self.generate()
+
+        self.assertEqual(Invoice.objects.get().sales_rep, self.mr)
+        self.assertEqual(Invoice.objects.get().customer, customer)
+
+    def test_nobody_is_credited_when_two_mrs_share_a_territory(self):
+        """A guess here would pay the wrong person, so it credits no one."""
+        Employee.objects.create(
+            employee_code="MR-02", full_name="Sara", designation="mr",
+            territory=self.territory,
+        )
+        Customer.objects.create(name="Shifa Pharmacy", territory=self.territory)
+
+        self.generate()
+
+        self.assertIsNone(Invoice.objects.get().sales_rep)
+
+    def test_a_customer_with_no_territory_credits_nobody(self):
+        self.generate()
+
+        self.assertIsNone(Invoice.objects.get().sales_rep)
+
+    # --------------------------------------------------- what counts as sales
+
+    def test_commission_is_worked_out_after_discounts(self):
+        self.generate(rep=self.mr, price="1000", qty="10", discount="20")
+
+        start, end = month_range(timezone.localdate())
+
+        # 10 x 1000 less 20% = 8,000 net; 10% of that is 800.
+        self.assertEqual(self.mr.net_sales(start, end), Decimal("8000.00"))
+        self.assertEqual(self.mr.commission_on(start, end), Decimal("800.00"))
+
+    def test_returned_goods_come_off_the_commission(self):
+        self.generate(rep=self.mr, price="1000", qty="10", stock=True)
+
+        invoice = Invoice.objects.get()
+
+        item = invoice.items.first()
+
+        self.client.post(reverse("return_create", args=[invoice.pk]), {
+            "reason": "Damaged", "restock": "on",
+            "date": timezone.localdate().isoformat(),
+            f"qty_{item.pk}": "4",
+        })
+
+        self.assertEqual(SalesReturn.objects.count(), 1)
+
+        start, end = month_range(timezone.localdate())
+
+        # 10,000 invoiced less 4,000 credited = 6,000 net; 10% is 600.
+        self.assertEqual(self.mr.net_sales(start, end), Decimal("6000.00"))
+        self.assertEqual(self.mr.commission_on(start, end), Decimal("600.00"))
+
+    def test_another_mrs_sales_are_not_counted(self):
+        other = Employee.objects.create(
+            employee_code="MR-02", full_name="Sara", designation="mr",
+        )
+        self.generate(rep=other, price="5000")
+
+        start, end = month_range(timezone.localdate())
+
+        self.assertEqual(self.mr.net_sales(start, end), ZERO)
+
+    def test_sales_outside_the_month_are_not_counted(self):
+        self.generate(rep=self.mr, price="1000")
+
+        Invoice.objects.update(date=date(2026, 1, 15))
+
+        start, end = month_range(date(2026, 2, 1))
+
+        self.assertEqual(self.mr.net_sales(start, end), ZERO)
+        self.assertEqual(
+            self.mr.net_sales(*month_range(date(2026, 1, 1))), Decimal("1000.00")
+        )
+
+    # ------------------------------------------------------------- payroll
+
+    def test_payroll_pays_commission_on_top_of_salary(self):
+        self.generate(rep=self.mr, price="1000", qty="10", discount="20")
+
+        self.run_payroll()
+
+        slip = Payslip.objects.get(employee=self.mr)
+
+        self.assertEqual(slip.sales_amount, Decimal("8000.00"))
+        self.assertEqual(slip.commission_percent, Decimal("10.00"))
+        self.assertEqual(slip.commission, Decimal("800.00"))
+        self.assertEqual(slip.gross_pay, Decimal("60800.00"))
+        self.assertEqual(slip.net_pay, Decimal("60800.00"))
+
+    def test_salary_only_staff_get_no_commission_lines(self):
+        self.generate(rep=self.salaried, price="9000")
+
+        self.run_payroll()
+
+        slip = Payslip.objects.get(employee=self.salaried)
+
+        self.assertEqual(slip.sales_amount, ZERO)
+        self.assertEqual(slip.commission, ZERO)
+        self.assertEqual(slip.gross_pay, Decimal("40000.00"))
+
+    def test_the_rate_is_frozen_onto_the_slip(self):
+        """A later change of rate must not rewrite a slip already issued."""
+        self.generate(rep=self.mr, price="1000", qty="10")
+
+        self.run_payroll()
+
+        self.mr.commission_percent = Decimal("20.00")
+        self.mr.save()
+
+        slip = Payslip.objects.get(employee=self.mr)
+
+        self.assertEqual(slip.commission_percent, Decimal("10.00"))
+        self.assertEqual(slip.commission, Decimal("1000.00"))
+
+    def test_editing_a_slip_recomputes_the_commission(self):
+        self.run_payroll()
+
+        slip = Payslip.objects.get(employee=self.mr)
+
+        self.client.post(reverse("payslip_edit", args=[slip.pk]), {
+            "basic_salary": "60000", "fuel_allowance": "0",
+            "mobile_allowance": "0", "other_allowance": "0",
+            "expense_reimbursement": "0", "sales_amount": "50000",
+            "commission_percent": "15", "tax_deduction": "0",
+            "advance_deduction": "0", "other_deduction": "0", "note": "",
+        })
+
+        slip.refresh_from_db()
+
+        self.assertEqual(slip.commission, Decimal("7500.00"))
+        self.assertEqual(slip.gross_pay, Decimal("67500.00"))
+
+    def test_the_payslip_pdf_shows_the_rate_and_the_sales_behind_it(self):
+        import pymupdf
+
+        self.generate(rep=self.mr, price="1000", qty="10", discount="20")
+        self.run_payroll()
+
+        slip = Payslip.objects.get(employee=self.mr)
+        response = self.client.get(reverse("payslip_pdf", args=[slip.pk]))
+
+        text = pymupdf.open(stream=response.content, filetype="pdf")[0].get_text()
+
+        self.assertIn("Sales Commission @ 10%", text)
+        self.assertIn("8,000.00", text)
+        self.assertIn("800.00", text)
+
+    # ------------------------------------------------------------ reporting
+
+    def test_the_commission_report_ranks_earners(self):
+        self.generate(rep=self.mr, price="1000", qty="10")
+
+        response = self.client.get(reverse("commission_report"))
+
+        row = response.context["rows"][0]
+
+        self.assertEqual(row["employee"], self.mr)
+        self.assertEqual(row["sales"], Decimal("10000.00"))
+        self.assertEqual(row["commission"], Decimal("1000.00"))
+        self.assertEqual(response.context["total_commission"], Decimal("1000.00"))
+
+    def test_the_report_flags_invoices_credited_to_nobody(self):
+        self.generate(price="4000")
+
+        response = self.client.get(reverse("commission_report"))
+
+        self.assertEqual(response.context["unattributed"], 1)
+        self.assertEqual(response.context["unattributed_value"], Decimal("4000.00"))
+
+    def test_commission_pages_render(self):
+        self.generate(rep=self.mr)
+        self.run_payroll()
+
+        for url in (reverse("commission_report"), reverse("payroll_list")):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, 200)
+
+
+class FieldLoginTests(TestCase):
+    """An MR signs in and sees their own work — and only their own."""
+
+    def setUp(self):
+        self.territory = Territory.objects.create(name="Gulberg", city="Lahore")
+        self.other_territory = Territory.objects.create(name="Model Town")
+
+        self.user = User.objects.create_user("ali", password="pw12345678")
+        UserRolls.objects.filter(user=self.user).update(
+            role=UserRolls.ROLE_FIELD
+        )
+
+        self.mr = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza", designation="mr",
+            territory=self.territory, user=self.user,
+            basic_salary=Decimal("50000"), commission_percent=Decimal("10.00"),
+        )
+        self.other = Employee.objects.create(
+            employee_code="MR-02", full_name="Sara Khan", designation="mr",
+            territory=self.other_territory,
+        )
+
+        self.doctor = CallPoint.objects.create(
+            name="Dr. Ahmed", territory=self.territory, kind="doctor"
+        )
+        self.other_doctor = CallPoint.objects.create(
+            name="Dr. Zubair", territory=self.other_territory, kind="doctor"
+        )
+
+        self.client.login(username="ali", password="pw12345678")
+
+    # ------------------------------------------------------------- the fence
+
+    def test_signing_in_lands_on_the_portal(self):
+        self.client.logout()
+
+        response = self.client.post(reverse("login"), {
+            "username": "ali", "password": "pw12345678",
+        })
+
+        self.assertRedirects(response, reverse("my_dashboard"))
+
+    def test_office_pages_are_closed_to_field_staff(self):
+        for name in ("index", "dashboard", "customer_list", "ledger_list",
+                     "purchase_list", "stock_report", "payroll_list",
+                     "team_list", "invoice_list", "commission_report",
+                     "distributor_list", "expense_report", "invoice_logs",
+                     "call_report_summary", "territory_report"):
+            with self.subTest(page=name):
+                response = self.client.get(reverse(name))
+
+                self.assertRedirects(response, reverse("my_dashboard"))
+
+    def test_the_portal_is_open(self):
+        for name in ("my_dashboard", "my_plan", "my_sales", "my_payslips",
+                     "daily_calls", "call_report_list", "call_report_new",
+                     "call_point_list", "sample_list", "sample_new",
+                     "expense_list", "profile"):
+            with self.subTest(page=name):
+                self.assertEqual(self.client.get(reverse(name)).status_code, 200)
+
+    def test_the_office_is_not_fenced_in(self):
+        self.client.logout()
+
+        User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.assertEqual(self.client.get(reverse("purchase_list")).status_code, 200)
+        self.assertEqual(self.client.get(reverse("payroll_list")).status_code, 200)
+
+    def test_a_superuser_is_never_treated_as_field_staff(self):
+        """A mis-set role must not lock an admin out of their own system."""
+        admin = User.objects.create_superuser("boss", password="pw")
+        UserRolls.objects.filter(user=admin).update(role=UserRolls.ROLE_FIELD)
+
+        self.client.logout()
+        self.client.login(username="boss", password="pw")
+
+        self.assertEqual(self.client.get(reverse("team_list")).status_code, 200)
+
+    # -------------------------------------------------------- what they see
+
+    def test_only_their_own_call_points(self):
+        response = self.client.get(reverse("call_point_list"))
+
+        names = [c.name for c in response.context["call_points"]]
+
+        self.assertIn("Dr. Ahmed", names)
+        self.assertNotIn("Dr. Zubair", names)
+
+    def test_only_their_own_plans(self):
+        WeeklyPlan.objects.create(
+            employee=self.mr, week_start=monday_of(timezone.localdate())
+        )
+        WeeklyPlan.objects.create(
+            employee=self.other, week_start=monday_of(timezone.localdate())
+        )
+
+        response = self.client.get(reverse("plan_list"))
+
+        self.assertEqual(
+            [p.employee for p in response.context["plans"]], [self.mr]
+        )
+
+    def test_only_their_own_visits(self):
+        CallReport.objects.create(employee=self.mr, call_point=self.doctor)
+        CallReport.objects.create(
+            employee=self.other, call_point=self.other_doctor
+        )
+
+        response = self.client.get(reverse("call_report_list"))
+
+        self.assertEqual(len(response.context["reports"]), 1)
+        self.assertEqual(response.context["reports"][0].employee, self.mr)
+
+    def test_my_day_cannot_be_pointed_at_someone_else(self):
+        response = self.client.get(
+            reverse("daily_calls"), {"employee": self.other.pk}
+        )
+
+        self.assertEqual(response.context["employee"], self.mr)
+
+    def test_only_their_own_expenses(self):
+        category = ExpenseCategory.objects.create(name="Fuel")
+
+        Expense.objects.create(
+            category=category, employee=self.mr, amount=Decimal("500"),
+            date=timezone.localdate(),
+        )
+        Expense.objects.create(
+            category=category, employee=self.other, amount=Decimal("900"),
+            date=timezone.localdate(),
+        )
+
+        response = self.client.get(reverse("expense_list"))
+
+        self.assertEqual(len(response.context["expenses"]), 1)
+        self.assertEqual(response.context["expenses"][0].employee, self.mr)
+
+    def test_only_their_own_samples(self):
+        SampleIssue.objects.create(employee=self.mr, call_point=self.doctor)
+        SampleIssue.objects.create(
+            employee=self.other, call_point=self.other_doctor
+        )
+
+        response = self.client.get(reverse("sample_list"))
+
+        self.assertEqual(len(response.context["issues"]), 1)
+        self.assertEqual(response.context["issues"][0].employee, self.mr)
+
+    # --------------------------------------------- records, not just pages
+
+    def test_another_members_plan_is_refused_by_id(self):
+        plan = WeeklyPlan.objects.create(
+            employee=self.other, week_start=monday_of(timezone.localdate())
+        )
+
+        response = self.client.get(reverse("plan_detail", args=[plan.pk]))
+
+        self.assertRedirects(response, reverse("my_dashboard"))
+
+    def test_another_members_payslip_cannot_be_downloaded(self):
+        run = PayrollRun.objects.create(month=timezone.localdate())
+        slip = Payslip.objects.create(run=run, employee=self.other)
+
+        response = self.client.get(reverse("payslip_pdf", args=[slip.pk]))
+
+        self.assertRedirects(response, reverse("my_dashboard"))
+
+    def test_their_own_payslip_downloads(self):
+        run = PayrollRun.objects.create(month=timezone.localdate())
+        slip = Payslip.objects.create(run=run, employee=self.mr)
+
+        response = self.client.get(reverse("payslip_pdf", args=[slip.pk]))
+
+        self.assertEqual(response["Content-Type"], "application/pdf")
+
+    def test_another_members_expense_cannot_be_edited(self):
+        category = ExpenseCategory.objects.create(name="Fuel")
+        expense = Expense.objects.create(
+            category=category, employee=self.other, amount=Decimal("900"),
+            date=timezone.localdate(),
+        )
+
+        response = self.client.get(reverse("expense_edit", args=[expense.pk]))
+
+        self.assertRedirects(response, reverse("my_dashboard"))
+
+    def test_a_scheduled_call_of_anothers_cannot_be_reported(self):
+        plan = WeeklyPlan.objects.create(
+            employee=self.other, week_start=monday_of(timezone.localdate())
+        )
+        visit = PlanVisit.objects.create(
+            plan=plan, call_point=self.other_doctor, day=0
+        )
+
+        response = self.client.get(
+            reverse("call_report_for_visit", args=[visit.pk])
+        )
+
+        self.assertRedirects(response, reverse("my_dashboard"))
+
+    def test_a_visit_filed_under_another_name_is_reassigned(self):
+        """The form can say anything; the record files under the login."""
+        self.client.post(reverse("call_report_new"), {
+            "employee": self.other.pk, "call_point": self.doctor.pk,
+            "visit_date": timezone.localdate().isoformat(), "visit_time": "",
+            "doctor_name": "Dr. Ahmed", "speciality": "",
+            "outcome": CallReport.MET, "feedback": "", "next_visit_date": "",
+            "new_call_point": "", "new_call_point_kind": "doctor",
+            "new_call_point_territory": "",
+        })
+
+        self.assertEqual(CallReport.objects.get().employee, self.mr)
+
+    def test_an_expense_claimed_for_another_is_reassigned_and_pending(self):
+        category = ExpenseCategory.objects.create(name="Fuel")
+
+        self.client.post(reverse("expense_new"), {
+            "category": category.pk, "employee": self.other.pk,
+            "amount": "750", "date": timezone.localdate().isoformat(),
+            "description": "Petrol", "status": Expense.APPROVED,
+        })
+
+        expense = Expense.objects.get()
+
+        self.assertEqual(expense.employee, self.mr)
+        self.assertEqual(expense.status, Expense.PENDING)
+
+    # ------------------------------------------------------ their own money
+
+    def test_my_sales_shows_only_their_invoices(self):
+        mine = Invoice.objects.create(
+            customer=Customer.objects.create(name="Shifa"),
+            sales_rep=self.mr, total=Decimal("5000.00"), license_no="L",
+        )
+        Invoice.objects.create(
+            customer=Customer.objects.create(name="Other"),
+            sales_rep=self.other, total=Decimal("9000.00"), license_no="L",
+        )
+
+        response = self.client.get(reverse("my_sales"))
+
+        self.assertEqual(list(response.context["invoices"]), [mine])
+        self.assertEqual(response.context["net"], Decimal("5000.00"))
+        self.assertEqual(response.context["commission"], Decimal("500.00"))
+
+    def test_my_payslips_shows_only_their_own(self):
+        run = PayrollRun.objects.create(month=timezone.localdate())
+        mine = Payslip.objects.create(run=run, employee=self.mr)
+        Payslip.objects.create(run=run, employee=self.other)
+
+        response = self.client.get(reverse("my_payslips"))
+
+        self.assertEqual(list(response.context["payslips"]), [mine])
+
+    def test_the_dashboard_shows_this_month_at_a_glance(self):
+        Invoice.objects.create(
+            customer=Customer.objects.create(name="Shifa"),
+            sales_rep=self.mr, total=Decimal("20000.00"), license_no="L",
+        )
+        CallReport.objects.create(employee=self.mr, call_point=self.doctor)
+
+        response = self.client.get(reverse("my_dashboard"))
+
+        self.assertEqual(response.context["me"], self.mr)
+        self.assertEqual(response.context["sales"], Decimal("20000.00"))
+        self.assertEqual(response.context["commission"], Decimal("2000.00"))
+        self.assertEqual(response.context["month_calls"], 1)
+
+    def test_a_login_with_no_team_member_sees_nothing_rather_than_everything(self):
+        self.mr.user = None
+        self.mr.save()
+
+        response = self.client.get(reverse("my_dashboard"))
+
+        self.assertIsNone(response.context["me"])
+        self.assertEqual(
+            self.client.get(reverse("my_sales")).context["invoices"], []
+        )
+
+
+class EmployeeLoginSetupTests(TestCase):
+    """The office hands an MR their credentials."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.employee = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza", designation="mr",
+            phone="0300-1234567", email="ali@example.com",
+        )
+
+    def create_login(self, **overrides):
+        payload = {"username": "ali", "password": "pw12345678"}
+        payload.update(overrides)
+
+        return self.client.post(
+            reverse("employee_login", args=[self.employee.pk]), payload
+        )
+
+    def test_a_login_is_created_linked_and_marked_field_staff(self):
+        self.create_login()
+
+        self.employee.refresh_from_db()
+
+        self.assertIsNotNone(self.employee.user)
+        self.assertEqual(self.employee.user.username, "ali")
+        self.assertTrue(self.employee.user.check_password("pw12345678"))
+        self.assertEqual(
+            self.employee.user.userrolls.role, UserRolls.ROLE_FIELD
+        )
+
+    def test_the_new_login_can_sign_in_and_reaches_its_portal(self):
+        self.create_login()
+        self.client.logout()
+
+        response = self.client.post(reverse("login"), {
+            "username": "ali", "password": "pw12345678",
+        })
+
+        self.assertRedirects(response, reverse("my_dashboard"))
+
+    def test_a_taken_username_is_refused(self):
+        User.objects.create_user("ali", password="something")
+
+        self.create_login()
+
+        self.employee.refresh_from_db()
+        self.assertIsNone(self.employee.user)
+
+    def test_a_short_password_is_refused(self):
+        self.create_login(password="short")
+
+        self.employee.refresh_from_db()
+        self.assertIsNone(self.employee.user)
+
+    def test_resetting_keeps_the_same_account(self):
+        self.create_login()
+
+        account_id = Employee.objects.get(pk=self.employee.pk).user_id
+
+        self.create_login(username="ignored", password="newpass12345")
+
+        self.employee.refresh_from_db()
+
+        self.assertEqual(self.employee.user_id, account_id)
+        self.assertEqual(self.employee.user.username, "ali")
+        self.assertTrue(self.employee.user.check_password("newpass12345"))
+
+    def test_field_staff_cannot_hand_out_logins(self):
+        self.create_login()
+        self.client.logout()
+        self.client.login(username="ali", password="pw12345678")
+
+        target = Employee.objects.create(
+            employee_code="MR-02", full_name="Sara Khan", designation="mr",
+        )
+
+        response = self.client.get(reverse("employee_login", args=[target.pk]))
+
+        self.assertRedirects(response, reverse("my_dashboard"))
+
+    def test_the_setup_page_renders(self):
+        self.assertEqual(
+            self.client.get(
+                reverse("employee_login", args=[self.employee.pk])
+            ).status_code,
+            200,
+        )

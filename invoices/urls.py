@@ -9,6 +9,12 @@ urlpatterns = [
     path('logout/', views.logout_view, name='logout'),
     path('logs/', views.invoice_logs_view, name='invoice_logs'),
 
+    path('me/', views.my_dashboard, name='my_dashboard'),
+    path('me/plan/', views.my_plan, name='my_plan'),
+    path('me/sales/', views.my_sales, name='my_sales'),
+    path('me/payslips/', views.my_payslips, name='my_payslips'),
+    path('commission/', views.commission_report, name='commission_report'),
+
     path('invoices/', views.invoice_list, name='invoice_list'),
     path(
         'invoices/<int:invoice_id>/reprint/',
@@ -59,6 +65,11 @@ urlpatterns = [
         'team/<int:employee_id>/edit/',
         views.employee_edit,
         name='employee_edit',
+    ),
+    path(
+        'team/<int:employee_id>/login/',
+        views.employee_login_setup,
+        name='employee_login',
     ),
 
     path('call-points/', views.call_point_list, name='call_point_list'),

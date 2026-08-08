@@ -178,7 +178,7 @@ class EmployeeForm(forms.ModelForm):
             "employee_code", "full_name", "designation", "phone", "email",
             "territory", "reports_to", "user", "joined_on", "is_active",
             "basic_salary", "fuel_allowance", "mobile_allowance",
-            "other_allowance",
+            "other_allowance", "commission_percent",
         ]
         widgets = {
             "joined_on": forms.DateInput(attrs={"type": "date"}),

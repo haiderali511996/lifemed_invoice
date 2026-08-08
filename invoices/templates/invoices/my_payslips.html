@@ -1,0 +1,66 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - My Payslips{% endblock %}
+{% block content %}
+<div class="page-head"><h1>💵 My Payslips</h1></div>
+
+{% if not me %}
+<div class="alert alert-warn">
+  This login is not linked to a team member yet, so there are no payslips to show.
+</div>
+{% else %}
+<div class="card">
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Month</th><th class="num">Basic</th><th class="num">Allowances</th>
+        <th class="num">Commission</th><th class="num">Expenses</th>
+        <th class="num">Deductions</th><th class="num">Net Pay</th>
+        <th>Status</th><th></th>
+      </tr></thead>
+      <tbody>
+        {% for p in payslips %}
+        <tr>
+          <td><strong>{{ p.run.month|date:"F Y" }}</strong></td>
+          <td class="num">{{ p.basic_salary|floatformat:2 }}</td>
+          <td class="num">{{ p.total_allowances|floatformat:2 }}</td>
+          <td class="num">
+            {% if p.commission %}
+            {{ p.commission|floatformat:2 }}
+            <span class="muted">{{ p.commission_percent|floatformat:"-2" }}% of {{ p.sales_amount|floatformat:2 }}</span>
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+          <td class="num">{{ p.expense_reimbursement|floatformat:2 }}</td>
+          <td class="num">{{ p.total_deductions|floatformat:2 }}</td>
+          <td class="num"><strong>{{ p.net_pay|floatformat:2 }}</strong></td>
+          <td>
+            {% if p.run.status == "finalised" %}
+            <span class="pill pill-paid">final</span>
+            {% else %}<span class="pill pill-due">draft</span>{% endif %}
+          </td>
+          <td>
+            <a href="{% url 'payslip_pdf' p.id %}" class="btn btn-grey btn-mini">📄 PDF</a>
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="9" style="text-align:center;padding:26px">
+          No payslips issued yet.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p class="muted" style="margin-top:14px;font-size:12.5px">
+  A draft slip can still change before payroll is finalised. If a figure looks
+  wrong, raise it with the office before month end.
+</p>
+{% endif %}
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  td .muted { display:block;font-size:11px; }
+  .btn-mini { padding:4px 9px;font-size:12px; }
+</style>
+{% endblock %}
