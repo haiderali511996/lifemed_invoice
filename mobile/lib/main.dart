@@ -16,6 +16,10 @@ const apiBase = String.fromEnvironment(
   defaultValue: 'https://invoice.lifemedpharmaceutical.com/api/v1',
 );
 
+/// Shown on the login screen so it is obvious which server a build points at -
+/// a test APK aimed at localhost looks identical to a live one otherwise.
+String get apiHost => Uri.parse(apiBase).host;
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 

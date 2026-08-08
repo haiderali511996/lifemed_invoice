@@ -82,8 +82,12 @@ class AppState extends ChangeNotifier {
       banner = error.message;
 
       return false;
-    } on OfflineException {
-      banner = 'No connection. Signing in for the first time needs one.';
+    } on OfflineException catch (error) {
+      // The underlying reason, not just "offline": on a phone with full signal
+      // this is the difference between a wrong address, a rejected
+      // certificate, and a server that is actually down.
+      banner = 'Could not reach the server.\n\n${error.cause ?? ''}\n\n'
+          'Signing in for the first time needs a connection.';
 
       return false;
     } finally {

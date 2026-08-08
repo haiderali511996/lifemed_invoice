@@ -23,12 +23,22 @@ class ApiException implements Exception {
 /// Kept separate from ApiException on purpose: no signal means "queue it and
 /// carry on", while a 400 means "this will never work, tell the MR".
 class OfflineException implements Exception {
-  OfflineException([this.message = 'No connection.']);
+  OfflineException([this.message = 'No connection.', this.cause]);
 
   final String message;
 
+  /// The underlying failure, kept so it can be shown when asked for.
+  ///
+  /// Everything that stops a request reaching the server lands here - no
+  /// signal, DNS, a certificate the device will not trust, a refused
+  /// connection - and they need different fixes. Collapsing them all into
+  /// "No connection" leaves whoever is holding the phone with nowhere to go.
+  final Object? cause;
+
+  String get detail => cause == null ? message : '$message\n\n$cause';
+
   @override
-  String toString() => message;
+  String toString() => detail;
 }
 
 class ApiClient {
@@ -80,16 +90,30 @@ class ApiClient {
 
     try {
       response = await request().timeout(_timeout);
-    } on TimeoutException {
-      throw OfflineException('The server took too long to answer.');
-    } catch (_) {
-      // Socket errors, DNS failures, aeroplane mode - all the same to us.
-      throw OfflineException();
+    } on TimeoutException catch (error) {
+      throw OfflineException('The server took too long to answer.', error);
+    } catch (error) {
+      // Socket errors, DNS failures, a rejected certificate. They all mean
+      // "queue it and carry on", but the reason is carried along so it can be
+      // read off the screen instead of guessed at.
+      throw OfflineException('Could not reach the server.', error);
     }
 
-    final body = response.body.isEmpty
-        ? <String, dynamic>{}
-        : jsonDecode(response.body);
+    final dynamic body;
+
+    try {
+      body = response.body.isEmpty
+          ? <String, dynamic>{}
+          : jsonDecode(response.body);
+    } on FormatException {
+      // An HTML error page from the web server rather than JSON from Django -
+      // a 500 before the app is even reached, or a captive portal in the way.
+      throw ApiException(
+        response.statusCode,
+        'The server sent back a page, not data '
+        '(HTTP ${response.statusCode}). It may be misconfigured.',
+      );
+    }
 
     if (response.statusCode >= 200 && response.statusCode < 300) {
       return body;
