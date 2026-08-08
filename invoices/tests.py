@@ -5736,3 +5736,42 @@ class DoctorOfficeTests(TestCase):
         self.assertEqual(
             self.client.get(reverse("doctor_list")).status_code, 200
         )
+
+
+class InvoiceDateTests(TestCase):
+    """The printed date and the ledger date must be the same date."""
+
+    def setUp(self):
+        User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+    def test_the_pdf_prints_the_date_the_ledger_stored(self):
+        """UTC and Asia/Karachi disagree for five hours a day.
+
+        `now()` is UTC-aware and formats to the UTC day, while the stored
+        column holds the local one - so an invoice raised at 2am here used to
+        print yesterday's date while every report showed today's.
+        """
+        import pymupdf
+
+        response = self.client.post(reverse("generate"), {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "1", "sales_tax": "2", "license_no": "L",
+            "item_name[]": ["Panadol"], "qty[]": ["1"], "price[]": ["100"],
+            "discount[]": ["0"], "batch[]": ["B"], "expiry[]": ["12/26"],
+        })
+
+        invoice = Invoice.objects.get()
+        text = pymupdf.open(stream=response.content, filetype="pdf")[0].get_text()
+
+        self.assertIn(invoice.date.strftime("%d/%m/%Y"), text)
+
+    def test_the_stored_date_is_the_local_one(self):
+        self.client.post(reverse("generate"), {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "", "sales_tax": "", "license_no": "L",
+            "item_name[]": ["Panadol"], "qty[]": ["1"], "price[]": ["100"],
+            "discount[]": ["0"], "batch[]": [""], "expiry[]": [""],
+        })
+
+        self.assertEqual(Invoice.objects.get().date, timezone.localdate())

@@ -289,6 +289,7 @@ tail -n 100 ~/lifemed_invoice/stderr.log
 |---|---|
 | 500 on every page, no Django output | Passenger failed to boot — read `~/lifemed_invoice/stderr.log` and the cPanel error log |
 | Page loads, 500 on save | Run `python manage.py check_schema` — see above |
+| Every page 500s right after a deploy | A package in `requirements.txt` did not install. Re-run `pip install -r requirements.txt` and read its output — a version conflict leaves the old code running against a settings file that imports something absent |
 | `ImproperlyConfigured: SECRET_KEY is not set` | `.env` missing, in the wrong directory, or unreadable |
 | `DisallowedHost` | Hostname missing from `ALLOWED_HOSTS` |
 | 403 CSRF on *Generate PDF* | Origin missing from `CSRF_TRUSTED_ORIGINS`, or `SECURE_COOKIES=True` on http |

@@ -615,7 +615,11 @@ def generate_invoice(request):
                 "customer_name": customer.name,
                 "address": customer.address,
                 "invoice_no": invoice.invoice_no,
-                "date": now().strftime("%d/%m/%Y"),
+                # The invoice's own stored date, not now(): now() is UTC-aware
+                # and formats to the UTC day, so between midnight and 5am here
+                # the printed document was a day behind the ledger. One source
+                # for the date means a reprint can never disagree either.
+                "date": invoice.date.strftime("%d/%m/%Y"),
                 "license_no": invoice.license_no,
                 "ntn": customer.ntn or "",
                 "sales_tax": customer.sales_tax or "",
