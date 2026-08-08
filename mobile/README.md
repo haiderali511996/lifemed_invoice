@@ -13,7 +13,7 @@ when something does not work, the server is the half that has been checked.
 You need Flutter 3.19 or newer. From this directory:
 
 ```bash
-flutter create --platforms=android,ios .   # generates android/ and ios/
+flutter create --org com.lifemedpharmaceutical --platforms=android,ios .
 flutter pub get
 dart run flutter_launcher_icons            # app icon from the LifeMed mark
 dart run flutter_native_splash:create      # splash from the full logo
@@ -23,11 +23,38 @@ flutter run
 `flutter create .` in an existing directory fills in the native project folders
 without touching `lib/`, `pubspec.yaml` or `assets/`.
 
-To build a release APK for the team:
+**Do not leave off `--org`.** Without it the bundle identifier is
+`com.example.…`, and no Apple account can be issued a provisioning profile for
+a domain it does not own — iOS builds then fail at signing with "No profiles
+for 'com.example.lifemedMr' were found". If it has already happened, fix it in
+place rather than regenerating:
+
+```bash
+sed -i '' 's/com\.example\.lifemedMr/com.lifemedpharmaceutical.mr/g' \
+  ios/Runner.xcodeproj/project.pbxproj
+```
+
+That rewrites six entries — three build configurations each for Runner and
+RunnerTests.
+
+## Getting it onto the team's phones
+
+**Android is the path that matters.** The field team is on Android, and an APK
+needs no store, no developer account and no per-device provisioning:
 
 ```bash
 flutter build apk --release
+# build/app/outputs/flutter-apk/app-release.apk
 ```
+
+Send that file to the MRs directly. They allow "install from unknown sources"
+once, and updates are just a newer APK.
+
+**iOS is for your own testing.** It needs an Apple ID signed in under
+Xcode → Settings → Accounts, and a bundle identifier on a domain you own (see
+above). A free Apple ID runs the app on your own device with a profile that
+expires weekly; putting it on anyone else's phone means the paid Developer
+Program and TestFlight.
 
 The server address is baked in at build time and defaults to the live site.
 Point a test build somewhere else with:
