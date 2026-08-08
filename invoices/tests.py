@@ -49,6 +49,7 @@ from .models import (
     PurchaseItem,
     SalesReturn,
     SampleIssue,
+    SampleIssueItem,
     StockMovement,
     Supplier,
     Territory,
@@ -4799,3 +4800,167 @@ class FieldFormScopingTests(TestCase):
         self.assertEqual(response.context["plan"], plan)
         self.assertEqual(response.context["days"][0]["visits"][0].call_point,
                          self.mine)
+
+
+class ScheduleDayDetailTests(TestCase):
+    """Each day of a plan shows how many calls were actually made."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.territory = Territory.objects.create(name="Gulberg")
+        self.mr = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza", designation="mr",
+            territory=self.territory,
+        )
+
+        self.monday = monday_of(timezone.localdate())
+        self.plan = WeeklyPlan.objects.create(
+            employee=self.mr, week_start=self.monday, status="approved"
+        )
+
+        self.doctors = [
+            CallPoint.objects.create(
+                name=f"Dr. {name}", territory=self.territory, kind="doctor"
+            )
+            for name in ("Ahmed", "Bilal", "Sana")
+        ]
+
+        for doctor in self.doctors[:2]:
+            PlanVisit.objects.create(
+                plan=self.plan, call_point=doctor, day=0
+            )
+
+    def days(self):
+        response = self.client.get(reverse("plan_detail", args=[self.plan.pk]))
+
+        return response.context["days"], response.context
+
+    def report(self, doctor, day_offset=0, outcome=CallReport.MET, visit=None):
+        return CallReport.objects.create(
+            employee=self.mr, call_point=doctor, plan_visit=visit,
+            visit_date=self.monday + timedelta(days=day_offset),
+            outcome=outcome,
+        )
+
+    def test_a_day_with_nothing_reported_counts_zero(self):
+        days, _ = self.days()
+
+        self.assertEqual(days[0]["planned_count"], 2)
+        self.assertEqual(days[0]["made_count"], 0)
+        self.assertEqual(days[0]["coverage"], 0)
+
+    def test_calls_made_are_counted_against_the_day_planned(self):
+        self.report(self.doctors[0], visit=self.plan.visits.first())
+
+        days, _ = self.days()
+
+        self.assertEqual(days[0]["made_count"], 1)
+        self.assertEqual(days[0]["met_count"], 1)
+        self.assertEqual(days[0]["coverage"], 50)
+
+    def test_an_unplanned_call_still_counts_towards_the_day(self):
+        self.report(self.doctors[2])
+
+        days, _ = self.days()
+
+        self.assertEqual(days[0]["made_count"], 1)
+        self.assertEqual(days[0]["unplanned_count"], 1)
+        self.assertEqual(days[0]["reports"][0].call_point, self.doctors[2])
+
+    def test_a_doctor_not_met_is_a_call_made_but_not_met(self):
+        self.report(self.doctors[0], outcome=CallReport.NOT_AVAILABLE)
+
+        days, _ = self.days()
+
+        self.assertEqual(days[0]["made_count"], 1)
+        self.assertEqual(days[0]["met_count"], 0)
+
+    def test_each_call_lands_on_its_own_day(self):
+        self.report(self.doctors[0], day_offset=0)
+        self.report(self.doctors[1], day_offset=2)
+        self.report(self.doctors[2], day_offset=2)
+
+        days, _ = self.days()
+
+        self.assertEqual(days[0]["made_count"], 1)
+        self.assertEqual(days[1]["made_count"], 0)
+        self.assertEqual(days[2]["made_count"], 2)
+
+    def test_calls_outside_the_week_are_not_counted(self):
+        self.report(self.doctors[0], day_offset=-3)
+        self.report(self.doctors[1], day_offset=9)
+
+        _, context = self.days()
+
+        self.assertEqual(context["made_total"], 0)
+
+    def test_another_members_calls_are_not_counted(self):
+        other = Employee.objects.create(
+            employee_code="MR-02", full_name="Sara", designation="mr",
+        )
+        CallReport.objects.create(
+            employee=other, call_point=self.doctors[0], visit_date=self.monday
+        )
+
+        _, context = self.days()
+
+        self.assertEqual(context["made_total"], 0)
+
+    def test_samples_left_are_totalled_per_day_and_per_week(self):
+        product = Product.objects.create(code="PAN", name="Panadol")
+        batch = Batch.objects.create(
+            product=product, batch_no="B-1", quantity=100,
+            expiry_date=timezone.localdate() + timedelta(days=365),
+        )
+
+        report = self.report(self.doctors[0])
+        report.sample_issue = SampleIssue.objects.create(
+            employee=self.mr, call_point=self.doctors[0], date=self.monday
+        )
+        SampleIssueItem.objects.create(
+            sample_issue=report.sample_issue, product=product,
+            batch=batch, qty=6,
+        )
+        report.save()
+
+        days, context = self.days()
+
+        self.assertEqual(days[0]["samples"], 6)
+        self.assertEqual(context["samples_total"], 6)
+
+    def test_the_week_total_adds_the_days_up(self):
+        self.report(self.doctors[0], day_offset=0)
+        self.report(self.doctors[1], day_offset=1)
+        self.report(self.doctors[2], day_offset=5)
+
+        _, context = self.days()
+
+        self.assertEqual(context["made_total"], 3)
+
+    def test_the_mr_sees_the_same_breakdown_on_their_own_schedule(self):
+        account = User.objects.create_user("ali", password="pw12345678")
+        UserRolls.objects.filter(user=account).update(
+            role=UserRolls.ROLE_FIELD
+        )
+        self.mr.user = account
+        self.mr.save()
+
+        self.report(self.doctors[0])
+
+        self.client.logout()
+        self.client.login(username="ali", password="pw12345678")
+
+        response = self.client.get(reverse("my_plan"))
+
+        self.assertEqual(response.context["days"][0]["made_count"], 1)
+        self.assertEqual(response.context["made_total"], 1)
+
+    def test_both_schedule_pages_render(self):
+        self.report(self.doctors[2])
+
+        for url in (reverse("plan_detail", args=[self.plan.pk]),
+                    reverse("my_plan")):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, 200)

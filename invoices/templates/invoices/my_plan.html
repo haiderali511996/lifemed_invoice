@@ -41,6 +41,8 @@
     <div><span class="k">Coverage</span><span class="v">
       {{ plan.completed_count }} / {{ plan.visit_count }}
       ({{ plan.coverage_percent }}%)</span></div>
+    <div><span class="k">Calls Made</span><span class="v">
+      {{ made_total }}{% if samples_total %} · 🧪 {{ samples_total }} sample unit(s){% endif %}</span></div>
   </div>
 </div>
 
@@ -48,6 +50,18 @@
   {% for day in days %}
   <div class="card day-card {% if day.date == today %}is-today{% endif %}">
     <h4>{{ day.label }}<span>{{ day.date|date:"d M" }}</span></h4>
+
+    <div class="tally">
+      <span class="count {% if day.made_count >= day.planned_count and day.planned_count %}good{% elif day.made_count %}part{% endif %}">
+        {{ day.made_count }}<i>/{{ day.planned_count }}</i>
+      </span>
+      <span class="tally-meta">
+        call{{ day.made_count|pluralize }} made
+        {% if day.met_count != day.made_count %} · {{ day.met_count }} met{% endif %}
+        {% if day.unplanned_count %} · {{ day.unplanned_count }} unplanned{% endif %}
+        {% if day.samples %} · 🧪 {{ day.samples }}{% endif %}
+      </span>
+    </div>
 
     {% for visit in day.visits %}
     <div class="visit visit-{{ visit.status }}">
@@ -76,6 +90,19 @@
     </div>
     {% empty %}
     <p class="muted" style="font-size:13px">No calls planned.</p>
+    {% endfor %}
+
+    {% for r in day.reports %}
+    {% if not r.was_planned %}
+    <div class="visit visit-{{ r.outcome }} extra">
+      <strong>{{ r.doctor_name|default:r.call_point.name }}</strong>
+      <span class="meta">
+        {{ r.call_point.name }} · unplanned
+        {% if r.visit_time %} · {{ r.visit_time|time:"H:i" }}{% endif %}
+      </span>
+      <span class="meta">{{ r.get_outcome_display }}</span>
+    </div>
+    {% endif %}
     {% endfor %}
   </div>
   {% endfor %}
@@ -106,6 +133,19 @@
   .visit .meta { display:block;font-size:11px;color:#8595a8; }
   .visit-done { border-left-color:#3aaa35;background:#f3fbf3; }
   .visit-missed { border-left-color:#dc3545;background:#fdf5f6; }
+  .visit-met { border-left-color:#3aaa35;background:#f3fbf3; }
+  .visit-not_available { border-left-color:#dc3545;background:#fdf5f6; }
+  .visit-rescheduled { border-left-color:#e8a33d;background:#fdf9f1; }
+
+  .tally { display:flex;align-items:baseline;gap:8px;margin-bottom:11px; }
+  .tally .count { font-size:19px;font-weight:700;color:#8595a8;
+    font-variant-numeric:tabular-nums; }
+  .tally .count i { font-size:13px;font-weight:400;font-style:normal; }
+  .tally .count.part { color:#8a6100; }
+  .tally .count.good { color:#1e7b24; }
+  .tally-meta { font-size:11px;color:#8595a8; }
+  .visit.extra { border-left-style:dashed; }
+
 
   .visit-actions { margin-top:7px; }
   .btn-mini { padding:4px 10px;font-size:12px; }

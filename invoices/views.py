@@ -1325,6 +1325,57 @@ def plan_generate(request):
     return redirect("plan_detail", plan_id=plan.pk)
 
 
+def plan_days(plan):
+    """Each day of a plan week: what was scheduled, and what actually happened.
+
+    Reports are matched by date rather than by scheduled slot, so a call made
+    off the plan still counts towards the day's work - which is the number a
+    manager actually wants.
+    """
+    if plan is None:
+        return []
+
+    visits = list(
+        plan.visits.select_related("call_point").prefetch_related("report")
+    )
+
+    week_end = plan.week_start + timedelta(days=6)
+
+    reports = list(
+        CallReport.objects.filter(
+            employee=plan.employee,
+            visit_date__gte=plan.week_start,
+            visit_date__lte=week_end,
+        ).select_related("call_point", "sample_issue")
+    )
+
+    days = []
+
+    for day, label in PlanVisit.DAY_CHOICES:
+        on = plan.week_start + timedelta(days=day)
+
+        planned = [v for v in visits if v.day == day]
+        made = [r for r in reports if r.visit_date == on]
+
+        days.append({
+            "day": day,
+            "label": label,
+            "date": on,
+            "visits": planned,
+            "reports": made,
+            "planned_count": len(planned),
+            "made_count": len(made),
+            "met_count": len([r for r in made if r.outcome == CallReport.MET]),
+            "unplanned_count": len([r for r in made if not r.was_planned]),
+            "samples": sum(r.samples_given for r in made),
+            "coverage": (
+                round(len(made) * 100 / len(planned)) if planned else 0
+            ),
+        })
+
+    return days
+
+
 @login_required
 def plan_detail(request, plan_id):
     plan = get_object_or_404(
@@ -1337,12 +1388,16 @@ def plan_detail(request, plan_id):
     if refused is not None:
         return refused
 
+    days = plan_days(plan)
+
     return render(
         request,
         "invoices/plan_detail.html",
         {
             "plan": plan,
-            "days": plan.visits_by_day(),
+            "days": days,
+            "made_total": sum(day["made_count"] for day in days),
+            "samples_total": sum(day["samples"] for day in days),
         }
     )
 
@@ -3409,21 +3464,7 @@ def my_plan(request):
         if me is not None else None
     )
 
-    days = []
-
-    if plan is not None:
-        visits = list(
-            plan.visits.select_related("call_point").prefetch_related("report")
-        )
-
-        for index, label in enumerate(
-            ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-        ):
-            days.append({
-                "label": label,
-                "date": week_start + timedelta(days=index),
-                "visits": [v for v in visits if v.day == index],
-            })
+    days = plan_days(plan)
 
     return render(
         request,
@@ -3433,6 +3474,8 @@ def my_plan(request):
             "me": me,
             "plan": plan,
             "days": days,
+            "made_total": sum(day["made_count"] for day in days),
+            "samples_total": sum(day["samples"] for day in days),
             "week_start": week_start,
             "previous_week": week_start - timedelta(days=7),
             "next_week": week_start + timedelta(days=7),
