@@ -1987,6 +1987,10 @@ def batch_edit(request, batch_id):
     )
 
 
+def _date_or_blank(value):
+    return f"{value:%d-%m-%Y}" if value else "not set"
+
+
 def record_batch_correction(batch, was, user):
     """Note a changed batch number or expiry in the stock ledger.
 
@@ -2003,8 +2007,12 @@ def record_batch_correction(batch, was, user):
         changes.append(f"batch number {old_number} → {batch.batch_no}")
 
     if old_expiry != batch.expiry_date:
+        # MySQL can hand back a zero date as None for rows written before the
+        # column was constrained, and formatting None raises. Say "not set"
+        # rather than losing the whole correction to a TypeError.
         changes.append(
-            f"expiry {old_expiry:%d-%m-%Y} → {batch.expiry_date:%d-%m-%Y}"
+            f"expiry {_date_or_blank(old_expiry)} → "
+            f"{_date_or_blank(batch.expiry_date)}"
         )
 
     if not changes:

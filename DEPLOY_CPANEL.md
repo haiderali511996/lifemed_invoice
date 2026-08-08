@@ -253,9 +253,42 @@ count as super admins.
 
 ## Troubleshooting
 
+### A page loads but 500s when you press Save
+
+This is almost always the database being a step behind the code: the new
+column exists in the models but not in MySQL. Opening the page never reads it,
+so only saving fails — which looks like a bug in the page rather than a missing
+migration.
+
+Ask the server directly:
+
+```bash
+cd ~/lifemed_invoice
+source /home/haidersirat/virtualenv/lifemed_invoice/3.13/bin/activate
+python manage.py check_schema
+```
+
+It prints any unapplied migrations and names every table and column the code
+expects but the database has not got. If it reports drift:
+
+```bash
+python manage.py migrate
+touch tmp/restart.txt
+```
+
+If `check_schema` says the schema is clean, the 500 is a real bug — get the
+traceback with:
+
+```bash
+tail -n 100 ~/lifemed_invoice/stderr.log
+```
+
+### Everything else
+
 | Symptom | Cause |
 |---|---|
 | 500 on every page, no Django output | Passenger failed to boot — read `~/lifemed_invoice/stderr.log` and the cPanel error log |
+| Page loads, 500 on save | Run `python manage.py check_schema` — see above |
 | `ImproperlyConfigured: SECRET_KEY is not set` | `.env` missing, in the wrong directory, or unreadable |
 | `DisallowedHost` | Hostname missing from `ALLOWED_HOSTS` |
 | 403 CSRF on *Generate PDF* | Origin missing from `CSRF_TRUSTED_ORIGINS`, or `SECURE_COOKIES=True` on http |

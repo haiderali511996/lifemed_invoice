@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from io import StringIO
 from pathlib import Path
 from unittest import mock
 
@@ -16,6 +17,7 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import connection
 from django.db.models import ProtectedError
 from django.test import TestCase
 from django.urls import reverse
@@ -61,7 +63,10 @@ from .models import (
 from .pdf import rows_per_page
 from .stock import StockError, adjust, allocate_fefo, issue, receive
 from .planning import generate_plan, monday_of
-from .views import customers_with_balances, month_range, overdue_invoices
+from .views import (
+    customers_with_balances, month_range, overdue_invoices,
+    record_batch_correction,
+)
 
 
 class InvoiceNumberTests(TestCase):
@@ -4964,3 +4969,74 @@ class ScheduleDayDetailTests(TestCase):
                     reverse("my_plan")):
             with self.subTest(url=url):
                 self.assertEqual(self.client.get(url).status_code, 200)
+
+
+class CheckSchemaCommandTests(TestCase):
+    """The command that answers "why does saving 500 on the server?"."""
+
+    def run_command(self, **kwargs):
+        out = StringIO()
+        call_command("check_schema", stdout=out, **kwargs)
+
+        return out.getvalue()
+
+    def test_a_migrated_database_reports_clean(self):
+        output = self.run_command()
+
+        self.assertIn("All migrations applied", output)
+        self.assertIn("Schema matches the models", output)
+
+    def test_a_missing_column_is_named(self):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "ALTER TABLE invoices_callpoint DROP COLUMN estimated_volume"
+            )
+
+        output = self.run_command()
+
+        self.assertIn("missing column  invoices_callpoint.estimated_volume",
+                      output)
+        self.assertIn("python manage.py migrate", output)
+
+    def test_a_missing_table_is_named(self):
+        with connection.cursor() as cursor:
+            cursor.execute("DROP TABLE invoices_callreport")
+
+        output = self.run_command()
+
+        self.assertIn("missing table   invoices_callreport", output)
+
+    def test_it_names_the_database_it_looked_at(self):
+        output = self.run_command()
+
+        self.assertIn("Database:", output)
+        self.assertIn(connection.settings_dict["ENGINE"].rsplit(".", 1)[-1],
+                      output)
+
+
+class BatchCorrectionNoteTests(TestCase):
+    """A correction note must never be what breaks the correction."""
+
+    def test_a_date_that_was_never_set_is_described_not_formatted(self):
+        product = Product.objects.create(code="PAN", name="Panadol")
+        batch = Batch.objects.create(
+            product=product, batch_no="B-1", quantity=10,
+            expiry_date=date(2028, 1, 31),
+        )
+
+        movement = record_batch_correction(batch, ("B-1", None), None)
+
+        self.assertEqual(movement.quantity, 0)
+        self.assertIn("not set → 31-01-2028", movement.note)
+
+    def test_an_unchanged_batch_records_nothing(self):
+        product = Product.objects.create(code="PAN", name="Panadol")
+        batch = Batch.objects.create(
+            product=product, batch_no="B-1", quantity=10,
+            expiry_date=date(2028, 1, 31),
+        )
+
+        self.assertIsNone(
+            record_batch_correction(batch, ("B-1", date(2028, 1, 31)), None)
+        )
+        self.assertEqual(StockMovement.objects.count(), 0)
