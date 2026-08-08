@@ -1,0 +1,82 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Edit Batch{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Edit Batch</h1>
+  <a href="{% url 'stock_report' %}" class="btn btn-grey">Back to Stock</a>
+</div>
+
+<div class="card" style="max-width:620px">
+  <div class="summary">
+    <div><span class="k">Product</span><span class="v">
+      {{ batch.product.name }} <span class="muted">{{ batch.product.code }}</span></span></div>
+    <div><span class="k">On Hand</span><span class="v">{{ batch.quantity }}</span></div>
+    <div><span class="k">Cost / unit</span><span class="v">
+      {{ batch.cost_price|floatformat:2 }}</span></div>
+    <div><span class="k">Status</span><span class="v">
+      {% if batch.is_expired %}<span class="pill pill-overdue">expired</span>
+      {% elif batch.expires_soon %}<span class="pill pill-due">{{ batch.days_to_expiry }} days</span>
+      {% else %}<span class="pill pill-paid">good</span>{% endif %}</span></div>
+  </div>
+
+  <form method="POST" style="margin-top:20px">
+    {% csrf_token %}
+
+    {% if form.non_field_errors %}
+    <div class="alert alert-error">{{ form.non_field_errors }}</div>
+    {% endif %}
+
+    <div class="field">
+      <label for="{{ form.batch_no.id_for_label }}">Batch Number</label>
+      {{ form.batch_no }} {{ form.batch_no.errors }}
+      <p class="help">
+        Invoices already printed keep the number they were printed with —
+        renaming here does not rewrite past paperwork.
+      </p>
+    </div>
+
+    <div class="field">
+      <label for="{{ form.expiry_date.id_for_label }}">Expiry Date</label>
+      {{ form.expiry_date }} {{ form.expiry_date.errors }}
+      <p class="help">
+        Expiry drives what can be sold and the order stock goes out in
+        (first-expired-first-out), so the change takes effect immediately and
+        is recorded in the stock ledger.
+      </p>
+    </div>
+
+    <p class="note">
+      Quantity is not editable here. To correct it against a physical count,
+      use <a href="{% url 'batch_adjust' batch.id %}">Adjust</a> — that way the
+      difference goes through the stock ledger instead of being typed over.
+    </p>
+
+    <div style="display:flex;gap:10px;margin-top:22px">
+      <button type="submit" class="btn btn-green">Save Batch</button>
+      <a href="{% url 'stock_report' %}" class="btn btn-grey">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .summary { display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+    gap:16px;padding-bottom:18px;border-bottom:1px solid #eef2f6; }
+  .summary .k { display:block;font-size:11px;text-transform:uppercase;
+    letter-spacing:.5px;color:#8595a8;margin-bottom:4px; }
+  .summary .v { font-size:14px; }
+
+  .field { margin-bottom:15px; }
+  .field label { display:block;margin-bottom:5px;font-size:13px;
+    font-weight:600;color:#55657a; }
+  .field input { width:100%;padding:9px 12px;border:1px solid #dbe2ea;
+    border-radius:7px;font-size:14px;font-family:inherit; }
+
+  .help { font-size:12px;color:#8595a8;margin:5px 0 0; }
+  .note { font-size:12.5px;color:#8595a8;background:#f7f9fc;
+    padding:11px 13px;border-radius:7px;margin:18px 0 0; }
+  .errorlist { color:#dc3545;font-size:12px;font-weight:600;
+    margin:5px 0 0;padding-left:16px; }
+</style>
+{% endblock %}

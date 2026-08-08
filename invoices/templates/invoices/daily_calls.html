@@ -16,6 +16,7 @@
 
     <input type="date" name="date" value="{{ day|date:'Y-m-d' }}">
 
+    {% if not locked_to_me %}
     <select name="employee">
       <option value="">-- pick a team member --</option>
       {% for e in employees %}
@@ -23,21 +24,30 @@
         {{ e.full_name }}</option>
       {% endfor %}
     </select>
+    {% endif %}
 
     <button type="submit" class="btn">Show</button>
 
     <a class="btn btn-grey"
        href="?date={{ next_day|date:'Y-m-d' }}{% if employee %}&employee={{ employee.id }}{% endif %}">›</a>
 
-    <span class="day-label">{{ day|date:"l, d M Y" }}</span>
+    <span class="day-label">
+      {% if locked_to_me and employee %}{{ employee.full_name }} · {% endif %}
+      {{ day|date:"l, d M Y" }}</span>
   </form>
 </div>
 
 {% if not employee %}
 <div class="alert alert-warn">
+  {% if locked_to_me %}
+  This login is not linked to a team member yet, so there is no day to show.
+  Ask the office to set the <strong>User</strong> field on your record in
+  Team Management.
+  {% else %}
   No team member selected, and your login is not linked to one. Pick a team
   member above — or set the <strong>User</strong> field on their record in
   Team Management so this page opens on their own day automatically.
+  {% endif %}
 </div>
 {% else %}
 

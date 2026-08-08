@@ -228,6 +228,11 @@ urlpatterns = [
     path('stock/movements/', views.stock_movements, name='stock_movements'),
     path('stock/ledger/', views.stock_ledger, name='stock_ledger'),
     path(
+        'stock/batches/<int:batch_id>/edit/',
+        views.batch_edit,
+        name='batch_edit',
+    ),
+    path(
         'stock/batches/<int:batch_id>/adjust/',
         views.batch_adjust,
         name='batch_adjust',

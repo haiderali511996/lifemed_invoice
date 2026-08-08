@@ -76,8 +76,11 @@
             {% elif b.expires_soon %}<span class="pill pill-due">{{ b.days_to_expiry }} days</span>
             {% else %}<span class="pill pill-paid">good</span>{% endif %}
           </td>
-          <td class="no-print">
-            <a href="{% url 'batch_adjust' b.id %}" class="btn btn-sm btn-grey">Adjust</a>
+          <td class="no-print" style="white-space:nowrap">
+            <a href="{% url 'batch_edit' b.id %}" class="btn btn-sm btn-grey"
+               title="Correct the batch number or expiry date">Edit</a>
+            <a href="{% url 'batch_adjust' b.id %}" class="btn btn-sm btn-grey"
+               title="Correct the quantity to a physical count">Adjust</a>
           </td>
         </tr>
         {% empty %}

@@ -30,6 +30,7 @@ from .forms import (
     ProductForm,
     ProfileForm,
     PurchaseForm,
+    BatchForm,
     StockAdjustmentForm,
     SupplierForm,
     TerritoryForm,
@@ -1889,6 +1890,82 @@ def stock_movements(request):
 
 
 @login_required
+def batch_edit(request, batch_id):
+    """Correct a batch number or an expiry date entered wrongly.
+
+    Expiry belongs to the batch, not the product: one product arrives in many
+    lots, each with its own date, which is why there is no expiry field on the
+    product screen.
+    """
+    batch = get_object_or_404(Batch.objects.select_related("product"), pk=batch_id)
+
+    # Captured before the form runs: validating a ModelForm writes the posted
+    # values straight onto the instance, so by then the old ones are gone.
+    was = (batch.batch_no, batch.expiry_date)
+
+    if request.method == "POST":
+        form = BatchForm(request.POST, instance=batch)
+
+        if form.is_valid():
+            saved = form.save()
+
+            record_batch_correction(saved, was, request.user)
+
+            messages.success(
+                request,
+                f"Updated {saved.product.name} / {saved.batch_no}"
+                f" — expires {saved.expiry_date:%d-%m-%Y}.",
+            )
+
+            return redirect("stock_report")
+
+    else:
+        form = BatchForm(instance=batch)
+
+    return render(
+        request,
+        "invoices/batch_form.html",
+        {
+            "form": form,
+            "batch": batch,
+        }
+    )
+
+
+def record_batch_correction(batch, was, user):
+    """Note a changed batch number or expiry in the stock ledger.
+
+    Expiry drives what may be sold and the order stock goes out in, so a
+    silent edit is not good enough for a pharmaceutical business. The entry
+    moves no stock - it carries a quantity of zero - and exists to say who
+    changed what, and when.
+    """
+    old_number, old_expiry = was
+
+    changes = []
+
+    if old_number != batch.batch_no:
+        changes.append(f"batch number {old_number} → {batch.batch_no}")
+
+    if old_expiry != batch.expiry_date:
+        changes.append(
+            f"expiry {old_expiry:%d-%m-%Y} → {batch.expiry_date:%d-%m-%Y}"
+        )
+
+    if not changes:
+        return None
+
+    return StockMovement.objects.create(
+        product=batch.product,
+        batch=batch,
+        quantity=0,
+        kind=StockMovement.ADJUSTMENT,
+        note="Corrected " + ", ".join(changes),
+        created_by=user,
+    )
+
+
+@login_required
 def batch_adjust(request, batch_id):
     batch = get_object_or_404(Batch.objects.select_related("product"), pk=batch_id)
 
@@ -2284,8 +2361,27 @@ def _clean_purchase_edits(request, items):
             )
             continue
 
-        if delta or cost != item.cost_price:
-            changes.append({"item": item, "cost": cost, "qty": qty, "delta": delta})
+        raw_expiry = request.POST.get(f"expiry_{item.pk}")
+
+        if raw_expiry is None:
+            # The field was not submitted at all - leave the batch as it is
+            # rather than refusing an otherwise good correction.
+            expiry = item.batch.expiry_date
+        else:
+            expiry = parse_date(raw_expiry)
+
+            if expiry is None:
+                errors.append(
+                    f"{item.product.name} batch {item.batch.batch_no}: "
+                    f"enter a valid expiry date."
+                )
+                continue
+
+        if delta or cost != item.cost_price or expiry != item.batch.expiry_date:
+            changes.append({
+                "item": item, "cost": cost, "qty": qty,
+                "delta": delta, "expiry": expiry,
+            })
 
     return changes, errors
 
@@ -2324,6 +2420,16 @@ def _apply_purchase_edits(changes, user):
             batch.cost_price = change["cost"]
             batch.save(update_fields=["cost_price"])
 
+        # A mistyped expiry is corrected here rather than only on the batch
+        # screen, because receiving is where the typo happens.
+        if change["expiry"] != batch.expiry_date:
+            was = (batch.batch_no, batch.expiry_date)
+
+            batch.expiry_date = change["expiry"]
+            batch.save(update_fields=["expiry_date"])
+
+            record_batch_correction(batch, was, user)
+
     return applied
 
 
@@ -2345,8 +2451,15 @@ def expense_list(request):
 
     mine = field_employee(request.user)
 
+    # Anyone linked to a team member can narrow the page to their own claims;
+    # a field login is always narrowed and cannot widen it again.
+    me = mine or Employee.objects.filter(user=request.user).first()
+    only_mine = mine is not None or request.GET.get("mine") == "1"
+
     if mine is not None:
         expenses = expenses.filter(employee=mine)
+    elif only_mine and me is not None:
+        expenses = expenses.filter(employee=me)
     elif employee_id:
         expenses = expenses.filter(employee_id=employee_id)
 
@@ -2378,6 +2491,9 @@ def expense_list(request):
             "categories": ExpenseCategory.objects.filter(is_active=True),
             "employees": Employee.objects.filter(is_active=True),
             "statuses": Expense.STATUS_CHOICES,
+            "me": me,
+            "only_mine": only_mine,
+            "locked_to_me": mine is not None,
             "selected": {
                 "category": category_id, "employee": employee_id,
                 "status": status, "month": month,
@@ -2585,8 +2701,10 @@ def sample_list(request):
 @login_required
 def sample_create(request):
     """Hand samples to a doctor, taken straight out of sellable stock."""
+    mine = field_employee(request.user)
+
     if request.method == "POST":
-        form = SampleIssueForm(request.POST)
+        form = SampleIssueForm(request.POST, employee=mine)
 
         batch_ids = request.POST.getlist("batch[]")
         quantities = post_column(request, "qty[]", len(batch_ids))
@@ -2596,12 +2714,6 @@ def sample_create(request):
         if form.is_valid() and lines and not errors:
             issue_record = form.save(commit=False)
             issue_record.created_by = request.user
-
-            mine = field_employee(request.user)
-
-            if mine is not None:
-                issue_record.employee = mine
-
             issue_record.save()
 
             units = _issue_samples(issue_record, lines, request.user)
@@ -2621,13 +2733,16 @@ def sample_create(request):
             messages.error(request, "Add at least one product line.")
 
     else:
-        form = SampleIssueForm(initial={"date": timezone.localdate()})
+        form = SampleIssueForm(
+            initial={"date": timezone.localdate()}, employee=mine
+        )
 
     return render(
         request,
         "invoices/sample_form.html",
         {
             "form": form,
+            "me": mine,
             "products": Product.objects.filter(is_active=True),
         }
     )
@@ -2994,7 +3109,13 @@ def daily_calls(request):
             "previous_day": day - timedelta(days=1),
             "next_day": day + timedelta(days=1),
             "employee": employee,
-            "employees": Employee.objects.filter(is_active=True),
+            # A field login has nobody else's day to switch to, so the picker
+            # is not offered rather than being offered and ignored.
+            "employees": (
+                [] if mine is not None
+                else Employee.objects.filter(is_active=True)
+            ),
+            "locked_to_me": mine is not None,
             "scheduled": [
                 {"visit": visit, "done": visit.pk in reported_visit_ids}
                 for visit in scheduled
@@ -3023,8 +3144,12 @@ def call_report_create(request, visit_id=None):
         if refused is not None:
             return refused
 
+    # A field login is the person reporting, so the form neither asks who nor
+    # offers doctors outside their own patch.
+    mine = field_employee(request.user)
+
     if request.method == "POST":
-        form = CallReportForm(request.POST)
+        form = CallReportForm(request.POST, employee=mine)
 
         batch_ids = request.POST.getlist("batch[]")
         quantities = post_column(request, "qty[]", len(batch_ids))
@@ -3035,13 +3160,6 @@ def call_report_create(request, visit_id=None):
             report = form.save(commit=False)
             report.plan_visit = plan_visit
             report.created_by = request.user
-
-            # A field login files under its own name whatever the form says.
-            mine = field_employee(request.user)
-
-            if mine is not None:
-                report.employee = mine
-
             report.save()
             form.save_m2m()
 
@@ -3085,7 +3203,7 @@ def call_report_create(request, visit_id=None):
                 "speciality": plan_visit.call_point.speciality,
             })
 
-        form = CallReportForm(initial=initial)
+        form = CallReportForm(initial=initial, employee=mine)
 
     return render(
         request,
@@ -3093,6 +3211,7 @@ def call_report_create(request, visit_id=None):
         {
             "form": form,
             "plan_visit": plan_visit,
+            "me": mine,
             "products": Product.objects.filter(is_active=True),
         }
     )

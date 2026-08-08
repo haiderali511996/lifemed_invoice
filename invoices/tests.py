@@ -4319,3 +4319,483 @@ class EmployeeLoginSetupTests(TestCase):
             ).status_code,
             200,
         )
+
+
+class BatchEditTests(TestCase):
+    """Expiry belongs to the batch, and a mistyped one has to be correctable."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.product = Product.objects.create(code="PAN500", name="Panadol")
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1", quantity=100,
+            received_quantity=100, cost_price=Decimal("20.00"),
+            expiry_date=date(2027, 6, 30),
+        )
+
+    def edit(self, **overrides):
+        payload = {"batch_no": self.batch.batch_no, "expiry_date": "2028-12-31"}
+        payload.update(overrides)
+
+        return self.client.post(
+            reverse("batch_edit", args=[self.batch.pk]), payload
+        )
+
+    def test_the_expiry_date_can_be_corrected(self):
+        self.edit(expiry_date="2028-12-31")
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.expiry_date, date(2028, 12, 31))
+
+    def test_the_batch_number_can_be_corrected(self):
+        self.edit(batch_no="B-1A")
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.batch_no, "B-1A")
+
+    def test_a_correction_is_written_to_the_stock_ledger(self):
+        self.edit(batch_no="B-1A", expiry_date="2028-12-31")
+
+        movement = StockMovement.objects.get(kind=StockMovement.ADJUSTMENT)
+
+        self.assertEqual(movement.quantity, 0)
+        self.assertEqual(movement.created_by, self.user)
+        self.assertIn("B-1 → B-1A", movement.note)
+        self.assertIn("30-06-2027 → 31-12-2028", movement.note)
+
+    def test_saving_without_changing_anything_logs_nothing(self):
+        self.edit(expiry_date="2027-06-30")
+
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_a_correction_moves_no_stock(self):
+        self.edit(expiry_date="2028-12-31")
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 100)
+        self.assertEqual(self.batch.received_quantity, 100)
+
+    def test_two_batches_of_one_product_cannot_share_a_number(self):
+        Batch.objects.create(
+            product=self.product, batch_no="B-2", quantity=50,
+            expiry_date=date(2027, 1, 31),
+        )
+
+        response = self.edit(batch_no="B-2")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "already has a batch")
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.batch_no, "B-1")
+
+    def test_the_same_number_on_another_product_is_fine(self):
+        other = Product.objects.create(code="BRU", name="Brufen")
+        Batch.objects.create(
+            product=other, batch_no="B-9", quantity=10,
+            expiry_date=date(2027, 1, 31),
+        )
+
+        self.edit(batch_no="B-9")
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.batch_no, "B-9")
+
+    def test_quantity_cannot_be_typed_over_here(self):
+        """Stock only moves through the ledger, never by editing a field."""
+        self.client.post(reverse("batch_edit", args=[self.batch.pk]), {
+            "batch_no": "B-1", "expiry_date": "2028-12-31", "quantity": "999",
+        })
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 100)
+
+    def test_correcting_expiry_reorders_fefo(self):
+        """The point of the date: it decides what goes out first."""
+        later = Batch.objects.create(
+            product=self.product, batch_no="B-2", quantity=100,
+            expiry_date=date(2028, 1, 31),
+        )
+
+        picks, _ = allocate_fefo(self.product, 10)
+        self.assertEqual(picks[0][0], self.batch)
+
+        self.edit(expiry_date="2029-12-31")
+
+        picks, _ = allocate_fefo(self.product, 10)
+        self.assertEqual(picks[0][0], later)
+
+    def test_an_invoice_keeps_the_batch_number_it_was_printed_with(self):
+        customer = Customer.objects.create(name="Shifa")
+        invoice = Invoice.objects.create(customer=customer, license_no="L")
+        item = Item.objects.create(
+            invoice=invoice, name="Panadol", qty=5, batch="B-1",
+            expiry="06/27", price=Decimal("100"), discount=ZERO,
+            product=self.product, stock_batch=self.batch,
+        )
+
+        self.edit(batch_no="B-1A")
+
+        item.refresh_from_db()
+        self.assertEqual(item.batch, "B-1")
+
+    def test_the_batch_page_renders(self):
+        self.assertEqual(
+            self.client.get(reverse("batch_edit", args=[self.batch.pk])).status_code,
+            200,
+        )
+
+
+class PurchaseExpiryEditTests(TestCase):
+    """Receiving is where an expiry typo happens, so it is fixable there."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.supplier = Supplier.objects.create(name="Getz Pharma")
+        self.product = Product.objects.create(code="PAN500", name="Panadol")
+
+        self.client.post(reverse("purchase_new"), {
+            "supplier": self.supplier.pk, "reference": "GRN-1",
+            "date": timezone.localdate().isoformat(), "note": "",
+            "product[]": [str(self.product.pk)], "batch_no[]": ["B-1"],
+            "expiry_date[]": ["2027-06-30"], "quantity[]": ["100"],
+            "cost_price[]": ["20.00"],
+        })
+
+        self.purchase = Purchase.objects.get()
+        self.item = self.purchase.items.get()
+        self.batch = self.item.batch
+
+    def post_edit(self, **overrides):
+        payload = {
+            "supplier": self.supplier.pk, "reference": "GRN-1",
+            "date": self.purchase.date.isoformat(), "note": "",
+            f"qty_{self.item.pk}": str(self.item.quantity),
+            f"cost_{self.item.pk}": str(self.item.cost_price),
+            f"expiry_{self.item.pk}": "2027-06-30",
+        }
+        payload.update(overrides)
+
+        return self.client.post(
+            reverse("purchase_edit", args=[self.purchase.pk]), payload
+        )
+
+    def test_the_expiry_can_be_corrected_from_the_purchase(self):
+        self.post_edit(**{f"expiry_{self.item.pk}": "2029-03-31"})
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.expiry_date, date(2029, 3, 31))
+
+    def test_the_correction_reaches_the_stock_ledger(self):
+        self.post_edit(**{f"expiry_{self.item.pk}": "2029-03-31"})
+
+        movement = StockMovement.objects.filter(
+            kind=StockMovement.ADJUSTMENT, quantity=0
+        ).get()
+
+        self.assertIn("30-06-2027 → 31-03-2029", movement.note)
+
+    def test_correcting_an_expiry_alone_moves_no_stock(self):
+        self.post_edit(**{f"expiry_{self.item.pk}": "2029-03-31"})
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 100)
+
+    def test_a_blank_expiry_is_refused_and_nothing_is_saved(self):
+        response = self.post_edit(**{
+            f"expiry_{self.item.pk}": "", f"cost_{self.item.pk}": "25.00",
+        })
+
+        self.assertEqual(response.status_code, 200)
+
+        self.batch.refresh_from_db()
+        self.item.refresh_from_db()
+
+        self.assertEqual(self.batch.expiry_date, date(2027, 6, 30))
+        self.assertEqual(self.item.cost_price, Decimal("20.00"))
+
+    def test_expiry_and_quantity_can_be_corrected_together(self):
+        self.post_edit(**{
+            f"expiry_{self.item.pk}": "2029-03-31",
+            f"qty_{self.item.pk}": "120",
+        })
+
+        self.batch.refresh_from_db()
+
+        self.assertEqual(self.batch.expiry_date, date(2029, 3, 31))
+        self.assertEqual(self.batch.quantity, 120)
+
+
+class MyExpensesTests(TestCase):
+    """Expense claims belong to one person, and the page should say so."""
+
+    def setUp(self):
+        self.category = ExpenseCategory.objects.create(name="Fuel")
+        self.territory = Territory.objects.create(name="Gulberg")
+
+        self.clerk = User.objects.create_user("clerk", password="pw")
+        self.clerk_employee = Employee.objects.create(
+            employee_code="OF-01", full_name="Office Clerk",
+            designation="admin", user=self.clerk,
+        )
+        self.mr = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza", designation="mr",
+            territory=self.territory,
+        )
+
+        Expense.objects.create(
+            category=self.category, employee=self.clerk_employee,
+            amount=Decimal("300"), date=timezone.localdate(),
+        )
+        Expense.objects.create(
+            category=self.category, employee=self.mr,
+            amount=Decimal("900"), date=timezone.localdate(),
+        )
+
+        self.client.login(username="clerk", password="pw")
+
+    def test_the_office_sees_the_whole_team_by_default(self):
+        response = self.client.get(reverse("expense_list"))
+
+        self.assertEqual(len(response.context["expenses"]), 2)
+        self.assertFalse(response.context["only_mine"])
+
+    def test_show_only_mine_narrows_to_the_signed_in_person(self):
+        response = self.client.get(reverse("expense_list"), {"mine": "1"})
+
+        self.assertEqual(len(response.context["expenses"]), 1)
+        self.assertEqual(
+            response.context["expenses"][0].employee, self.clerk_employee
+        )
+        self.assertEqual(response.context["total"], Decimal("300.00"))
+
+    def test_the_totals_follow_the_narrowed_list(self):
+        Expense.objects.create(
+            category=self.category, employee=self.clerk_employee,
+            amount=Decimal("200"), date=timezone.localdate(),
+        )
+
+        response = self.client.get(reverse("expense_list"), {"mine": "1"})
+
+        self.assertEqual(response.context["total"], Decimal("500.00"))
+        self.assertEqual(response.context["pending_total"], Decimal("500.00"))
+
+    def test_an_office_login_with_no_team_record_is_offered_nothing(self):
+        self.client.logout()
+        User.objects.create_user("temp", password="pw")
+        self.client.login(username="temp", password="pw")
+
+        response = self.client.get(reverse("expense_list"))
+
+        self.assertIsNone(response.context["me"])
+        self.assertEqual(len(response.context["expenses"]), 2)
+
+    def test_a_field_login_is_locked_to_its_own_claims(self):
+        account = User.objects.create_user("ali", password="pw12345678")
+        UserRolls.objects.filter(user=account).update(
+            role=UserRolls.ROLE_FIELD
+        )
+        self.mr.user = account
+        self.mr.save()
+
+        self.client.logout()
+        self.client.login(username="ali", password="pw12345678")
+
+        # Even asked for someone else's, it stays on their own.
+        response = self.client.get(
+            reverse("expense_list"), {"employee": self.clerk_employee.pk}
+        )
+
+        self.assertTrue(response.context["locked_to_me"])
+        self.assertEqual(len(response.context["expenses"]), 1)
+        self.assertEqual(response.context["expenses"][0].employee, self.mr)
+
+
+class FieldFormScopingTests(TestCase):
+    """An MR filing their own visit is not asked who they are."""
+
+    def setUp(self):
+        self.territory = Territory.objects.create(name="Gulberg", city="Lahore")
+        self.other_territory = Territory.objects.create(name="Model Town")
+
+        self.account = User.objects.create_user("ali", password="pw12345678")
+        UserRolls.objects.filter(user=self.account).update(
+            role=UserRolls.ROLE_FIELD
+        )
+
+        self.mr = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza", designation="mr",
+            territory=self.territory, user=self.account,
+        )
+        self.other = Employee.objects.create(
+            employee_code="MR-02", full_name="Sara Khan", designation="mr",
+            territory=self.other_territory,
+        )
+
+        self.mine = CallPoint.objects.create(
+            name="Dr. Ahmed", territory=self.territory, kind="doctor"
+        )
+        self.theirs = CallPoint.objects.create(
+            name="Dr. Zubair", territory=self.other_territory, kind="doctor"
+        )
+
+        self.client.login(username="ali", password="pw12345678")
+
+    def report(self, **overrides):
+        payload = {
+            "call_point": self.mine.pk,
+            "visit_date": timezone.localdate().isoformat(),
+            "visit_time": "", "doctor_name": "Dr. Ahmed", "speciality": "",
+            "outcome": CallReport.MET, "feedback": "", "next_visit_date": "",
+            "new_call_point": "", "new_call_point_kind": "doctor",
+            "new_call_point_territory": "",
+        }
+        payload.update(overrides)
+
+        return self.client.post(reverse("call_report_new"), payload)
+
+    # ---------------------------------------------------------- the visit form
+
+    def test_the_team_member_field_is_gone_for_a_field_login(self):
+        form = self.client.get(reverse("call_report_new")).context["form"]
+
+        self.assertNotIn("employee", form.fields)
+
+    def test_only_their_own_territory_is_offered(self):
+        form = self.client.get(reverse("call_report_new")).context["form"]
+
+        offered = list(form.fields["call_point"].queryset)
+
+        self.assertIn(self.mine, offered)
+        self.assertNotIn(self.theirs, offered)
+
+    def test_a_visit_files_under_the_signed_in_member(self):
+        self.report()
+
+        self.assertEqual(CallReport.objects.get().employee, self.mr)
+
+    def test_a_doctor_outside_their_patch_is_refused(self):
+        response = self.report(call_point=self.theirs.pk)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CallReport.objects.count(), 0)
+
+    def test_a_new_call_point_lands_in_their_own_territory(self):
+        self.report(call_point="", new_call_point="Dr. Sana Malik")
+
+        created = CallPoint.objects.get(name="Dr. Sana Malik")
+
+        self.assertEqual(created.territory, self.territory)
+
+    def test_they_cannot_file_a_new_call_point_into_another_territory(self):
+        response = self.report(
+            call_point="", new_call_point="Dr. Sana Malik",
+            new_call_point_territory=self.other_territory.pk,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            CallPoint.objects.filter(name="Dr. Sana Malik").count(), 0
+        )
+
+    # -------------------------------------------------------- the sample form
+
+    def test_the_sample_form_does_not_ask_who_is_issuing(self):
+        form = self.client.get(reverse("sample_new")).context["form"]
+
+        self.assertNotIn("employee", form.fields)
+
+        offered = list(form.fields["call_point"].queryset)
+
+        self.assertIn(self.mine, offered)
+        self.assertNotIn(self.theirs, offered)
+
+    def test_samples_issue_under_the_signed_in_member(self):
+        product = Product.objects.create(code="PAN500", name="Panadol")
+        batch = Batch.objects.create(
+            product=product, batch_no="B-1", quantity=100,
+            expiry_date=timezone.localdate() + timedelta(days=365),
+        )
+
+        self.client.post(reverse("sample_new"), {
+            "call_point": self.mine.pk,
+            "date": timezone.localdate().isoformat(), "note": "",
+            "batch[]": [str(batch.pk)], "qty[]": ["5"],
+        })
+
+        self.assertEqual(SampleIssue.objects.get().employee, self.mr)
+
+    # --------------------------------------------------------- the office view
+
+    def test_the_office_is_still_asked_who_the_visit_is_for(self):
+        self.client.logout()
+        User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        form = self.client.get(reverse("call_report_new")).context["form"]
+
+        self.assertIn("employee", form.fields)
+
+        offered = list(form.fields["call_point"].queryset)
+
+        self.assertIn(self.mine, offered)
+        self.assertIn(self.theirs, offered)
+
+    def test_an_mr_with_no_territory_still_sees_every_call_point(self):
+        """Better a full list than an empty one they cannot work from."""
+        self.mr.territory = None
+        self.mr.save()
+
+        form = self.client.get(reverse("call_report_new")).context["form"]
+
+        offered = list(form.fields["call_point"].queryset)
+
+        self.assertIn(self.mine, offered)
+        self.assertIn(self.theirs, offered)
+
+    def test_the_day_offers_no_other_team_member_to_switch_to(self):
+        response = self.client.get(reverse("daily_calls"))
+
+        self.assertTrue(response.context["locked_to_me"])
+        self.assertEqual(list(response.context["employees"]), [])
+        self.assertEqual(response.context["employee"], self.mr)
+
+    def test_the_office_can_still_switch_between_days_and_people(self):
+        self.client.logout()
+        User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        response = self.client.get(reverse("daily_calls"))
+
+        self.assertFalse(response.context["locked_to_me"])
+        self.assertIn(self.mr, response.context["employees"])
+        self.assertIn(self.other, response.context["employees"])
+
+    def test_the_schedule_page_shows_only_their_own_weeks(self):
+        mine = WeeklyPlan.objects.create(
+            employee=self.mr, week_start=monday_of(timezone.localdate())
+        )
+        WeeklyPlan.objects.create(
+            employee=self.other, week_start=monday_of(timezone.localdate())
+        )
+
+        response = self.client.get(reverse("plan_list"))
+
+        self.assertEqual(list(response.context["plans"]), [mine])
+
+    def test_my_schedule_is_always_their_own_week(self):
+        plan = WeeklyPlan.objects.create(
+            employee=self.mr, week_start=monday_of(timezone.localdate())
+        )
+        PlanVisit.objects.create(plan=plan, call_point=self.mine, day=0)
+
+        response = self.client.get(reverse("my_plan"))
+
+        self.assertEqual(response.context["me"], self.mr)
+        self.assertEqual(response.context["plan"], plan)
+        self.assertEqual(response.context["days"][0]["visits"][0].call_point,
+                         self.mine)

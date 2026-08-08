@@ -23,8 +23,8 @@
           <td>{{ m.product.name }}</td>
           <td>{{ m.batch.batch_no }}</td>
           <td>{{ m.get_kind_display }}</td>
-          <td class="num" style="font-weight:bold;color:{% if m.quantity > 0 %}#1e7b24{% else %}#a71d2a{% endif %}">
-            {{ m.quantity|stringformat:"+d" }}
+          <td class="num" style="font-weight:bold;color:{% if m.quantity > 0 %}#1e7b24{% elif m.quantity < 0 %}#a71d2a{% else %}#8595a8{% endif %}">
+            {% if m.quantity %}{{ m.quantity|stringformat:"+d" }}{% else %}—{% endif %}
           </td>
           <td>{{ m.reference|default:"-" }}</td>
           <td>{{ m.created_by.username|default:"-" }}</td>

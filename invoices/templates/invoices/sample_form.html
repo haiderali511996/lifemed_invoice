@@ -6,6 +6,13 @@
   <a href="{% url 'sample_list' %}" class="btn btn-grey">All Sample Issues</a>
 </div>
 
+{% if me %}
+<p class="muted" style="margin:-6px 0 16px;font-size:12.5px">
+  Issuing as <strong>{{ me.full_name }}</strong>{% if me.territory %} ·
+  call points in <strong>{{ me.territory.name }}</strong>{% endif %}.
+</p>
+{% endif %}
+
 <div class="alert alert-warn">
   Samples come out of the same stock you sell from. Each line deducts the
   batch and is recorded in the stock ledger, so 2,500 packs stay 2,500 packs
@@ -17,10 +24,12 @@
 
   <div class="card" style="margin-bottom:16px">
     <div class="row">
+      {% if form.employee %}
       <div class="field">
         <label for="{{ form.employee.id_for_label }}">Issued By (MR)</label>
         {{ form.employee }} {{ form.employee.errors }}
       </div>
+      {% endif %}
       <div class="field">
         <label for="{{ form.call_point.id_for_label }}">Given To (Doctor / Hospital)</label>
         {{ form.call_point }} {{ form.call_point.errors }}

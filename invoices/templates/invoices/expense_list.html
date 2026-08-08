@@ -2,12 +2,31 @@
 {% block title %}LifeMed Pharma - Expenses{% endblock %}
 {% block content %}
 <div class="page-head">
-  <h1>Expenses</h1>
+  <h1>{% if only_mine %}My Expenses{% else %}Expenses{% endif %}</h1>
   <div style="display:flex;gap:9px">
+    {% if not is_field_staff %}
     <a href="{% url 'expense_report' %}" class="btn btn-grey">📈 Report</a>
+    {% endif %}
     <a href="{% url 'expense_new' %}" class="btn btn-green">＋ New Expense</a>
   </div>
 </div>
+
+{% if locked_to_me %}
+<p class="muted" style="margin:-6px 0 16px;font-size:12.5px">
+  Showing claims for <strong>{{ me.full_name }}</strong>. Approvals are the
+  office's to make, so a claim stays pending until they act on it.
+</p>
+{% elif me %}
+<div style="margin:-6px 0 16px">
+  {% if only_mine %}
+  <a href="{% url 'expense_list' %}" class="btn btn-sm btn-grey">Show whole team</a>
+  <span class="muted" style="font-size:12.5px;margin-left:8px">
+    Showing only {{ me.full_name }}'s claims.</span>
+  {% else %}
+  <a href="?mine=1" class="btn btn-sm btn-grey">Show only mine</a>
+  {% endif %}
+</div>
+{% endif %}
 
 <div class="stat-grid">
   <div class="card stat">
@@ -28,12 +47,16 @@
       <option value="{{ c.id }}" {% if selected.category == c.id|stringformat:"s" %}selected{% endif %}>{{ c.name }}</option>
       {% endfor %}
     </select>
+    {% if not only_mine %}
     <select name="employee">
       <option value="">All team members</option>
       {% for e in employees %}
       <option value="{{ e.id }}" {% if selected.employee == e.id|stringformat:"s" %}selected{% endif %}>{{ e.full_name }}</option>
       {% endfor %}
     </select>
+    {% elif not locked_to_me %}
+    <input type="hidden" name="mine" value="1" />
+    {% endif %}
     <select name="status">
       <option value="">All statuses</option>
       {% for value, label in statuses %}

@@ -6,6 +6,13 @@
   <a href="{% url 'daily_calls' %}" class="btn btn-grey">Back to My Day</a>
 </div>
 
+{% if me %}
+<p class="muted" style="margin:-6px 0 16px;font-size:12.5px">
+  Filing as <strong>{{ me.full_name }}</strong>{% if me.territory %} ·
+  call points in <strong>{{ me.territory.name }}</strong>{% endif %}.
+</p>
+{% endif %}
+
 {% if plan_visit %}
 <div class="alert alert-warn">
   Reporting against the scheduled call on
@@ -26,10 +33,12 @@
     <h3 style="margin-top:0">The Call</h3>
 
     <div class="row">
+      {% if form.employee %}
       <div class="field">
         <label for="{{ form.employee.id_for_label }}">Team Member (MR)</label>
         {{ form.employee }} {{ form.employee.errors }}
       </div>
+      {% endif %}
       <div class="field">
         <label for="{{ form.visit_date.id_for_label }}">Visit Date</label>
         {{ form.visit_date }} {{ form.visit_date.errors }}
@@ -59,7 +68,10 @@
       <div class="field">
         <label for="{{ form.new_call_point_territory.id_for_label }}">New call point territory</label>
         {{ form.new_call_point_territory }} {{ form.new_call_point_territory.errors }}
-        <span class="hint">Leave blank to use the MR's own territory.</span>
+        <span class="hint">
+          {% if me %}Leave blank to use your own territory.
+          {% else %}Leave blank to use the MR's own territory.{% endif %}
+        </span>
       </div>
     </div>
   </div>

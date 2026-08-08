@@ -38,10 +38,16 @@
   <div class="card">
     <h3 style="margin-top:0">Lines</h3>
 
+    <p class="note">
+      Expiry belongs to the batch, not the product — one product arrives in
+      many lots, each with its own date. Correcting it here changes the batch
+      everywhere, and the change is recorded in the stock ledger.
+    </p>
+
     <div style="overflow-x:auto">
       <table>
         <thead><tr>
-          <th>Product</th><th>Batch</th><th>Expiry</th>
+          <th>Product</th><th>Batch</th><th style="width:160px">Expiry</th>
           <th class="num">In Stock Now</th>
           <th style="width:110px">Quantity</th><th style="width:130px">Cost / unit</th>
         </tr></thead>
@@ -50,8 +56,11 @@
           <tr>
             <td><strong>{{ item.product.name }}</strong><br />
               <span style="font-size:12px;color:#8595a8">{{ item.product.code }}</span></td>
-            <td>{{ item.batch.batch_no }}</td>
-            <td>{{ item.batch.expiry_date|date:"d-m-Y" }}</td>
+            <td>{{ item.batch.batch_no }}<br />
+              <a href="{% url 'batch_edit' item.batch.id %}"
+                 style="font-size:11.5px">rename batch</a></td>
+            <td><input type="date" name="expiry_{{ item.pk }}"
+                       value="{{ item.batch.expiry_date|date:'Y-m-d' }}" /></td>
             <td class="num">{{ item.batch.quantity }}</td>
             <td><input type="number" name="qty_{{ item.pk }}" min="1" value="{{ item.quantity }}" /></td>
             <td><input type="number" step="0.01" min="0" name="cost_{{ item.pk }}"
@@ -84,5 +93,6 @@
   .row { display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0 14px; }
   td input { width:100%;padding:6px 8px;border:1px solid #dbe2ea;border-radius:5px;font-size:13px; }
   .errorlist { color:#dc3545;font-size:12px;margin:5px 0 0;padding-left:16px; }
+  .note { font-size:12.5px;color:#8595a8;margin:0 0 14px; }
 </style>
 {% endblock %}

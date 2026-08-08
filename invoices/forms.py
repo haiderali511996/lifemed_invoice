@@ -3,6 +3,7 @@ from decimal import Decimal
 from django import forms
 
 from .models import (
+    Batch,
     CallPoint,
     CallReport,
     Customer,
@@ -368,6 +369,35 @@ class PurchaseForm(forms.ModelForm):
         self.fields["note"].required = False
 
 
+class BatchForm(forms.ModelForm):
+    """Correct a batch's identity: its number and its expiry.
+
+    Quantity is deliberately absent - it moves through the stock ledger via
+    the adjustment screen, never by being typed over here.
+    """
+
+    class Meta:
+        model = Batch
+        fields = ["batch_no", "expiry_date"]
+        widgets = {"expiry_date": forms.DateInput(attrs={"type": "date"})}
+
+    def clean_batch_no(self):
+        batch_no = self.cleaned_data["batch_no"].strip()
+
+        clash = Batch.objects.filter(
+            product=self.instance.product, batch_no=batch_no
+        ).exclude(pk=self.instance.pk)
+
+        if clash.exists():
+            raise forms.ValidationError(
+                f"{self.instance.product.name} already has a batch "
+                f"“{batch_no}”. Two batches of one product cannot share a "
+                f"number."
+            )
+
+        return batch_no
+
+
 class StockAdjustmentForm(forms.Form):
     """Correct a batch to a counted quantity."""
 
@@ -444,16 +474,39 @@ class SampleIssueForm(forms.ModelForm):
             "note": forms.Textarea(attrs={"rows": 2}),
         }
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, employee=None, **kwargs):
+        """`employee` is the MR issuing these samples, for their own login."""
         super().__init__(*args, **kwargs)
 
+        self.employee = employee
+
         self.fields["employee"].queryset = Employee.objects.filter(is_active=True)
-        self.fields["call_point"].queryset = CallPoint.objects.filter(
+
+        call_points = CallPoint.objects.filter(
             is_active=True
         ).select_related("territory")
+
+        if employee is not None:
+            del self.fields["employee"]
+
+            if employee.territory_id is not None:
+                call_points = call_points.filter(territory=employee.territory)
+
+        self.fields["call_point"].queryset = call_points
         self.fields["call_point"].required = False
         self.fields["call_point"].empty_label = "— Not recorded —"
         self.fields["note"].required = False
+
+    def save(self, commit=True):
+        issue_record = super().save(commit=False)
+
+        if self.employee is not None:
+            issue_record.employee = self.employee
+
+        if commit:
+            issue_record.save()
+
+        return issue_record
 
 
 class PayrollRunForm(forms.ModelForm):
@@ -527,13 +580,42 @@ class CallReportForm(forms.ModelForm):
             "products": forms.SelectMultiple(attrs={"size": 6}),
         }
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, employee=None, **kwargs):
+        """`employee` is the MR filing this report, when the login is theirs.
+
+        Given one, the form stops asking who is reporting - they are - and
+        narrows the doctor list to the patch they actually work.
+        """
         super().__init__(*args, **kwargs)
 
+        self.employee = employee
+
+        # Set by clean() when a new call point is to be created, acted on by
+        # save() so nothing is written before the whole form is known good.
+        self.pending_call_point = None
+
         self.fields["employee"].queryset = Employee.objects.filter(is_active=True)
-        self.fields["call_point"].queryset = CallPoint.objects.filter(
+
+        call_points = CallPoint.objects.filter(
             is_active=True
         ).select_related("territory")
+
+        if employee is not None:
+            # Nobody files a visit under someone else's name from their own
+            # login, so the field goes rather than being shown and ignored.
+            del self.fields["employee"]
+
+            if employee.territory_id is not None:
+                call_points = call_points.filter(territory=employee.territory)
+
+                self.fields["new_call_point_territory"].queryset = (
+                    Territory.objects.filter(pk=employee.territory_id)
+                )
+                self.fields["new_call_point_territory"].initial = (
+                    employee.territory_id
+                )
+
+        self.fields["call_point"].queryset = call_points
         self.fields["call_point"].required = False
         self.fields["call_point"].empty_label = "-- choose a call point --"
 
@@ -559,7 +641,7 @@ class CallReportForm(forms.ModelForm):
             territory = cleaned.get("new_call_point_territory")
 
             if territory is None:
-                employee = cleaned.get("employee")
+                employee = self.employee or cleaned.get("employee")
                 territory = employee.territory if employee else None
 
             if territory is None:
@@ -570,21 +652,37 @@ class CallReportForm(forms.ModelForm):
 
                 return cleaned
 
-            # get_or_create keeps a repeated name in one territory as one record.
-            cleaned["call_point"] = CallPoint.objects.get_or_create(
-                name=new_name,
-                territory=territory,
-                defaults={
-                    "kind": cleaned.get("new_call_point_kind") or "doctor",
-                    "is_active": True,
-                },
-            )[0]
+            # Only resolved here, not created. A form that fails validation
+            # elsewhere must not leave a stray call point behind, so the write
+            # waits for save().
+            self.pending_call_point = {
+                "name": new_name,
+                "territory": territory,
+                "kind": cleaned.get("new_call_point_kind") or "doctor",
+            }
 
         return cleaned
 
     def save(self, commit=True):
         report = super().save(commit=False)
-        report.call_point = self.cleaned_data["call_point"]
+
+        call_point = self.cleaned_data.get("call_point")
+
+        if call_point is None and self.pending_call_point is not None:
+            # get_or_create keeps a repeated name in one territory as one record.
+            call_point = CallPoint.objects.get_or_create(
+                name=self.pending_call_point["name"],
+                territory=self.pending_call_point["territory"],
+                defaults={
+                    "kind": self.pending_call_point["kind"],
+                    "is_active": True,
+                },
+            )[0]
+
+        report.call_point = call_point
+
+        if self.employee is not None:
+            report.employee = self.employee
 
         if commit:
             report.save()
