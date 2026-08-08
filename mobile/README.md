@@ -2,11 +2,13 @@
 
 The field app: an MR's day, their doctors, their targets and their calls.
 
-**This has not been compiled.** There is no Flutter SDK on the machine it was
-written on, so every Dart file here is unverified — expect to fix a handful of
-compile errors on the first `flutter run`. The Django API it talks to *is*
-tested (35 tests covering auth, scoping, idempotency and every endpoint), so
-when something does not work, the server is the half that has been checked.
+Compiled clean against **Flutter 3.35.4** — `flutter analyze` reports no
+issues and `flutter build bundle --release` succeeds. It has not been run on a
+real device or driven through a screen, so expect layout and behaviour to need
+adjusting; what is verified is that it builds.
+
+The Django API it talks to is covered by 35 tests — auth, territory scoping,
+idempotent writes and every endpoint.
 
 ## Building it
 
