@@ -20,7 +20,8 @@
       <thead>
         <tr>
           <th>Code</th><th>Name</th><th>Designation</th><th>Territory</th>
-          <th>Reports To</th><th>Contact</th><th>Login</th><th></th>
+          <th>Reports To</th><th>Contact</th><th class="num">Commission</th>
+          <th>Login</th><th></th>
         </tr>
       </thead>
       <tbody>
@@ -35,14 +36,23 @@
           <td>{{ e.territory.name|default:"—" }}</td>
           <td>{{ e.reports_to.full_name|default:"—" }}</td>
           <td>{{ e.phone|default:"—" }}</td>
+          <td class="num">
+            {% if e.commission_percent %}{{ e.commission_percent|floatformat:"-2" }}%
+            {% else %}<span class="muted">salary only</span>{% endif %}
+          </td>
           <td>
             {% if e.user %}{{ e.user.username }}
             {% else %}<span class="muted">none</span>{% endif %}
           </td>
-          <td><a href="{% url 'employee_edit' e.id %}" class="btn btn-sm">Edit</a></td>
+          <td style="white-space:nowrap">
+            <a href="{% url 'employee_edit' e.id %}" class="btn btn-sm">Edit</a>
+            <a href="{% url 'employee_login' e.id %}" class="btn btn-sm btn-grey">
+              {% if e.user %}Reset Login{% else %}Give Login{% endif %}
+            </a>
+          </td>
         </tr>
         {% empty %}
-        <tr><td colspan="8" style="text-align:center;padding:26px">
+        <tr><td colspan="9" style="text-align:center;padding:26px">
           {% if query %}No staff match "{{ query }}".{% else %}
           No employees yet. Add your medical representatives and managers here.
           {% endif %}

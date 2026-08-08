@@ -1,0 +1,87 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Sales Commission{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>💹 Sales Commission</h1>
+  <div style="display:flex;gap:9px" class="no-print">
+    <a href="{% url 'payroll_list' %}" class="btn btn-grey">💵 Payroll</a>
+    <button onclick="window.print()" class="btn btn-grey">Print</button>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom:18px">
+  <form method="GET" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <input type="month" name="month" value="{{ month }}"
+           style="padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
+    <button type="submit" class="btn">Show</button>
+    <span style="margin-left:auto;font-size:14px">
+      {{ start|date:"d M" }} – {{ end|date:"d M Y" }} ·
+      Net sales <strong>{{ total_sales|floatformat:2 }}</strong> ·
+      Commission <strong>{{ total_commission|floatformat:2 }}</strong>
+    </span>
+  </form>
+</div>
+
+{% if unattributed %}
+<div class="alert alert-warn">
+  <strong>{{ unattributed }}</strong> invoice(s) worth
+  <strong>{{ unattributed_value|floatformat:2 }}</strong> are not credited to
+  anyone this month, so they earn no commission. Set <em>Sale Credited To</em>
+  when raising an invoice, or give each territory exactly one MR so it fills in
+  by itself.
+</div>
+{% endif %}
+
+<div class="card">
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Team Member</th><th>Territory</th><th class="num">Invoices</th>
+        <th class="num">Net Sales</th><th class="num">Rate</th>
+        <th class="num">Commission</th>
+      </tr></thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td><strong>{{ row.employee.full_name }}</strong>
+            <span class="muted">{{ row.employee.employee_code }}</span></td>
+          <td>{{ row.employee.territory.name|default:"—" }}</td>
+          <td class="num">{{ row.invoices }}</td>
+          <td class="num">{{ row.sales|floatformat:2 }}</td>
+          <td class="num">
+            {% if row.rate %}{{ row.rate|floatformat:"-2" }}%
+            {% else %}<span class="muted">salary only</span>{% endif %}
+          </td>
+          <td class="num"><strong>{{ row.commission|floatformat:2 }}</strong></td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6" style="text-align:center;padding:26px">
+          No sales credited to anyone this month.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+      {% if rows %}
+      <tfoot><tr>
+        <th colspan="3" style="text-align:right">Total</th>
+        <th class="num">{{ total_sales|floatformat:2 }}</th>
+        <th></th>
+        <th class="num">{{ total_commission|floatformat:2 }}</th>
+      </tr></tfoot>
+      {% endif %}
+    </table>
+  </div>
+</div>
+
+<p class="muted" style="margin-top:14px;font-size:12.5px">
+  Net sales are what was invoiced after every line discount, less goods
+  returned in the same month. Running payroll for a month copies these figures
+  onto each payslip, where they can still be adjusted before it is finalised.
+</p>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  td .muted { display:block;font-size:11px; }
+  tfoot th { padding-top:10px;border-top:2px solid #dbe2ea;font-size:13px; }
+</style>
+{% endblock %}

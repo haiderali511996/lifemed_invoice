@@ -62,6 +62,7 @@
           <th class="num">Debit</th>
           <th class="num">Credit</th>
           <th class="num">Balance</th>
+          <th class="no-print"></th>
         </tr>
       </thead>
       <tbody>
@@ -71,6 +72,8 @@
           <td>
             {% if entry.kind == "invoice" %}
             <span class="pill pill-due">Invoice</span>
+            {% elif entry.kind == "return" %}
+            <span class="pill pill-overdue">Return</span>
             {% else %}
             <span class="pill pill-paid">Payment</span>
             {% endif %}
@@ -84,10 +87,21 @@
             {% if entry.credit %}{{ entry.credit|floatformat:2 }}{% endif %}
           </td>
           <td class="num"><strong>{{ entry.balance|floatformat:2 }}</strong></td>
+          <td class="no-print">
+            {% if entry.kind == "invoice" %}
+            <a href="{% url 'invoice_reprint' entry.object.id %}" class="btn btn-sm btn-grey"
+               title="Download this invoice again, exactly as it was issued">
+              Reprint
+            </a>
+            <a href="{% url 'return_create' entry.object.id %}" class="btn btn-sm btn-grey">
+              Return
+            </a>
+            {% endif %}
+          </td>
         </tr>
         {% empty %}
         <tr>
-          <td colspan="7" style="text-align: center; padding: 26px">
+          <td colspan="8" style="text-align: center; padding: 26px">
             No invoices or payments yet for this customer.
           </td>
         </tr>
@@ -98,6 +112,7 @@
         <tr>
           <th colspan="6" style="text-align: right">Closing Balance</th>
           <th class="num" style="font-size: 15px">{{ balance|floatformat:2 }}</th>
+          <th class="no-print"></th>
         </tr>
       </tfoot>
       {% endif %}

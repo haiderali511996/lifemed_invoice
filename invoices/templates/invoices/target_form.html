@@ -1,0 +1,87 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Set a Target{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>🎯 {% if target %}Edit Target{% else %}Set a Target{% endif %}</h1>
+  <a href="{% url 'target_list' %}" class="btn btn-grey">All Targets</a>
+</div>
+
+<form method="POST">
+  {% csrf_token %}
+
+  <div class="card" style="margin-bottom:16px;max-width:760px">
+    <div class="row">
+      <div class="field">
+        <label for="{{ form.employee.id_for_label }}">Team Member</label>
+        {{ form.employee }} {{ form.employee.errors }}
+      </div>
+      <div class="field">
+        <label for="{{ form.month.id_for_label }}">Month</label>
+        {{ form.month }} {{ form.month.errors }}
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="{{ form.sales_value.id_for_label }}">Sales Value</label>
+        {{ form.sales_value }} {{ form.sales_value.errors }}
+        <span class="hint">Net of discounts, less returns — the same figure
+          commission is paid on.</span>
+      </div>
+      <div class="field">
+        <label for="{{ form.call_count.id_for_label }}">Calls</label>
+        {{ form.call_count }} {{ form.call_count.errors }}
+      </div>
+      <div class="field">
+        <label for="{{ form.doctor_count.id_for_label }}">Distinct Doctors</label>
+        {{ form.doctor_count }} {{ form.doctor_count.errors }}
+        <span class="hint">Stops a number being hit by visiting the same three
+          people all month.</span>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="{{ form.note.id_for_label }}">Note</label>
+      {{ form.note }} {{ form.note.errors }}
+    </div>
+  </div>
+
+  <div class="card" style="max-width:760px">
+    <h3 style="margin-top:0">Product Targets</h3>
+    <p class="hint" style="margin:0 0 14px">
+      Optional, in units. Leave a product at 0 to leave it out — a rupee total
+      says nothing about which brand is lagging.
+    </p>
+
+    <div class="products">
+      {% for row in product_rows %}
+      <div class="field">
+        <label for="units_{{ row.product.id }}">{{ row.product.name }}</label>
+        <input type="number" min="0" id="units_{{ row.product.id }}"
+               name="units_{{ row.product.id }}" value="{{ row.units }}">
+      </div>
+      {% empty %}
+      <p class="muted" style="font-size:13px">No active products.</p>
+      {% endfor %}
+    </div>
+
+    <div style="margin-top:18px">
+      <button type="submit" class="btn btn-green">Save Target</button>
+      <a href="{% url 'target_list' %}" class="btn btn-grey">Cancel</a>
+    </div>
+  </div>
+</form>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .field { margin-bottom:14px; }
+  .field label { display:block;margin-bottom:5px;font-size:13px;font-weight:600;color:#55657a; }
+  .field input, .field select, .field textarea {
+    width:100%;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;
+    font-size:14px;font-family:inherit; }
+  .row { display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0 14px; }
+  .products { display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:0 14px; }
+  .hint { display:block;font-size:11px;color:#8595a8;margin-top:4px; }
+</style>
+{% endblock %}

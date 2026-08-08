@@ -1,0 +1,107 @@
+{% extends "invoices/base.html" %}
+
+{% block title %}LifeMed Pharma - Stock{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Stock on Hand</h1>
+  <div style="display:flex;gap:9px" class="no-print">
+    <a href="{% url 'purchase_new' %}" class="btn btn-green">＋ Receive Stock</a>
+    <a href="{% url 'stock_movements' %}" class="btn btn-grey">Movements</a>
+    <button onclick="window.print()" class="btn btn-grey">Print</button>
+  </div>
+</div>
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Stock Value (cost)</span>
+    <span class="stat-value">{{ stock_value|floatformat:2 }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Expired</span>
+    <span class="stat-value" style="color:#a71d2a">{{ expired|length }}</span>
+    <span class="stat-sub">batch(es) — do not sell</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Expiring within {{ expiry_days }} days</span>
+    <span class="stat-value" style="color:#8a6100">{{ expiring|length }}</span>
+    <span class="stat-sub">batch(es)</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Below reorder level</span>
+    <span class="stat-value">{{ reorder|length }}</span>
+    <span class="stat-sub">product(s)</span>
+  </div>
+</div>
+
+{% if expired %}
+<div class="alert alert-error">
+  <strong>⚠️ {{ expired|length }} expired batch(es) still showing stock.</strong>
+  They are excluded from sale automatically, but should be written off:
+  {% for b in expired %}{{ b.product.name }} ({{ b.batch_no }}){% if not forloop.last %}, {% endif %}{% endfor %}
+</div>
+{% endif %}
+
+{% if reorder %}
+<div class="alert alert-warn">
+  <strong>Below reorder level:</strong>
+  {% for p in reorder %}{{ p.name }} ({{ p.sellable_stock }} left){% if not forloop.last %}, {% endif %}{% endfor %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h3 style="margin-top:0">Batches</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Product</th><th>Batch</th><th>Expiry</th>
+          <th class="num">Qty</th><th class="num">Cost</th>
+          <th class="num">Value</th><th>Status</th><th class="no-print"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for b in batches %}
+        <tr>
+          <td><strong>{{ b.product.name }}</strong><br />
+            <span style="font-size:12px;color:#8595a8">{{ b.product.code }}</span></td>
+          <td>{{ b.batch_no }}</td>
+          <td>{{ b.expiry_date|date:"d-m-Y" }}</td>
+          <td class="num"><strong>{{ b.quantity }}</strong></td>
+          <td class="num">{{ b.cost_price|floatformat:2 }}</td>
+          <td class="num">{{ b.cost_price|floatformat:2 }}</td>
+          <td>
+            {% if b.is_expired %}<span class="pill pill-overdue">expired</span>
+            {% elif b.expires_soon %}<span class="pill pill-due">{{ b.days_to_expiry }} days</span>
+            {% else %}<span class="pill pill-paid">good</span>{% endif %}
+          </td>
+          <td class="no-print" style="white-space:nowrap">
+            <a href="{% url 'batch_edit' b.id %}" class="btn btn-sm btn-grey"
+               title="Correct the batch number or expiry date">Edit</a>
+            <a href="{% url 'batch_adjust' b.id %}" class="btn btn-sm btn-grey"
+               title="Correct the quantity to a physical count">Adjust</a>
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="8" style="text-align:center;padding:26px">
+          No stock on hand. Receive a purchase to create batches.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .stat-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+    gap:15px;margin-bottom:20px; }
+  .stat { display:flex;flex-direction:column;gap:5px; }
+  .stat-label { font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8595a8; }
+  .stat-value { font-size:25px;font-weight:700;color:var(--brand-dark);
+    font-variant-numeric:tabular-nums; }
+  .stat-sub { font-size:12px;color:#98a6b8; }
+</style>
+{% endblock %}

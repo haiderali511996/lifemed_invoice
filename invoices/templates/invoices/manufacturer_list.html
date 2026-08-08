@@ -1,0 +1,58 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Manufacturers{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Manufacturers</h1>
+  <a href="{% url 'manufacturer_new' %}" class="btn">＋ New Manufacturer</a>
+</div>
+
+<div class="card">
+  <p style="color:#8595a8;font-size:13px;margin-top:0">
+    Who makes each product. Kept separate from suppliers — the same
+    manufacturer often reaches you through several suppliers, and recalls or
+    quality queries go back to the manufacturer.
+  </p>
+
+  <form method="GET" style="display:flex;gap:10px;margin-bottom:16px">
+    <input type="text" name="q" value="{{ query }}"
+      placeholder="Search name, code, contact or country..."
+      style="flex:1;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px" />
+    <button type="submit" class="btn">Search</button>
+    {% if query %}<a href="{% url 'manufacturer_list' %}" class="btn btn-grey">Clear</a>{% endif %}
+  </form>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Name</th><th>Code</th><th>Contact</th><th>Phone</th>
+        <th>Country</th><th>Drug Licence</th>
+        <th class="num">Products</th><th>Status</th><th></th>
+      </tr></thead>
+      <tbody>
+        {% for m in manufacturers %}
+        <tr>
+          <td><strong>{{ m.name }}</strong></td>
+          <td>{{ m.code|default:"-" }}</td>
+          <td>{{ m.contact_person|default:"-" }}</td>
+          <td>{{ m.phone|default:"-" }}</td>
+          <td>{{ m.country|default:"-" }}</td>
+          <td>{{ m.drug_licence|default:"-" }}</td>
+          <td class="num">{{ m.product_total }}</td>
+          <td>{% if m.is_active %}<span class="pill pill-paid">active</span>
+              {% else %}<span class="pill pill-overdue">inactive</span>{% endif %}</td>
+          <td style="white-space:nowrap">
+            <a href="{% url 'manufacturer_detail' m.id %}" class="btn btn-sm">View</a>
+            <a href="{% url 'manufacturer_edit' m.id %}" class="btn btn-sm btn-grey">Edit</a>
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="9" style="text-align:center;padding:26px">
+          {% if query %}No manufacturers match "{{ query }}".{% else %}
+          No manufacturers yet. Add one, then set it on each product.{% endif %}
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

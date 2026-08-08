@@ -1,0 +1,179 @@
+{% extends "invoices/base.html" %}
+
+{% block title %}LifeMed Pharma - Receive Stock{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Receive Stock</h1>
+  <a href="{% url 'purchase_list' %}" class="btn btn-grey">All Purchases</a>
+</div>
+
+<form method="POST">
+  {% csrf_token %}
+
+  <div class="card" style="margin-bottom:16px">
+    {% if form.non_field_errors %}
+    <div class="alert alert-error">
+      {% for e in form.non_field_errors %}{{ e }}{% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="row">
+      <div class="field">
+        <label for="{{ form.supplier.id_for_label }}">Supplier</label>
+        {{ form.supplier }} {{ form.supplier.errors }}
+      </div>
+      <div class="field">
+        <label for="{{ form.reference.id_for_label }}">Supplier Invoice #</label>
+        {{ form.reference }} {{ form.reference.errors }}
+      </div>
+      <div class="field">
+        <label for="{{ form.date.id_for_label }}">Date Received</label>
+        {{ form.date }} {{ form.date.errors }}
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="{{ form.note.id_for_label }}">Note</label>
+      {{ form.note }} {{ form.note.errors }}
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">Items Received</h3>
+    <p style="color:#8595a8;font-size:13px;margin-top:0">
+      Each line creates or tops up a batch. Batch number and expiry are
+      required — stock is tracked per batch so expiries can be enforced.
+    </p>
+
+    <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th style="min-width:200px">Product</th>
+            <th>Batch #</th>
+            <th>Expiry</th>
+            <th>Qty</th>
+            <th>Cost / unit</th>
+            <th>Line Total</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="lines"></tbody>
+      </table>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:16px;align-items:center">
+      <button type="button" class="btn btn-grey" onclick="addLine()">＋ Add Line</button>
+      <span style="margin-left:auto;font-size:15px">
+        Purchase Total: <strong id="grand" style="font-size:19px">0.00</strong>
+      </span>
+    </div>
+
+    <div style="margin-top:16px">
+      <button type="submit" class="btn btn-green">Receive Into Stock</button>
+    </div>
+  </div>
+</form>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .field { margin-bottom:14px; }
+  .field label { display:block;margin-bottom:5px;font-size:13px;font-weight:600;color:#55657a; }
+  .field input, .field select, .field textarea {
+    width:100%;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;
+    font-size:14px;font-family:inherit;
+  }
+  .row { display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0 14px; }
+  #lines input, #lines select {
+    width:100%;padding:6px 8px;border:1px solid #dbe2ea;border-radius:5px;
+    font-size:13px;font-family:inherit;
+  }
+  #lines td { padding:5px; }
+  .delete-btn { background:#dc3545;color:#fff;border:none;border-radius:5px;
+    padding:6px 10px;cursor:pointer; }
+  .errorlist { color:#dc3545;font-size:12px;font-weight:600;margin:5px 0 0;padding-left:16px; }
+</style>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+  const PRODUCTS = [
+    {% for p in products %}
+    { id: "{{ p.id }}", label: "{{ p.name|escapejs }} ({{ p.code|escapejs }})",
+      price: "{{ p.trade_price }}" },
+    {% endfor %}
+  ];
+
+  function addLine() {
+    const tr = document.createElement("tr");
+
+    const options = PRODUCTS.map(
+      (p) => '<option value="' + p.id + '" data-price="' + p.price + '"></option>'
+    ).join("");
+
+    tr.innerHTML = `
+      <td><select name="product[]" onchange="pickProduct(this)">
+            <option value="">-- select product --</option>${options}
+          </select></td>
+      <td><input name="batch_no[]" placeholder="Batch #"></td>
+      <td><input name="expiry_date[]" type="date"></td>
+      <td><input name="quantity[]" type="number" min="1" value="1" oninput="recalc(this)"></td>
+      <td><input name="cost_price[]" type="number" step="0.01" min="0" value="0" oninput="recalc(this)"></td>
+      <td><input name="line_total[]" readonly></td>
+      <td><button type="button" class="delete-btn" onclick="removeLine(this)">✕</button></td>
+    `;
+
+    document.getElementById("lines").appendChild(tr);
+
+    /* Option labels are assigned as text, never as markup, so a product name
+       containing HTML cannot inject anything. */
+    const select = tr.querySelector('[name="product[]"]');
+    PRODUCTS.forEach(function (p, i) {
+      select.options[i + 1].textContent = p.label;
+    });
+
+    recalc(tr.querySelector('[name="quantity[]"]'));
+  }
+
+  function pickProduct(select) {
+    const option = select.options[select.selectedIndex];
+    const row = select.closest("tr");
+    const cost = row.querySelector('[name="cost_price[]"]');
+
+    if (option.dataset.price && parseFloat(cost.value) === 0) {
+      cost.value = option.dataset.price;
+    }
+
+    recalc(cost);
+  }
+
+  function removeLine(button) {
+    button.closest("tr").remove();
+    updateGrand();
+  }
+
+  function recalc(el) {
+    const row = el.closest("tr");
+    const qty = parseFloat(row.querySelector('[name="quantity[]"]').value) || 0;
+    const cost = parseFloat(row.querySelector('[name="cost_price[]"]').value) || 0;
+
+    row.querySelector('[name="line_total[]"]').value = (qty * cost).toFixed(2);
+
+    updateGrand();
+  }
+
+  function updateGrand() {
+    let total = 0;
+
+    document.querySelectorAll('#lines [name="line_total[]"]').forEach(function (el) {
+      total += parseFloat(el.value) || 0;
+    });
+
+    document.getElementById("grand").textContent = total.toFixed(2);
+  }
+
+  window.addEventListener("load", function () { addLine(); });
+</script>
+{% endblock %}

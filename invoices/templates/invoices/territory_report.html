@@ -19,7 +19,7 @@
     <table>
       <thead>
         <tr>
-          <th>Territory</th><th>City</th><th>Region</th>
+          <th>Code</th><th>Territory</th><th>City</th><th>Zone</th>
           <th class="num">Customers</th><th class="num">Call Points</th>
           <th class="num">Staff</th><th class="num">Invoiced</th>
           <th class="num">Received</th><th class="num">Outstanding</th>
@@ -28,6 +28,7 @@
       <tbody>
         {% for row in rows %}
         <tr>
+          <td>{{ row.territory.code|default:"-" }}</td>
           <td><strong>{{ row.territory.name }}</strong></td>
           <td>{{ row.territory.city }}</td>
           <td>{{ row.territory.region|default:"—" }}</td>
@@ -43,7 +44,7 @@
           </td>
         </tr>
         {% empty %}
-        <tr><td colspan="9" style="text-align:center;padding:26px">
+        <tr><td colspan="10" style="text-align:center;padding:26px">
           No territories defined yet.
         </td></tr>
         {% endfor %}
@@ -51,7 +52,7 @@
       {% if rows %}
       <tfoot>
         <tr>
-          <th colspan="6" style="text-align:right">Total</th>
+          <th colspan="7" style="text-align:right">Total</th>
           <th class="num">{{ total_invoiced|floatformat:2 }}</th>
           <th></th>
           <th class="num">{{ total_balance|floatformat:2 }}</th>

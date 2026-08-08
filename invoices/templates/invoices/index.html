@@ -12,6 +12,41 @@
   {% csrf_token %}
 
   <div class="card" style="margin-bottom: 16px">
+    {% if distributors %}
+    <div class="field">
+      <label>Invoice From (Distributor)</label>
+      <select name="distributor" id="distributor">
+        {% for d in distributors %}
+        <option value="{{ d.id }}"
+          {% if default_distributor and d.id == default_distributor.id %}selected{% endif %}>
+          {{ d.name }} ({{ d.code }}-)
+        </option>
+        {% endfor %}
+      </select>
+      <p class="help-note">
+        The invoice prints on this distributor's form and takes its number
+        series.
+      </p>
+    </div>
+    {% endif %}
+
+    <div class="field">
+      <label>Sale Credited To (MR)</label>
+      <select name="sales_rep" id="salesRep">
+        <option value="">-- from the customer's territory --</option>
+        {% for e in sales_reps %}
+        <option value="{{ e.id }}">
+          {{ e.full_name }}{% if e.territory %} · {{ e.territory.name }}{% endif %}
+          {% if e.commission_percent %} · {{ e.commission_percent|floatformat:"-2" }}%{% endif %}
+        </option>
+        {% endfor %}
+      </select>
+      <p class="help-note">
+        Drives commission. Left blank, the sale goes to whoever covers the
+        customer's territory.
+      </p>
+    </div>
+
     <div class="field">
       <label>Select Existing Customer</label>
       <select id="customerDropdown" onchange="fillCustomer()">
@@ -84,6 +119,7 @@
       <table>
         <thead>
           <tr>
+            <th>From Stock</th>
             <th>Item</th>
             <th>Qty</th>
             <th>T.Price</th>
@@ -177,6 +213,8 @@
     font-size: 11px;
     color: #a08040;
   }
+
+  .help-note { font-size:12px;color:#8595a8;margin:5px 0 0; }
 
   .prefill-note {
     min-height: 17px;
@@ -290,11 +328,101 @@
     panel.style.display = "flex";
   }
 
+  /* ---------------- STOCK PICKER ---------------- */
+  const PRODUCTS = [
+    {% for p in products %}
+    { id: "{{ p.id }}", label: "{{ p.name|escapejs }}" },
+    {% endfor %}
+  ];
+
+  const BATCHES_URL = "{% url 'product_batches' 0 %}";
+
+  function fillProductOptions(select) {
+    if (!select) return;
+
+    PRODUCTS.forEach(function (p) {
+      const option = document.createElement("option");
+      option.value = p.id;
+      /* Assigned as text so a product name cannot inject markup */
+      option.textContent = p.label;
+      select.appendChild(option);
+    });
+  }
+
+  function pickProduct(select) {
+    const row = select.closest("tr");
+    const batchSelect = row.querySelector('[name="stock_batch[]"]');
+
+    batchSelect.innerHTML = "";
+    batchSelect.style.display = "none";
+
+    if (!select.value) return;
+
+    fetch(BATCHES_URL.replace("/0/", "/" + select.value + "/"))
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        row.querySelector('[name="item_name[]"]').value = data.product;
+        row.querySelector('[name="price[]"]').value = data.trade_price;
+
+        if (!data.batches.length) {
+          batchSelect.style.display = "none";
+          row.querySelector('[name="batch[]"]').value = "";
+          setRowNote(row, "no stock");
+          return;
+        }
+
+        const blank = document.createElement("option");
+        blank.value = "";
+        blank.textContent = "-- pick batch --";
+        batchSelect.appendChild(blank);
+
+        data.batches.forEach(function (b) {
+          const option = document.createElement("option");
+          option.value = b.id;
+          option.textContent = b.batch_no + " · exp " + b.expiry + " · " + b.quantity + " left";
+          option.dataset.batchNo = b.batch_no;
+          option.dataset.expiry = b.expiry;
+          option.dataset.quantity = b.quantity;
+          batchSelect.appendChild(option);
+        });
+
+        batchSelect.style.display = "";
+        batchSelect.selectedIndex = 1;
+        pickBatch(batchSelect);
+
+        calculate(row.querySelector('[name="qty[]"]'));
+      })
+      .catch(function () { setRowNote(row, "could not load batches"); });
+  }
+
+  function pickBatch(select) {
+    const option = select.options[select.selectedIndex];
+    const row = select.closest("tr");
+
+    if (!option || !option.value) return;
+
+    row.querySelector('[name="batch[]"]').value = option.dataset.batchNo;
+    row.querySelector('[name="expiry[]"]').value = option.dataset.expiry;
+
+    setRowNote(row, option.dataset.quantity + " in stock");
+  }
+
+  function setRowNote(row, text) {
+    row.querySelector('[name="qty[]"]').title = text;
+  }
+
   /* ---------------- ITEMS ---------------- */
   function addRow(item) {
     const tr = document.createElement("tr");
 
     tr.innerHTML = `
+      <td>
+        <select name="stock_product[]" onchange="pickProduct(this)">
+          <option value="">-- free text --</option>
+        </select>
+        <select name="stock_batch[]" class="batch-select" style="display:none"
+                onchange="pickBatch(this)"></select>
+      </td>
       <td><input name="item_name[]" required></td>
       <td><input name="qty[]" type="number" value="1" oninput="calculate(this)"></td>
       <td><input name="price[]" type="number" value="0" oninput="calculate(this)"></td>
@@ -306,6 +434,8 @@
     `;
 
     document.getElementById("items").appendChild(tr);
+
+    fillProductOptions(tr.querySelector('[name="stock_product[]"]'));
 
     if (item) {
       /* Assigned as values, never as markup, so item names can't inject HTML */

@@ -21,6 +21,7 @@ from django.views.static import serve
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('api/v1/', include('invoices.api.urls')),
     path('', include('invoices.urls')),
 
     # Uploaded profile pictures. Registered unconditionally because whitenoise

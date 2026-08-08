@@ -1,0 +1,54 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Call Coverage{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>📊 Call Coverage</h1>
+  <div style="display:flex;gap:9px">
+    <a href="{% url 'call_report_list' %}" class="btn btn-grey">🩺 All Visits</a>
+    <button onclick="window.print()" class="btn btn-grey no-print">Print</button>
+  </div>
+</div>
+
+<div class="card">
+  <form method="GET" class="no-print" style="display:flex;gap:10px;margin-bottom:16px;align-items:center">
+    <input type="month" name="month" value="{{ month }}"
+           style="padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
+    <button type="submit" class="btn">Filter</button>
+    {% if month %}<a href="{% url 'call_report_summary' %}" class="btn btn-grey">All Time</a>{% endif %}
+    <span style="margin-left:auto;font-size:15px">
+      Total calls: <strong>{{ total_calls }}</strong>
+    </span>
+  </form>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Team Member</th><th class="num">Calls</th><th class="num">Doctors Met</th>
+        <th class="num">Strike Rate</th><th class="num">Unplanned</th>
+        <th class="num">Call Points</th><th class="num">Sample Units</th>
+      </tr></thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td><strong>{{ row.name }}</strong></td>
+          <td class="num">{{ row.calls }}</td>
+          <td class="num">{{ row.met }}</td>
+          <td class="num">
+            <span class="pill {% if row.met_percent >= 80 %}pill-paid
+              {% elif row.met_percent >= 50 %}pill-due{% else %}pill-overdue{% endif %}">
+              {{ row.met_percent }}%</span>
+          </td>
+          <td class="num">{{ row.unplanned }}</td>
+          <td class="num">{{ row.doctors }}</td>
+          <td class="num">{{ row.samples }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" style="text-align:center;padding:26px">
+          No visits recorded for this period.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

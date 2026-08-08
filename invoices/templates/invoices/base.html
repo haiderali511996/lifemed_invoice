@@ -468,6 +468,38 @@
       </div>
 
       <nav class="nav">
+        {% if is_field_staff %}
+        <div class="nav-section">My Work</div>
+        <a href="{% url 'my_dashboard' %}" class="{% if active == 'my_dashboard' %}active{% endif %}">
+          🏠 <span>My Home</span>
+        </a>
+        <a href="{% url 'daily_calls' %}" class="{% if active == 'daily' %}active{% endif %}">
+          📅 <span>My Day</span>
+        </a>
+        <a href="{% url 'my_plan' %}" class="{% if active == 'my_plan' %}active{% endif %}">
+          🗓️ <span>My Schedule</span>
+        </a>
+        <a href="{% url 'call_point_list' %}" class="{% if active == 'call_points' %}active{% endif %}">
+          📍 <span>My Call Points</span>
+        </a>
+        <a href="{% url 'call_report_list' %}" class="{% if active == 'calls' %}active{% endif %}">
+          🩺 <span>My Visits</span>
+        </a>
+        <a href="{% url 'sample_list' %}" class="{% if active == 'samples' %}active{% endif %}">
+          🧪 <span>My Samples</span>
+        </a>
+
+        <div class="nav-section">My Money</div>
+        <a href="{% url 'my_sales' %}" class="{% if active == 'my_sales' %}active{% endif %}">
+          📈 <span>My Sales</span>
+        </a>
+        <a href="{% url 'expense_list' %}" class="{% if active == 'expenses' %}active{% endif %}">
+          🧾 <span>My Expenses</span>
+        </a>
+        <a href="{% url 'my_payslips' %}" class="{% if active == 'my_payslips' %}active{% endif %}">
+          💵 <span>My Payslips</span>
+        </a>
+        {% else %}
         <div class="nav-section">Overview</div>
         <a href="{% url 'dashboard' %}" class="{% if active == 'dashboard' %}active{% endif %}">
           📊 <span>Dashboard</span>
@@ -479,6 +511,9 @@
           🧾 <span>New Invoice</span>
         </a>
         {% endif %}
+        <a href="{% url 'invoice_list' %}" class="{% if active == 'invoices' %}active{% endif %}">
+          📄 <span>All Invoices</span>
+        </a>
         <a href="{% url 'customer_list' %}" class="{% if active == 'customers' %}active{% endif %}">
           👥 <span>Customers</span>
         </a>
@@ -491,8 +526,40 @@
         <a href="{% url 'payment_list' %}" class="{% if active == 'payments' %}active{% endif %}">
           💰 <span>Payments</span>
         </a>
+        <a href="{% url 'return_list' %}" class="{% if active == 'returns' %}active{% endif %}">
+          ↩️ <span>Sales Returns</span>
+        </a>
+
+        <div class="nav-section">Purchasing &amp; Stock</div>
+        <a href="{% url 'stock_report' %}" class="{% if active == 'stock' %}active{% endif %}">
+          📦 <span>Stock on Hand</span>
+        </a>
+        <a href="{% url 'stock_ledger' %}" class="{% if active == 'stock_ledger' %}active{% endif %}">
+          📑 <span>Stock Ledger</span>
+        </a>
+        <a href="{% url 'purchase_list' %}" class="{% if active == 'purchases' %}active{% endif %}">
+          🚚 <span>Purchases</span>
+        </a>
+        <a href="{% url 'product_list' %}" class="{% if active == 'products' %}active{% endif %}">
+          💊 <span>Products</span>
+        </a>
+        <a href="{% url 'manufacturer_list' %}" class="{% if active == 'manufacturers' %}active{% endif %}">
+          🏭 <span>Manufacturers</span>
+        </a>
+        <a href="{% url 'supplier_list' %}" class="{% if active == 'suppliers' %}active{% endif %}">
+          🤝 <span>Suppliers</span>
+        </a>
 
         <div class="nav-section">Field Force</div>
+        <a href="{% url 'daily_calls' %}" class="{% if active == 'daily' %}active{% endif %}">
+          📅 <span>My Day</span>
+        </a>
+        <a href="{% url 'call_report_list' %}" class="{% if active == 'calls' %}active{% endif %}">
+          🩺 <span>Doctor Visits</span>
+        </a>
+        <a href="{% url 'sample_list' %}" class="{% if active == 'samples' %}active{% endif %}">
+          🧪 <span>Sampling</span>
+        </a>
         <a href="{% url 'team_list' %}" class="{% if active == 'team' %}active{% endif %}">
           🧑‍💼 <span>Team</span>
         </a>
@@ -502,17 +569,49 @@
         <a href="{% url 'call_point_list' %}" class="{% if active == 'call_points' %}active{% endif %}">
           🏥 <span>Call Points</span>
         </a>
+        <a href="{% url 'doctor_list' %}" class="{% if active == 'doctors' %}active{% endif %}">
+          👨‍⚕️ <span>Doctors</span>
+        </a>
         <a href="{% url 'territory_list' %}" class="{% if active == 'territories' %}active{% endif %}">
           🗺️ <span>Territories</span>
         </a>
 
+        <div class="nav-section">Money Out</div>
+        <a href="{% url 'expense_list' %}" class="{% if active == 'expenses' %}active{% endif %}">
+          🧾 <span>Expenses</span>
+        </a>
+        <a href="{% url 'payroll_list' %}" class="{% if active == 'payroll' %}active{% endif %}">
+          💵 <span>Payroll</span>
+        </a>
+
         <div class="nav-section">Reports</div>
+        <a href="{% url 'expense_report' %}" class="{% if active == 'expense_report' %}active{% endif %}">
+          📈 <span>Expense Report</span>
+        </a>
+        <a href="{% url 'sample_report' %}" class="{% if active == 'sample_report' %}active{% endif %}">
+          🔬 <span>Sample Report</span>
+        </a>
+        <a href="{% url 'call_report_summary' %}" class="{% if active == 'call_summary' %}active{% endif %}">
+          📊 <span>Call Coverage</span>
+        </a>
+        <a href="{% url 'commission_report' %}" class="{% if active == 'commission_report' %}active{% endif %}">
+          💹 <span>Sales Commission</span>
+        </a>
         <a href="{% url 'territory_report' %}" class="{% if active == 'territory_report' %}active{% endif %}">
           📍 <span>Location-wise</span>
         </a>
         <a href="{% url 'invoice_logs' %}" class="{% if active == 'logs' %}active{% endif %}">
           📋 <span>Activity Log</span>
         </a>
+
+        <div class="nav-section">Setup</div>
+        <a href="{% url 'distributor_list' %}" class="{% if active == 'distributors' %}active{% endif %}">
+          🏢 <span>Distributors</span>
+        </a>
+        <a href="{% url 'expense_category_list' %}" class="{% if active == 'expense_categories' %}active{% endif %}">
+          🗂️ <span>Expense Categories</span>
+        </a>
+        {% endif %}
       </nav>
     </aside>
 
@@ -522,6 +621,9 @@
           ☰
         </button>
 
+        {% if is_field_staff %}
+        <div class="search-form"></div>
+        {% else %}
         <form class="search-form" method="GET" action="{% url 'search' %}">
           <span class="icon">🔍</span>
           <input
@@ -532,6 +634,7 @@
             aria-label="Search"
           />
         </form>
+        {% endif %}
 
         <div class="user-menu">
           <button class="user-button" onclick="toggleDropdown(event)">

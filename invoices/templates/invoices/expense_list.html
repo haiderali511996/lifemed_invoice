@@ -1,0 +1,132 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Expenses{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>{% if only_mine %}My Expenses{% else %}Expenses{% endif %}</h1>
+  <div style="display:flex;gap:9px">
+    {% if not is_field_staff %}
+    <a href="{% url 'expense_report' %}" class="btn btn-grey">📈 Report</a>
+    {% endif %}
+    <a href="{% url 'expense_new' %}" class="btn btn-green">＋ New Expense</a>
+  </div>
+</div>
+
+{% if locked_to_me %}
+<p class="muted" style="margin:-6px 0 16px;font-size:12.5px">
+  Showing claims for <strong>{{ me.full_name }}</strong>. Approvals are the
+  office's to make, so a claim stays pending until they act on it.
+</p>
+{% elif me %}
+<div style="margin:-6px 0 16px">
+  {% if only_mine %}
+  <a href="{% url 'expense_list' %}" class="btn btn-sm btn-grey">Show whole team</a>
+  <span class="muted" style="font-size:12.5px;margin-left:8px">
+    Showing only {{ me.full_name }}'s claims.</span>
+  {% else %}
+  <a href="?mine=1" class="btn btn-sm btn-grey">Show only mine</a>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Total (excl. rejected)</span>
+    <span class="stat-value">{{ total|floatformat:2 }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Awaiting approval</span>
+    <span class="stat-value" style="color:#8a6100">{{ pending_total|floatformat:2 }}</span>
+  </div>
+</div>
+
+<div class="card">
+  <form method="GET" class="filters">
+    <select name="category">
+      <option value="">All categories</option>
+      {% for c in categories %}
+      <option value="{{ c.id }}" {% if selected.category == c.id|stringformat:"s" %}selected{% endif %}>{{ c.name }}</option>
+      {% endfor %}
+    </select>
+    {% if not only_mine %}
+    <select name="employee">
+      <option value="">All team members</option>
+      {% for e in employees %}
+      <option value="{{ e.id }}" {% if selected.employee == e.id|stringformat:"s" %}selected{% endif %}>{{ e.full_name }}</option>
+      {% endfor %}
+    </select>
+    {% elif not locked_to_me %}
+    <input type="hidden" name="mine" value="1" />
+    {% endif %}
+    <select name="status">
+      <option value="">All statuses</option>
+      {% for value, label in statuses %}
+      <option value="{{ value }}" {% if selected.status == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <input type="month" name="month" value="{{ selected.month }}" />
+    <button type="submit" class="btn">Filter</button>
+    <a href="{% url 'expense_list' %}" class="btn btn-grey">Clear</a>
+  </form>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Date</th><th>Category</th><th>Team Member</th><th>Description</th>
+        <th>Reference</th><th class="num">Amount</th><th>Status</th><th></th>
+      </tr></thead>
+      <tbody>
+        {% for e in expenses %}
+        <tr>
+          <td>{{ e.date|date:"d-m-Y" }}</td>
+          <td><strong>{{ e.category.name }}</strong></td>
+          <td>{% if e.employee %}{{ e.employee.full_name }}
+              {% else %}<span class="muted">company</span>{% endif %}</td>
+          <td style="color:#55657a">{{ e.description|default:"—"|truncatechars:40 }}</td>
+          <td>{{ e.reference|default:"—" }}</td>
+          <td class="num"><strong>{{ e.amount|floatformat:2 }}</strong></td>
+          <td>
+            {% if e.status == "approved" %}<span class="pill pill-paid">approved</span>
+            {% elif e.status == "rejected" %}<span class="pill pill-overdue">rejected</span>
+            {% elif e.status == "paid" %}<span class="pill pill-paid">paid</span>
+            {% else %}<span class="pill pill-due">pending</span>{% endif %}
+          </td>
+          <td style="white-space:nowrap">
+            {% if e.status == "pending" %}
+            <form method="POST" action="{% url 'expense_status' e.id 'approve' %}" style="display:inline">
+              {% csrf_token %}<button class="btn btn-sm btn-green">Approve</button>
+            </form>
+            <form method="POST" action="{% url 'expense_status' e.id 'reject' %}" style="display:inline">
+              {% csrf_token %}<button class="btn btn-sm btn-danger">Reject</button>
+            </form>
+            {% elif e.status == "approved" %}
+            <form method="POST" action="{% url 'expense_status' e.id 'paid' %}" style="display:inline">
+              {% csrf_token %}<button class="btn btn-sm">Mark Paid</button>
+            </form>
+            {% endif %}
+            <a href="{% url 'expense_edit' e.id %}" class="btn btn-sm btn-grey">Edit</a>
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="8" style="text-align:center;padding:26px">
+          No expenses recorded yet.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .stat-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+    gap:15px;margin-bottom:20px; }
+  .stat { display:flex;flex-direction:column;gap:5px; }
+  .stat-label { font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8595a8; }
+  .stat-value { font-size:25px;font-weight:700;color:var(--brand-dark);
+    font-variant-numeric:tabular-nums; }
+  .filters { display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap; }
+  .filters select, .filters input {
+    padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px; }
+</style>
+{% endblock %}

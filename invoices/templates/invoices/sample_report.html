@@ -1,0 +1,58 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Sample Report{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>🔬 Sample Report</h1>
+  <span style="font-size:15px">Total units sampled: <strong>{{ total_units }}</strong></span>
+</div>
+
+<div class="report-grid">
+  <div class="card">
+    <h3 style="margin-top:0">By Team Member</h3>
+    <table>
+      <thead><tr><th>MR</th><th class="num">Units</th></tr></thead>
+      <tbody>
+        {% for name, units in by_employee %}
+        <tr><td>{{ name }}</td><td class="num"><strong>{{ units }}</strong></td></tr>
+        {% empty %}
+        <tr><td colspan="2" style="text-align:center;padding:20px">No samples yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">By Product</h3>
+    <table>
+      <thead><tr><th>Product</th><th class="num">Units</th></tr></thead>
+      <tbody>
+        {% for name, units in by_product %}
+        <tr><td>{{ name }}</td><td class="num"><strong>{{ units }}</strong></td></tr>
+        {% empty %}
+        <tr><td colspan="2" style="text-align:center;padding:20px">No samples yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">Top Doctors</h3>
+    <table>
+      <thead><tr><th>Call Point</th><th class="num">Units</th></tr></thead>
+      <tbody>
+        {% for name, units in by_doctor %}
+        <tr><td>{{ name }}</td><td class="num"><strong>{{ units }}</strong></td></tr>
+        {% empty %}
+        <tr><td colspan="2" style="text-align:center;padding:20px">No samples yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .report-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px; }
+</style>
+{% endblock %}

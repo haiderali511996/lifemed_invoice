@@ -1,0 +1,59 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Expense Report{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>📈 Expense Report</h1>
+  <button onclick="window.print()" class="btn btn-grey no-print">Print</button>
+</div>
+
+<div class="card" style="margin-bottom:18px">
+  <form method="GET" style="display:flex;gap:10px" class="no-print">
+    <input type="month" name="month" value="{{ month }}"
+      style="padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px" />
+    <button type="submit" class="btn">Filter</button>
+    {% if month %}<a href="{% url 'expense_report' %}" class="btn btn-grey">All time</a>{% endif %}
+    <span style="margin-left:auto;font-size:16px;align-self:center">
+      Total: <strong>{{ total|floatformat:2 }}</strong>
+    </span>
+  </form>
+  <p style="color:#8595a8;font-size:13px;margin:12px 0 0">
+    Rejected claims are excluded — they never left the bank.
+  </p>
+</div>
+
+<div class="report-grid">
+  <div class="card">
+    <h3 style="margin-top:0">By Category</h3>
+    <table>
+      <thead><tr><th>Category</th><th class="num">Amount</th></tr></thead>
+      <tbody>
+        {% for name, amount in by_category %}
+        <tr><td>{{ name }}</td><td class="num"><strong>{{ amount|floatformat:2 }}</strong></td></tr>
+        {% empty %}
+        <tr><td colspan="2" style="text-align:center;padding:20px">No spend recorded.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">By Team Member</h3>
+    <table>
+      <thead><tr><th>Who</th><th class="num">Amount</th></tr></thead>
+      <tbody>
+        {% for name, amount in by_employee %}
+        <tr><td>{{ name }}</td><td class="num"><strong>{{ amount|floatformat:2 }}</strong></td></tr>
+        {% empty %}
+        <tr><td colspan="2" style="text-align:center;padding:20px">No spend recorded.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .report-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px; }
+</style>
+{% endblock %}

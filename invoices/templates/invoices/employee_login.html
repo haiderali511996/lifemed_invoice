@@ -1,0 +1,69 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Login for {{ employee.full_name }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>🔑 Login for {{ employee.full_name }}</h1>
+  <a href="{% url 'team_list' %}" class="btn btn-grey">Back to Team</a>
+</div>
+
+<div class="card" style="max-width:620px">
+  {% if employee.user %}
+  <div class="alert alert-warn" style="margin-top:0">
+    {{ employee.full_name }} already signs in as
+    <strong>{{ employee.user.username }}</strong>. Setting a password here
+    replaces the old one — use it when someone has forgotten theirs.
+  </div>
+  {% else %}
+  <p style="font-size:14px;margin-top:0">
+    This creates a field login. {{ employee.full_name }} will see their own day,
+    schedule, call points, visits, samples, expense claims, sales and payslips —
+    and nothing else in the system.
+  </p>
+  {% endif %}
+
+  <form method="POST">
+    {% csrf_token %}
+
+    <div class="field">
+      <label for="username">Username</label>
+      {% if employee.user %}
+      <input type="text" value="{{ employee.user.username }}" disabled>
+      <p class="help">A username cannot be changed once the login exists.</p>
+      {% else %}
+      <input type="text" id="username" name="username" value="{{ suggested }}"
+             required autocomplete="off">
+      <p class="help">What they type to sign in. Short and memorable works best.</p>
+      {% endif %}
+    </div>
+
+    <div class="field">
+      <label for="password">Password</label>
+      <input type="text" id="password" name="password" required minlength="8"
+             autocomplete="off">
+      <p class="help">
+        At least 8 characters. Shown as plain text so you can read it out —
+        write it down before saving, because it cannot be recovered afterwards.
+      </p>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:22px">
+      <button type="submit" class="btn btn-green">
+        {% if employee.user %}Reset Password{% else %}Create Login{% endif %}
+      </button>
+      <a href="{% url 'team_list' %}" class="btn btn-grey">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .field { margin-bottom:15px; }
+  .field label { display:block;margin-bottom:5px;font-size:13px;
+    font-weight:600;color:#55657a; }
+  .field input { width:100%;padding:9px 12px;border:1px solid #dbe2ea;
+    border-radius:7px;font-size:14px;font-family:inherit; }
+  .field input:disabled { background:#f4f7fa;color:#8595a8; }
+  .help { font-size:12px;color:#8595a8;margin:5px 0 0; }
+</style>
+{% endblock %}

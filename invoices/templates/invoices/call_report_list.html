@@ -1,0 +1,101 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Doctor Visits{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>🩺 Doctor Visits</h1>
+  <div style="display:flex;gap:9px">
+    <a href="{% url 'call_report_summary' %}" class="btn btn-grey">📊 Call Coverage</a>
+    <a href="{% url 'daily_calls' %}" class="btn btn-grey">📅 My Day</a>
+    <a href="{% url 'call_report_new' %}" class="btn btn-green">＋ Log a Visit</a>
+  </div>
+</div>
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Calls</span>
+    <span class="stat-value">{{ reports|length }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Doctors Met</span>
+    <span class="stat-value">{{ met }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Unplanned</span>
+    <span class="stat-value">{{ unplanned }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Sample Units</span>
+    <span class="stat-value">{{ samples }}</span>
+  </div>
+</div>
+
+<div class="card">
+  <form method="GET" style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap">
+    <select name="employee" style="flex:1;min-width:180px;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
+      <option value="">All team members</option>
+      {% for e in employees %}
+      <option value="{{ e.id }}" {% if selected_employee == e.id|stringformat:"s" %}selected{% endif %}>{{ e.full_name }}</option>
+      {% endfor %}
+    </select>
+    <input type="month" name="month" value="{{ month }}"
+           style="padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
+    <button type="submit" class="btn">Filter</button>
+    {% if selected_employee or month %}
+    <a href="{% url 'call_report_list' %}" class="btn btn-grey">Clear</a>
+    {% endif %}
+  </form>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Date</th><th>MR</th><th>Call Point</th><th>Doctor</th>
+        <th>Outcome</th><th>Products Detailed</th>
+        <th class="num">Samples</th><th>Next Visit</th>
+      </tr></thead>
+      <tbody>
+        {% for r in reports %}
+        <tr>
+          <td>{{ r.visit_date|date:"d-m-Y" }}
+            {% if r.visit_time %}<span class="muted">{{ r.visit_time|time:"H:i" }}</span>{% endif %}</td>
+          <td>{{ r.employee.full_name }}</td>
+          <td>{{ r.call_point.name }}
+            {% if not r.was_planned %}<span class="pill">unplanned</span>{% endif %}</td>
+          <td>{{ r.doctor_name|default:"—" }}
+            {% if r.speciality %}<span class="muted">{{ r.speciality }}</span>{% endif %}</td>
+          <td>
+            {% if r.outcome == "met" %}<span class="pill pill-paid">met</span>
+            {% elif r.outcome == "rescheduled" %}<span class="pill pill-due">rescheduled</span>
+            {% else %}<span class="pill pill-overdue">not available</span>{% endif %}
+          </td>
+          <td style="font-size:13px;color:#55657a">
+            {% for p in r.products.all %}{{ p.name }}{% if not forloop.last %}, {% endif %}{% empty %}—{% endfor %}
+          </td>
+          <td class="num">
+            {% if r.samples_given %}
+            <strong>{{ r.samples_given }}</strong>
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+          <td>{{ r.next_visit_date|date:"d-m-Y"|default:"—" }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="8" style="text-align:center;padding:26px">
+          No visits recorded yet.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .stat-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+    gap:15px;margin-bottom:20px; }
+  .stat { display:flex;flex-direction:column;gap:5px; }
+  .stat-label { font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8595a8; }
+  .stat-value { font-size:25px;font-weight:700;color:var(--brand-dark);
+    font-variant-numeric:tabular-nums; }
+  td .muted { display:block;font-size:11px; }
+</style>
+{% endblock %}

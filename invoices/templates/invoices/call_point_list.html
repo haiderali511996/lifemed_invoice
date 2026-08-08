@@ -19,8 +19,8 @@
     <table>
       <thead>
         <tr>
-          <th>Name</th><th>Type</th><th>Speciality</th><th>Territory</th>
-          <th>Linked Customer</th><th>Phone</th><th></th>
+          <th>Name</th><th>Type</th><th>Territory</th><th>Address</th>
+          <th>Est. Volume</th><th>Linked Customer</th><th></th>
         </tr>
       </thead>
       <tbody>
@@ -28,13 +28,13 @@
         <tr>
           <td><strong>{{ cp.name }}</strong></td>
           <td>{{ cp.get_kind_display }}</td>
-          <td>{{ cp.speciality|default:"—" }}</td>
-          <td>{{ cp.territory.name }}</td>
+          <td>{{ cp.territory.code }} {{ cp.territory.name }}</td>
+          <td style="font-size:12px;color:#55657a">{{ cp.address|truncatechars:44 }}</td>
+          <td>{{ cp.estimated_volume|default:"—" }}</td>
           <td>
             {% if cp.customer %}{{ cp.customer.name }}
             {% else %}<span class="muted">—</span>{% endif %}
           </td>
-          <td>{{ cp.phone|default:"—" }}</td>
           <td><a href="{% url 'call_point_edit' cp.id %}" class="btn btn-sm">Edit</a></td>
         </tr>
         {% empty %}

@@ -5,3 +5,7 @@ __pycache__/
 *.pyc
 staticfiles/
 media/
+
+backups/
+.venv/
+venv/

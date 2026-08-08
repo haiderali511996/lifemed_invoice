@@ -1,0 +1,86 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - {{ manufacturer.name }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>{{ manufacturer.name }}</h1>
+  <div style="display:flex;gap:9px">
+    <a href="{% url 'manufacturer_edit' manufacturer.id %}" class="btn btn-grey">Edit</a>
+    <a href="{% url 'manufacturer_list' %}" class="btn btn-grey">All Manufacturers</a>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom:18px">
+  <div class="summary">
+    <div><span class="k">Code</span><span class="v">{{ manufacturer.code|default:"—" }}</span></div>
+    <div><span class="k">Contact</span><span class="v">
+      {{ manufacturer.contact_person|default:"—" }}
+      {% if manufacturer.phone %}<br>{{ manufacturer.phone }}{% endif %}
+      {% if manufacturer.email %}<br>{{ manufacturer.email }}{% endif %}
+    </span></div>
+    <div><span class="k">Address</span><span class="v">
+      {{ manufacturer.address|default:"—" }}
+      {% if manufacturer.country %}<br>{{ manufacturer.country }}{% endif %}
+    </span></div>
+    <div><span class="k">Drug Licence</span><span class="v">
+      {{ manufacturer.drug_licence|default:"—" }}
+      {% if manufacturer.ntn %}<br>NTN {{ manufacturer.ntn }}{% endif %}
+    </span></div>
+    <div><span class="k">Stock on Hand</span><span class="v total">{{ total_stock }}</span></div>
+  </div>
+
+  {% if manufacturer.website %}
+  <p style="margin:14px 0 0;font-size:13px">
+    <a href="{{ manufacturer.website }}" target="_blank" rel="noopener">
+      {{ manufacturer.website }}</a>
+  </p>
+  {% endif %}
+
+  {% if manufacturer.note %}
+  <p style="margin:12px 0 0;font-size:13px;color:#55657a">{{ manufacturer.note }}</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Products ({{ rows|length }})</h3>
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Code</th><th>Product</th><th>Generic</th><th>DRAP Reg.</th>
+        <th>Pack</th><th class="num">Trade Price</th>
+        <th class="num">On Hand</th><th class="num">Sellable</th><th></th>
+      </tr></thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td>{{ row.product.code }}</td>
+          <td><strong>{{ row.product.name }}</strong>
+            {% if row.needs_reorder %}<span class="pill pill-overdue">reorder</span>{% endif %}</td>
+          <td>{{ row.product.generic_name|default:"—" }}</td>
+          <td>{{ row.product.registration_no|default:"—" }}</td>
+          <td>{{ row.product.pack_size|default:"—" }}</td>
+          <td class="num">{{ row.product.trade_price|floatformat:2 }}</td>
+          <td class="num">{{ row.stock }}</td>
+          <td class="num"><strong>{{ row.sellable }}</strong></td>
+          <td><a href="{% url 'product_edit' row.product.id %}" class="btn btn-sm">Edit</a></td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="9" style="text-align:center;padding:26px">
+          No products assigned to this manufacturer yet. Set it on a product's
+          edit page.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .summary { display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:16px; }
+  .summary .k { display:block;font-size:11px;text-transform:uppercase;
+    letter-spacing:.5px;color:#8595a8;margin-bottom:4px; }
+  .summary .v { font-size:14px; }
+  .summary .total { font-size:22px;font-weight:700;color:var(--brand-dark); }
+</style>
+{% endblock %}

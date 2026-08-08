@@ -1,0 +1,81 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - {{ distributor.name }} Layout{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>{{ distributor.name }} — Template Layout</h1>
+  <div style="display:flex;gap:9px">
+    {% if distributor.template %}
+    <a href="{% url 'distributor_preview' distributor.id %}" class="btn" target="_blank">
+      Preview Sample Invoice
+    </a>
+    <a href="{% url 'distributor_detect' distributor.id %}" class="btn btn-grey">
+      Re-read Template
+    </a>
+    {% endif %}
+    <a href="{% url 'distributor_edit' distributor.id %}" class="btn btn-grey">Edit</a>
+  </div>
+</div>
+
+{% if not distributor.template %}
+<div class="alert alert-warn">
+  No template uploaded. Invoices for this distributor fall back to the default
+  form. Upload their blank invoice PDF on the edit page.
+</div>
+{% elif not summary %}
+<div class="alert alert-error">
+  The template could not be read. It may be a scanned image rather than a text
+  PDF — the coordinates are found by locating the printed labels, so the text
+  has to be real.
+</div>
+{% else %}
+
+<div class="alert alert-success">
+  Detected <strong>{{ summary.fields|length }}</strong> header field(s),
+  <strong>{{ summary.columns|length }}</strong> item column(s) and
+  <strong>{{ summary.totals|length }}</strong> total(s).
+  <strong>{{ summary.rows_per_page }}</strong> item row(s) fit on a page;
+  longer invoices continue onto further pages automatically.
+</div>
+
+{% if summary.missing %}
+<div class="alert alert-warn">
+  <strong>Not found:</strong> {{ summary.missing|join:", " }}. These will be
+  left blank. That is expected if the form has no such box — otherwise check
+  the label wording on the template.
+</div>
+{% endif %}
+
+<div class="card">
+  <h3 style="margin-top:0">What was found</h3>
+
+  <div class="detect-grid">
+    <div>
+      <h4>Header fields</h4>
+      <ul>{% for f in summary.fields %}<li>{{ f }}</li>{% endfor %}</ul>
+    </div>
+    <div>
+      <h4>Item columns</h4>
+      <ul>{% for c in summary.columns %}<li>{{ c }}</li>{% endfor %}</ul>
+    </div>
+    <div>
+      <h4>Totals</h4>
+      <ul>{% for t in summary.totals %}<li>{{ t }}</li>{% endfor %}</ul>
+    </div>
+  </div>
+
+  <p style="color:#8595a8;font-size:13px">
+    Always open the preview before invoicing on a new template — it prints
+    sample data in every detected position so you can confirm the mapping.
+  </p>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .detect-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:18px; }
+  .detect-grid h4 { margin:0 0 8px;font-size:12px;text-transform:uppercase;
+    letter-spacing:.5px;color:var(--brand); }
+  .detect-grid ul { margin:0;padding-left:18px;font-size:13px;line-height:1.7; }
+</style>
+{% endblock %}

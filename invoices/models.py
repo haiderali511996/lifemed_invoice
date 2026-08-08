@@ -1,6 +1,6 @@
 import os
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from django.db import models, transaction, IntegrityError
 from django.contrib.auth.models import User
@@ -11,6 +11,9 @@ from django.utils import timezone
 
 # An invoice still unpaid after this many days is flagged as overdue.
 OVERDUE_DAYS = 30
+
+# Batches expiring within this many days are flagged for action.
+EXPIRY_WARNING_DAYS = 90
 
 ZERO = Decimal("0.00")
 
@@ -60,9 +63,13 @@ class Customer(models.Model):
         return self.payments.aggregate(t=Sum("amount"))["t"] or ZERO
 
     @property
+    def total_returned(self):
+        return self.returns.aggregate(t=Sum("total"))["t"] or ZERO
+
+    @property
     def outstanding_balance(self):
-        """What the customer owes across every invoice, less everything paid."""
-        return self.total_invoiced - self.total_paid
+        """Invoiced, less what has been paid and what has been credited back."""
+        return self.total_invoiced - self.total_paid - self.total_returned
 
     def overdue_invoices(self):
         cutoff = timezone.now().date() - timedelta(days=OVERDUE_DAYS)
@@ -76,6 +83,22 @@ class Customer(models.Model):
 
 class Invoice(models.Model):
     customer = models.ForeignKey(Customer, on_delete=models.CASCADE)
+
+    # Which company's form this invoice is printed on. Its code drives the
+    # invoice number prefix, so each distributor has an independent series.
+    distributor = models.ForeignKey(
+        "Distributor", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="invoices",
+    )
+
+    # Who the sale is credited to. Drives commission, so it is stored on the
+    # invoice rather than inferred from the customer's territory later - a
+    # customer can change hands, but who earned a past sale cannot.
+    sales_rep = models.ForeignKey(
+        "Employee", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="invoices",
+        help_text="Team member credited with this sale.",
+    )
 
     # ✅ STRING FORMAT
     invoice_no = models.CharField(max_length=20, unique=True)
@@ -98,8 +121,20 @@ class Invoice(models.Model):
         return self.payments.aggregate(t=Sum("amount"))["t"] or ZERO
 
     @property
+    def amount_returned(self):
+        return self.returns.aggregate(t=Sum("total"))["t"] or ZERO
+
+    @property
     def balance(self):
-        return self.total - self.amount_paid
+        """What is still collectable: credited goods are no longer owed."""
+        return self.total - self.amount_paid - self.amount_returned
+
+    def returned_qty(self, item):
+        """How much of one invoice line has already come back."""
+        return (
+            SalesReturnItem.objects.filter(item=item)
+            .aggregate(t=Sum("qty"))["t"] or 0
+        )
 
     @property
     def is_paid(self):
@@ -114,12 +149,23 @@ class Invoice(models.Model):
         return not self.is_paid and self.days_outstanding >= OVERDUE_DAYS
 
     @classmethod
-    def next_invoice_no(cls):
-        """Highest existing number + 1, compared numerically rather than as text."""
+    def next_invoice_no(cls, distributor=None):
+        """Highest existing number + 1 for this distributor's series.
+
+        Compared numerically rather than as text, so HHC-9999 is followed by
+        HHC-10000 and not HHC-10000 sorting below it.
+        """
+        prefix = (distributor.code if distributor else INVOICE_PREFIX)
+
+        start = (
+            distributor.invoice_start_number
+            if distributor else INVOICE_START_NUMBER
+        )
+
         numbers = []
 
         for value in cls.objects.filter(
-            invoice_no__startswith=f"{INVOICE_PREFIX}-"
+            invoice_no__startswith=f"{prefix}-"
         ).values_list("invoice_no", flat=True):
 
             suffix = value.rsplit("-", 1)[-1]
@@ -127,9 +173,9 @@ class Invoice(models.Model):
             if suffix.isdigit():
                 numbers.append(int(suffix))
 
-        new_num = max(numbers) + 1 if numbers else INVOICE_START_NUMBER
+        new_num = max(numbers) + 1 if numbers else start
 
-        return f"{INVOICE_PREFIX}-{new_num:04d}"
+        return f"{prefix}-{new_num:04d}"
 
     def save(self, *args, **kwargs):
         if self.invoice_no:
@@ -141,7 +187,7 @@ class Invoice(models.Model):
 
         for attempt in range(INVOICE_NUMBER_ATTEMPTS):
 
-            self.invoice_no = self.next_invoice_no()
+            self.invoice_no = self.next_invoice_no(self.distributor)
 
             try:
                 with transaction.atomic():
@@ -162,6 +208,17 @@ class Item(models.Model):
     expiry = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     discount = models.DecimalField(max_digits=5, decimal_places=2)
+
+    # Set when the line was picked from stock. Free-text lines leave these
+    # null and move no stock, so ad-hoc items still work.
+    product = models.ForeignKey(
+        "Product", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="sold_items",
+    )
+    stock_batch = models.ForeignKey(
+        "Batch", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="sold_items",
+    )
 
 
 class Payment(models.Model):
@@ -212,10 +269,12 @@ class Payment(models.Model):
 class UserRolls(models.Model):
     ROLE_SUPER_ADMIN = 'super_admin'
     ROLE_MANAGER = 'manager'
+    ROLE_FIELD = 'field'
 
     ROLE_CHOICES = (
         (ROLE_SUPER_ADMIN, 'Super Admin'),
         (ROLE_MANAGER, 'Manager'),
+        (ROLE_FIELD, 'Field Staff (MR)'),
     )
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=ROLE_MANAGER)
@@ -255,6 +314,32 @@ def is_super_admin(user):
     return role is not None and role.role == UserRolls.ROLE_SUPER_ADMIN
 
 
+def is_field_staff(user):
+    """True for an MR login: their own work only, nothing company-wide.
+
+    Superusers are excluded even if a role row says otherwise, so an admin
+    can never be locked out of their own system by a mis-set role.
+    """
+    if not user.is_authenticated or user.is_superuser:
+        return False
+
+    role = getattr(user, 'userrolls', None)
+
+    return role is not None and role.role == UserRolls.ROLE_FIELD
+
+
+def field_employee(user):
+    """The Employee record behind an MR login, or None.
+
+    Everything an MR sees is filtered through this, so an MR login with no
+    team member attached sees nothing rather than everything.
+    """
+    if not is_field_staff(user):
+        return None
+
+    return getattr(user, 'employee', None)
+
+
 # Signal: Jab bhi naya user banay, uska profile khud ban jaye
 @receiver(post_save, sender=User)
 def create_user_profile(sender, instance, created, raw=False, **kwargs):
@@ -281,6 +366,10 @@ class Territory(models.Model):
     """A field area (a "brick"). Everything location-wise hangs off this."""
 
     name = models.CharField(max_length=120, unique=True)
+    code = models.CharField(
+        max_length=20, blank=True,
+        help_text="Short reference used on tour plans, e.g. N-01.",
+    )
     city = models.CharField(max_length=80)
     region = models.CharField(
         max_length=80, blank=True, help_text="Zone or province grouping."
@@ -288,11 +377,11 @@ class Territory(models.Model):
     is_active = models.BooleanField(default=True)
 
     class Meta:
-        ordering = ["city", "name"]
+        ordering = ["city", "code", "name"]
         verbose_name_plural = "territories"
 
     def __str__(self):
-        return f"{self.name} ({self.city})"
+        return f"{self.code} {self.name}".strip() if self.code else self.name
 
     @property
     def sales_total(self):
@@ -343,6 +432,21 @@ class Employee(models.Model):
     joined_on = models.DateField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
+    basic_salary = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    fuel_allowance = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    mobile_allowance = models.DecimalField(
+        max_digits=12, decimal_places=2, default=ZERO
+    )
+    other_allowance = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+
+    commission_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=ZERO,
+        help_text=(
+            "Percentage of net sales, on top of salary. Leave at 0 for staff "
+            "on salary only."
+        ),
+    )
+
     class Meta:
         ordering = ["full_name"]
 
@@ -352,6 +456,36 @@ class Employee(models.Model):
     @property
     def is_field_staff(self):
         return self.designation == "mr"
+
+    @property
+    def earns_commission(self):
+        return self.commission_percent > ZERO
+
+    def net_sales(self, start, end):
+        """Sales credited to this employee between two dates, inclusive.
+
+        "Actual sales" means what the customer was billed after every line
+        discount - which is what `Invoice.total` already stores - less any
+        goods that came back. Commission on returned stock would pay twice
+        for one delivery.
+        """
+        invoiced = (
+            self.invoices.filter(date__gte=start, date__lte=end)
+            .aggregate(t=Sum("total"))["t"] or ZERO
+        )
+        returned = (
+            SalesReturn.objects.filter(
+                invoice__sales_rep=self, date__gte=start, date__lte=end
+            ).aggregate(t=Sum("total"))["t"] or ZERO
+        )
+
+        return invoiced - returned
+
+    def commission_on(self, start, end):
+        """What the percentage comes to over a period."""
+        return (
+            self.net_sales(start, end) * self.commission_percent / Decimal("100")
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 # ------------------------------------------------------------------ CALL POINTS
@@ -380,6 +514,10 @@ class CallPoint(models.Model):
 
     address = models.TextField(blank=True)
     phone = models.CharField(max_length=50, blank=True)
+    estimated_volume = models.CharField(
+        max_length=50, blank=True,
+        help_text="Rough size, e.g. '250+' doctors or '150+ Chemists'.",
+    )
     is_active = models.BooleanField(default=True)
 
     class Meta:
@@ -397,6 +535,236 @@ class CallPoint(models.Model):
         )
 
         return visit.visit_date if visit else None
+
+
+
+class Doctor(models.Model):
+    """A person an MR details, as distinct from the place they sit in.
+
+    A call point is a place - a clinic, a hospital, a pharmacy. Doctors move
+    between them: they change hospital, open their own clinic, or retire and
+    are replaced by someone else at the same desk. Keeping the person separate
+    from the place means a move is an edit rather than a duplicate record, and
+    the visit history stays attached to whoever was actually seen.
+    """
+
+    name = models.CharField(max_length=200)
+    speciality = models.CharField(max_length=120, blank=True)
+    qualification = models.CharField(
+        max_length=120, blank=True, help_text="e.g. MBBS, FCPS."
+    )
+
+    call_point = models.ForeignKey(
+        CallPoint, on_delete=models.CASCADE, related_name="doctors",
+        help_text="Where this doctor currently sits.",
+    )
+
+    phone = models.CharField(max_length=50, blank=True)
+    email = models.EmailField(blank=True)
+
+    # Rough prescribing weight, so a plan can favour the doctors worth seeing.
+    potential = models.CharField(
+        max_length=20, blank=True,
+        choices=(("high", "High"), ("medium", "Medium"), ("low", "Low")),
+    )
+
+    notes = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="doctors_added",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        unique_together = [("name", "call_point")]
+
+    def __str__(self):
+        return self.name
+
+    @property
+    def territory(self):
+        return self.call_point.territory
+
+    def move_to(self, call_point, *, reason="", user=None, on=None):
+        """Record a change of place, keeping where they came from.
+
+        Returns None when the doctor is already there, so a repeated sync from
+        a phone cannot fill the history with moves that never happened.
+        """
+        if call_point == self.call_point:
+            return None
+
+        move = DoctorMove.objects.create(
+            doctor=self,
+            from_call_point=self.call_point,
+            to_call_point=call_point,
+            moved_on=on or timezone.localdate(),
+            reason=reason,
+            recorded_by=user,
+        )
+
+        self.call_point = call_point
+        self.save(update_fields=["call_point", "updated_at"])
+
+        return move
+
+
+class DoctorMove(models.Model):
+    """One doctor leaving one place for another."""
+
+    doctor = models.ForeignKey(
+        Doctor, on_delete=models.CASCADE, related_name="moves"
+    )
+    from_call_point = models.ForeignKey(
+        CallPoint, on_delete=models.SET_NULL, null=True,
+        related_name="doctors_left",
+    )
+    to_call_point = models.ForeignKey(
+        CallPoint, on_delete=models.CASCADE, related_name="doctors_joined"
+    )
+
+    moved_on = models.DateField(default=timezone.localdate)
+    reason = models.TextField(blank=True)
+
+    recorded_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    recorded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-moved_on", "-id"]
+
+    def __str__(self):
+        return f"{self.doctor} → {self.to_call_point} ({self.moved_on})"
+
+
+# ------------------------------------------------------------------ TARGETS
+
+class Target(models.Model):
+    """What one team member is expected to do in one month.
+
+    All four measures live on one row because they are set together in one
+    conversation, and an MR who hits their rupee number by visiting the same
+    three doctors every week has not done the job.
+    """
+
+    employee = models.ForeignKey(
+        Employee, on_delete=models.CASCADE, related_name="targets"
+    )
+    month = models.DateField(help_text="Any date in the month; stored as the 1st.")
+
+    sales_value = models.DecimalField(
+        max_digits=14, decimal_places=2, default=ZERO,
+        help_text="Net sales expected, after discounts and returns.",
+    )
+    call_count = models.PositiveIntegerField(
+        default=0, help_text="Doctor visits expected in the month."
+    )
+    doctor_count = models.PositiveIntegerField(
+        default=0, help_text="Distinct doctors expected to be seen."
+    )
+
+    note = models.TextField(blank=True)
+
+    set_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-month", "employee__full_name"]
+        unique_together = [("employee", "month")]
+
+    def __str__(self):
+        return f"{self.employee.full_name} - {self.month:%b %Y}"
+
+    def save(self, *args, **kwargs):
+        # Stored as the first, so a month is one row however it was entered.
+        self.month = self.month.replace(day=1)
+
+        return super().save(*args, **kwargs)
+
+    @property
+    def month_end(self):
+        return (self.month + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+
+    def achievement(self):
+        """What actually happened against each of the four numbers."""
+        start, end = self.month, self.month_end
+
+        reports = CallReport.objects.filter(
+            employee=self.employee, visit_date__gte=start, visit_date__lte=end
+        )
+
+        sales = self.employee.net_sales(start, end)
+        calls = reports.count()
+        doctors = reports.values("call_point_id").distinct().count()
+
+        return {
+            "sales_value": {
+                "target": self.sales_value, "actual": sales,
+                "percent": _percent(sales, self.sales_value),
+            },
+            "call_count": {
+                "target": self.call_count, "actual": calls,
+                "percent": _percent(calls, self.call_count),
+            },
+            "doctor_count": {
+                "target": self.doctor_count, "actual": doctors,
+                "percent": _percent(doctors, self.doctor_count),
+            },
+            "products": [line.achievement() for line in self.product_targets.all()],
+        }
+
+
+class ProductTarget(models.Model):
+    """Units of one product expected in the month.
+
+    A rupee total says nothing about which brand is being pushed, so targets
+    can be broken down per product where that matters.
+    """
+
+    target = models.ForeignKey(
+        Target, on_delete=models.CASCADE, related_name="product_targets"
+    )
+    product = models.ForeignKey(
+        "Product", on_delete=models.CASCADE, related_name="targets"
+    )
+    units = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["product__name"]
+        unique_together = [("target", "product")]
+
+    def __str__(self):
+        return f"{self.product.name} x{self.units}"
+
+    def achievement(self):
+        sold = (
+            Item.objects.filter(
+                product=self.product,
+                invoice__sales_rep=self.target.employee,
+                invoice__date__gte=self.target.month,
+                invoice__date__lte=self.target.month_end,
+            ).aggregate(t=Sum("qty"))["t"] or 0
+        )
+
+        return {
+            "product": self.product.name,
+            "product_id": self.product_id,
+            "target": self.units,
+            "actual": sold,
+            "percent": _percent(sold, self.units),
+        }
+
+
+def _percent(actual, target):
+    """Achievement as a whole number, and 0 rather than a crash when unset."""
+    if not target:
+        return 0
+
+    return int(round(Decimal(actual) * 100 / Decimal(target)))
 
 
 # ------------------------------------------------------------------ WEEKLY PLAN
@@ -524,3 +892,776 @@ class PlanVisit(models.Model):
     @property
     def visit_date(self):
         return self.plan.week_start + timedelta(days=self.day)
+
+
+# ------------------------------------------------------------------ DISTRIBUTORS
+
+class Distributor(models.Model):
+    """A company whose invoices this system prints.
+
+    Each one has its own pre-printed PDF form. `layout` holds the coordinate
+    map detected from that form (see invoices.layout), so adding a distributor
+    is an upload rather than a code change.
+    """
+
+    name = models.CharField(max_length=200, unique=True)
+    code = models.CharField(
+        max_length=10,
+        unique=True,
+        help_text="Invoice number prefix, e.g. HHC for HHC-9965.",
+    )
+
+    address = models.TextField(blank=True)
+    phone = models.CharField(max_length=50, blank=True)
+    license_no = models.CharField("Drug licence", max_length=100, blank=True)
+    ntn = models.CharField(max_length=50, blank=True)
+    sales_tax = models.CharField(max_length=50, blank=True)
+
+    template = models.FileField(
+        upload_to="invoice_templates/",
+        blank=True,
+        help_text="The blank invoice PDF. Coordinates are read from it.",
+    )
+    layout = models.JSONField(
+        blank=True,
+        null=True,
+        help_text="Detected coordinate map. Regenerated when the template changes.",
+    )
+
+    invoice_start_number = models.IntegerField(default=1)
+
+    is_active = models.BooleanField(default=True)
+    is_default = models.BooleanField(
+        default=False, help_text="Pre-selected on the invoice form."
+    )
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+    def save(self, *args, **kwargs):
+        self.code = self.code.upper().strip()
+
+        super().save(*args, **kwargs)
+
+        # Exactly one default, enforced here rather than trusted to the form.
+        if self.is_default:
+            Distributor.objects.exclude(pk=self.pk).update(is_default=False)
+
+    @property
+    def template_path(self):
+        return self.template.path if self.template else None
+
+    @property
+    def has_layout(self):
+        return bool(self.layout and self.layout.get("table"))
+
+    @classmethod
+    def default(cls):
+        return (
+            cls.objects.filter(is_active=True, is_default=True).first()
+            or cls.objects.filter(is_active=True).first()
+        )
+
+
+# ------------------------------------------------------------------ PURCHASING
+
+class Supplier(models.Model):
+    name = models.CharField(max_length=200, unique=True)
+    contact_person = models.CharField(max_length=150, blank=True)
+    phone = models.CharField(max_length=50, blank=True)
+    email = models.EmailField(blank=True)
+    address = models.TextField(blank=True)
+    ntn = models.CharField(max_length=50, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class Manufacturer(models.Model):
+    """Who makes a product. Distinct from Supplier, who sells it to us.
+
+    The same manufacturer is often reached through several suppliers, and
+    recalls and quality queries go to the manufacturer, so they are tracked
+    separately.
+    """
+
+    name = models.CharField(max_length=200, unique=True)
+    code = models.CharField(max_length=20, blank=True)
+
+    contact_person = models.CharField(max_length=150, blank=True)
+    phone = models.CharField(max_length=50, blank=True)
+    email = models.EmailField(blank=True)
+    website = models.URLField(blank=True)
+
+    address = models.TextField(blank=True)
+    country = models.CharField(max_length=80, blank=True, default="Pakistan")
+
+    drug_licence = models.CharField(
+        "Drug manufacturing licence", max_length=100, blank=True
+    )
+    ntn = models.CharField(max_length=50, blank=True)
+
+    is_active = models.BooleanField(default=True)
+    note = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+    @property
+    def product_count(self):
+        return self.products.count()
+
+    @property
+    def stock_on_hand(self):
+        return sum(product.stock_on_hand for product in self.products.all())
+
+
+class Product(models.Model):
+    """A sellable item. Stock is tracked per batch, not on the product."""
+
+    code = models.CharField(max_length=50, unique=True)
+    name = models.CharField(max_length=255)
+
+    manufacturer = models.ForeignKey(
+        Manufacturer, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="products",
+    )
+    generic_name = models.CharField(
+        max_length=255, blank=True,
+        help_text="Active ingredient, e.g. Paracetamol 500mg.",
+    )
+    registration_no = models.CharField(
+        "DRAP registration", max_length=100, blank=True
+    )
+
+    pack_size = models.CharField(max_length=50, blank=True)
+    trade_price = models.DecimalField(max_digits=10, decimal_places=2, default=ZERO)
+    is_active = models.BooleanField(default=True)
+
+    reorder_level = models.IntegerField(
+        default=0, help_text="Flag the product when total stock falls below this."
+    )
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return f"{self.name} ({self.code})"
+
+    @property
+    def stock_on_hand(self):
+        return self.batches.aggregate(t=Sum("quantity"))["t"] or 0
+
+    @property
+    def sellable_stock(self):
+        """Excludes expired batches - they must not be sold."""
+        return (
+            self.batches.filter(expiry_date__gte=timezone.localdate())
+            .aggregate(t=Sum("quantity"))["t"] or 0
+        )
+
+    @property
+    def needs_reorder(self):
+        return self.reorder_level > 0 and self.sellable_stock <= self.reorder_level
+
+
+class Batch(models.Model):
+    """A received lot, with its own expiry and cost."""
+
+    product = models.ForeignKey(
+        Product, on_delete=models.CASCADE, related_name="batches"
+    )
+    batch_no = models.CharField(max_length=100)
+    expiry_date = models.DateField()
+
+    cost_price = models.DecimalField(max_digits=10, decimal_places=2, default=ZERO)
+    received_quantity = models.IntegerField(default=0)
+    quantity = models.IntegerField(default=0, help_text="Currently on hand.")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["expiry_date", "batch_no"]
+        unique_together = [("product", "batch_no")]
+        verbose_name_plural = "batches"
+
+    def __str__(self):
+        return f"{self.product.name} / {self.batch_no}"
+
+    @property
+    def is_expired(self):
+        return self.expiry_date < timezone.localdate()
+
+    @property
+    def days_to_expiry(self):
+        return (self.expiry_date - timezone.localdate()).days
+
+    @property
+    def expires_soon(self):
+        return not self.is_expired and self.days_to_expiry <= EXPIRY_WARNING_DAYS
+
+
+class Purchase(models.Model):
+    """Goods received from a supplier."""
+
+    supplier = models.ForeignKey(
+        Supplier, on_delete=models.PROTECT, related_name="purchases"
+    )
+    reference = models.CharField(
+        max_length=100, blank=True, help_text="The supplier's invoice number."
+    )
+    date = models.DateField(default=timezone.localdate)
+    note = models.TextField(blank=True)
+
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date", "-id"]
+
+    def __str__(self):
+        return f"{self.supplier.name} - {self.date}"
+
+    @property
+    def total(self):
+        return sum(
+            (line.line_total for line in self.items.all()), ZERO
+        )
+
+
+class PurchaseItem(models.Model):
+    purchase = models.ForeignKey(
+        Purchase, on_delete=models.CASCADE, related_name="items"
+    )
+    product = models.ForeignKey(Product, on_delete=models.PROTECT)
+    batch = models.ForeignKey(
+        Batch, on_delete=models.PROTECT, related_name="purchase_items"
+    )
+
+    quantity = models.IntegerField()
+    cost_price = models.DecimalField(max_digits=10, decimal_places=2, default=ZERO)
+
+    @property
+    def line_total(self):
+        return self.cost_price * self.quantity
+
+
+class StockMovement(models.Model):
+    """Append-only stock ledger. Batch quantities are a cache of this."""
+
+    PURCHASE = "purchase"
+    SALE = "sale"
+    ADJUSTMENT = "adjustment"
+    RETURN = "return"
+    SAMPLE = "sample"
+
+    KIND_CHOICES = (
+        (PURCHASE, "Purchase"),
+        (SALE, "Sale"),
+        (ADJUSTMENT, "Adjustment"),
+        (RETURN, "Return"),
+        (SAMPLE, "Sample"),
+    )
+
+    product = models.ForeignKey(
+        Product, on_delete=models.CASCADE, related_name="movements"
+    )
+    batch = models.ForeignKey(
+        Batch, on_delete=models.CASCADE, related_name="movements"
+    )
+
+    quantity = models.IntegerField(help_text="Positive in, negative out.")
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES)
+    reference = models.CharField(max_length=100, blank=True)
+    note = models.TextField(blank=True)
+
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"{self.batch} {self.quantity:+d} ({self.kind})"
+
+
+# ------------------------------------------------------------------ RETURNS
+
+class SalesReturn(models.Model):
+    """Goods a customer sent back: a credit note.
+
+    Deliberately not a deletion. The invoice stays as issued, the return
+    credits the customer's ledger, and any restocked lines move back into
+    stock through the same ledger as every other movement.
+    """
+
+    RETURN_PREFIX = "CN"
+
+    invoice = models.ForeignKey(
+        Invoice, on_delete=models.PROTECT, related_name="returns"
+    )
+    customer = models.ForeignKey(
+        Customer, on_delete=models.CASCADE, related_name="returns"
+    )
+
+    return_no = models.CharField(max_length=20, unique=True)
+    date = models.DateField(default=timezone.localdate)
+
+    reason = models.TextField(blank=True)
+    restock = models.BooleanField(
+        default=True,
+        help_text="Uncheck for damaged or expired goods that cannot be resold.",
+    )
+
+    # Credited amount, stored so the ledger never recomputes it.
+    total = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date", "-id"]
+
+    def __str__(self):
+        return self.return_no
+
+    @classmethod
+    def next_return_no(cls):
+        numbers = []
+
+        for value in cls.objects.values_list("return_no", flat=True):
+            suffix = str(value).rsplit("-", 1)[-1]
+
+            if suffix.isdigit():
+                numbers.append(int(suffix))
+
+        return f"{cls.RETURN_PREFIX}-{(max(numbers) + 1 if numbers else 1):04d}"
+
+    def save(self, *args, **kwargs):
+        if not self.return_no:
+            self.return_no = self.next_return_no()
+
+        super().save(*args, **kwargs)
+
+
+class SalesReturnItem(models.Model):
+    sales_return = models.ForeignKey(
+        SalesReturn, on_delete=models.CASCADE, related_name="items"
+    )
+    item = models.ForeignKey(
+        Item, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="returned_lines",
+        help_text="The invoice line this came off.",
+    )
+
+    name = models.CharField(max_length=255)
+    qty = models.IntegerField()
+    price = models.DecimalField(max_digits=10, decimal_places=2, default=ZERO)
+    discount = models.DecimalField(max_digits=5, decimal_places=2, default=ZERO)
+
+    batch = models.ForeignKey(
+        Batch, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="returned_lines",
+    )
+
+    @property
+    def line_total(self):
+        net = self.price - (self.price * self.discount / Decimal("100"))
+
+        return (net * self.qty).quantize(ZERO)
+
+
+# ------------------------------------------------------------------ EXPENSES
+
+class ExpenseCategory(models.Model):
+    """A kind of spend: fuel allowance, doctor refreshment, DRAP fees..."""
+
+    name = models.CharField(max_length=120, unique=True)
+    code = models.CharField(max_length=20, blank=True)
+
+    per_employee = models.BooleanField(
+        default=True,
+        help_text="Tick when this is normally claimed by a team member. "
+                  "Company costs such as DRAP fees are not.",
+    )
+    is_active = models.BooleanField(default=True)
+    note = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name_plural = "expense categories"
+
+    def __str__(self):
+        return self.name
+
+
+class Expense(models.Model):
+    """One claim or company cost."""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    PAID = "paid"
+
+    STATUS_CHOICES = (
+        (PENDING, "Pending"),
+        (APPROVED, "Approved"),
+        (REJECTED, "Rejected"),
+        (PAID, "Paid"),
+    )
+
+    category = models.ForeignKey(
+        ExpenseCategory, on_delete=models.PROTECT, related_name="expenses"
+    )
+    employee = models.ForeignKey(
+        Employee, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="expenses",
+        help_text="Leave blank for a company cost that is not claimed by anyone.",
+    )
+    territory = models.ForeignKey(
+        Territory, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="expenses",
+    )
+
+    date = models.DateField(default=timezone.localdate)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+
+    description = models.CharField(max_length=255, blank=True)
+    reference = models.CharField(
+        max_length=100, blank=True, help_text="Bill or voucher number."
+    )
+    receipt = models.FileField(upload_to="expense_receipts/", blank=True)
+
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=PENDING)
+
+    submitted_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, related_name="submitted_expenses"
+    )
+    reviewed_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="reviewed_expenses",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_note = models.CharField(max_length=255, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date", "-id"]
+
+    def __str__(self):
+        return f"{self.category.name} - {self.amount}"
+
+    @property
+    def is_settled(self):
+        return self.status == self.PAID
+
+    @property
+    def counts_towards_spend(self):
+        """Rejected claims are not money out of the door."""
+        return self.status != self.REJECTED
+
+
+# ------------------------------------------------------------------ SAMPLING
+
+class SampleIssue(models.Model):
+    """Samples an MR handed to a doctor, taken out of sellable stock."""
+
+    SAMPLE_PREFIX = "SMP"
+
+    employee = models.ForeignKey(
+        Employee, on_delete=models.PROTECT, related_name="sample_issues"
+    )
+    call_point = models.ForeignKey(
+        CallPoint, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="sample_issues",
+        help_text="The doctor or hospital the samples were left with.",
+    )
+
+    reference = models.CharField(max_length=20, unique=True)
+    date = models.DateField(default=timezone.localdate)
+    note = models.TextField(blank=True)
+
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date", "-id"]
+
+    def __str__(self):
+        return self.reference
+
+    @classmethod
+    def next_reference(cls):
+        numbers = []
+
+        for value in cls.objects.values_list("reference", flat=True):
+            suffix = str(value).rsplit("-", 1)[-1]
+
+            if suffix.isdigit():
+                numbers.append(int(suffix))
+
+        return f"{cls.SAMPLE_PREFIX}-{(max(numbers) + 1 if numbers else 1):04d}"
+
+    def save(self, *args, **kwargs):
+        if not self.reference:
+            self.reference = self.next_reference()
+
+        super().save(*args, **kwargs)
+
+    @property
+    def total_units(self):
+        return self.items.aggregate(t=Sum("qty"))["t"] or 0
+
+    @property
+    def total_value(self):
+        """What the samples cost, valued at batch cost."""
+        return sum(
+            (line.batch.cost_price * line.qty for line in self.items.all()),
+            ZERO,
+        )
+
+
+class SampleIssueItem(models.Model):
+    sample_issue = models.ForeignKey(
+        SampleIssue, on_delete=models.CASCADE, related_name="items"
+    )
+    product = models.ForeignKey(
+        Product, on_delete=models.PROTECT, related_name="sampled_items"
+    )
+    batch = models.ForeignKey(
+        Batch, on_delete=models.PROTECT, related_name="sampled_items"
+    )
+    qty = models.IntegerField()
+
+
+# ------------------------------------------------------------------ PAYROLL
+
+class PayrollRun(models.Model):
+    """One month's payroll."""
+
+    DRAFT = "draft"
+    FINALISED = "finalised"
+
+    STATUS_CHOICES = ((DRAFT, "Draft"), (FINALISED, "Finalised"))
+
+    month = models.DateField(help_text="Any date in the month; stored as the 1st.")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=DRAFT)
+    note = models.TextField(blank=True)
+
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-month"]
+        unique_together = [("month",)]
+
+    def __str__(self):
+        return self.month.strftime("%B %Y")
+
+    def save(self, *args, **kwargs):
+        # Normalise to the first of the month so one run per month is unique.
+        if self.month:
+            self.month = self.month.replace(day=1)
+
+        super().save(*args, **kwargs)
+
+    @property
+    def is_editable(self):
+        return self.status == self.DRAFT
+
+    @property
+    def total_net(self):
+        return self.payslips.aggregate(t=Sum("net_pay"))["t"] or ZERO
+
+    @property
+    def total_gross(self):
+        return self.payslips.aggregate(t=Sum("gross_pay"))["t"] or ZERO
+
+
+class Payslip(models.Model):
+    """One employee's pay for one month.
+
+    Amounts are copied from the employee at generation time so a later raise
+    never rewrites a slip that has already been handed out.
+    """
+
+    run = models.ForeignKey(
+        PayrollRun, on_delete=models.CASCADE, related_name="payslips"
+    )
+    employee = models.ForeignKey(
+        Employee, on_delete=models.PROTECT, related_name="payslips"
+    )
+
+    basic_salary = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    fuel_allowance = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    mobile_allowance = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    other_allowance = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+
+    expense_reimbursement = models.DecimalField(
+        max_digits=12, decimal_places=2, default=ZERO,
+        help_text="Approved expenses for the month, paid with salary.",
+    )
+
+    # Sales and rate are copied onto the slip alongside the commission itself,
+    # so a payslip handed out months ago still shows the arithmetic behind it
+    # even after the rate changes or an invoice is credited back.
+    sales_amount = models.DecimalField(
+        max_digits=14, decimal_places=2, default=ZERO,
+        help_text="Net sales credited to this employee for the month.",
+    )
+    commission_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=ZERO
+    )
+    commission = models.DecimalField(
+        max_digits=12, decimal_places=2, default=ZERO
+    )
+
+    tax_deduction = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    advance_deduction = models.DecimalField(
+        max_digits=12, decimal_places=2, default=ZERO
+    )
+    other_deduction = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+
+    gross_pay = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    net_pay = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+
+    note = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["employee__full_name"]
+        unique_together = [("run", "employee")]
+
+    def __str__(self):
+        return f"{self.employee.full_name} - {self.run}"
+
+    @property
+    def total_allowances(self):
+        return (
+            self.fuel_allowance + self.mobile_allowance + self.other_allowance
+        )
+
+    @property
+    def total_deductions(self):
+        return self.tax_deduction + self.advance_deduction + self.other_deduction
+
+    def recalculate(self):
+        self.gross_pay = (
+            self.basic_salary
+            + self.total_allowances
+            + self.commission
+            + self.expense_reimbursement
+        )
+        self.net_pay = self.gross_pay - self.total_deductions
+
+        return self
+
+    def recalculate_commission(self):
+        """Re-derive the commission from the stored sales and rate."""
+        self.commission = (
+            self.sales_amount * self.commission_percent / Decimal("100")
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        return self
+
+
+# ------------------------------------------------------------------ CALL REPORTS
+
+class CallReport(models.Model):
+    """What actually happened on a visit.
+
+    Separate from PlanVisit so unplanned calls are first-class: an MR who meets
+    a doctor who was never on the schedule still records it, and the report
+    links back to the planned slot when there was one.
+    """
+
+    MET = "met"
+    NOT_AVAILABLE = "not_available"
+    RESCHEDULED = "rescheduled"
+
+    OUTCOME_CHOICES = (
+        (MET, "Doctor met"),
+        (NOT_AVAILABLE, "Not available"),
+        (RESCHEDULED, "Rescheduled"),
+    )
+
+    employee = models.ForeignKey(
+        Employee, on_delete=models.PROTECT, related_name="call_reports"
+    )
+    call_point = models.ForeignKey(
+        CallPoint, on_delete=models.PROTECT, related_name="call_reports"
+    )
+    plan_visit = models.OneToOneField(
+        PlanVisit, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="report",
+        help_text="The scheduled slot this fulfils, when it was planned.",
+    )
+
+    visit_date = models.DateField(default=timezone.localdate)
+    visit_time = models.TimeField(null=True, blank=True)
+
+    # The person actually seen. A hospital call point covers many doctors, so
+    # the name belongs on the visit rather than on the call point.
+    doctor_name = models.CharField(max_length=200, blank=True)
+    speciality = models.CharField(max_length=120, blank=True)
+
+    outcome = models.CharField(max_length=20, choices=OUTCOME_CHOICES, default=MET)
+
+    products = models.ManyToManyField(
+        Product, blank=True, related_name="call_reports",
+        help_text="What was detailed on this call.",
+    )
+
+    sample_issue = models.ForeignKey(
+        SampleIssue, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="call_reports",
+    )
+
+    feedback = models.TextField(blank=True)
+    next_visit_date = models.DateField(null=True, blank=True)
+
+    # Which doctor was actually seen, once the round is on the phone and doctors
+    # are real records. Nullable because every visit filed before this existed
+    # only ever named a call point.
+    doctor = models.ForeignKey(
+        "Doctor", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="visits",
+    )
+
+    # Set by the mobile app before the row leaves the phone. A patchy line
+    # means the same visit can be sent twice; matching on this makes the
+    # second send a no-op instead of a duplicate call.
+    client_uuid = models.CharField(
+        max_length=64, blank=True, db_index=True,
+        help_text="Identifier generated on the device, for offline sync.",
+    )
+
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True)
+
+    class Meta:
+        ordering = ["-visit_date", "-visit_time", "-id"]
+
+    def __str__(self):
+        who = self.doctor_name or self.call_point.name
+
+        return f"{who} - {self.visit_date}"
+
+    @property
+    def was_planned(self):
+        return self.plan_visit_id is not None
+
+    @property
+    def samples_given(self):
+        return self.sample_issue.total_units if self.sample_issue else 0

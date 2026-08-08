@@ -20,8 +20,10 @@
           <th>Invoice #</th>
           <th>Customer Name</th>
           <th class="num">Amount (Net)</th>
+          <th>Action</th>
           <th>Date</th>
           <th>Time</th>
+          <th></th>
         </tr>
       </thead>
       <tbody>
@@ -34,12 +36,24 @@
           <td class="num" style="color: #1e7b24; font-weight: bold">
             {{ log.amount|floatformat:2 }}
           </td>
+          <td>
+            {% if log.action == "Invoice Reprinted" %}
+            <span class="pill pill-due">reprinted</span>
+            {% else %}<span class="muted">{{ log.action }}</span>{% endif %}
+          </td>
           <td>{{ log.timestamp|date:"d-m-Y" }}</td>
           <td>{{ log.timestamp|date:"H:i:s" }}</td>
+          <td>
+            {% if log.invoice_id %}
+            <a href="{% url 'invoice_reprint' log.invoice_id %}" class="btn btn-sm btn-grey">
+              Reprint
+            </a>
+            {% endif %}
+          </td>
         </tr>
         {% empty %}
         <tr>
-          <td colspan="7" style="text-align: center; padding: 26px">
+          <td colspan="9" style="text-align: center; padding: 26px">
             No records found.
           </td>
         </tr>

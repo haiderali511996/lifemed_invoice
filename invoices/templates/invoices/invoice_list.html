@@ -1,0 +1,115 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - All Invoices{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>📄 All Invoices</h1>
+  {% if not is_super_admin %}
+  <a href="{% url 'index' %}" class="btn btn-green">＋ New Invoice</a>
+  {% endif %}
+</div>
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Invoices</span>
+    <span class="stat-value">{{ invoices|length }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Invoiced</span>
+    <span class="stat-value">{{ total|floatformat:2 }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Outstanding</span>
+    <span class="stat-value">{{ outstanding|floatformat:2 }}</span>
+  </div>
+</div>
+
+<div class="card">
+  <form method="GET" style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap">
+    <input type="search" name="q" value="{{ query }}"
+           placeholder="Invoice number, customer or licence…"
+           style="flex:1;min-width:220px;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
+
+    <select name="distributor" style="padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
+      <option value="">All distributors</option>
+      {% for d in distributors %}
+      <option value="{{ d.id }}" {% if selected_distributor == d.id|stringformat:"s" %}selected{% endif %}>{{ d.name }}</option>
+      {% endfor %}
+    </select>
+
+    <select name="status" style="padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
+      <option value="">Any status</option>
+      <option value="unpaid" {% if status == "unpaid" %}selected{% endif %}>Unpaid</option>
+      <option value="paid" {% if status == "paid" %}selected{% endif %}>Settled</option>
+    </select>
+
+    <button type="submit" class="btn">Search</button>
+    {% if query or selected_distributor or status %}
+    <a href="{% url 'invoice_list' %}" class="btn btn-grey">Clear</a>
+    {% endif %}
+  </form>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Invoice</th><th>Date</th><th>Customer</th><th>Distributor</th>
+        <th class="num">Lines</th><th class="num">Total</th>
+        <th class="num">Balance</th><th>Status</th><th></th>
+      </tr></thead>
+      <tbody>
+        {% for i in invoices %}
+        <tr>
+          <td><strong>{{ i.invoice_no }}</strong></td>
+          <td>{{ i.date|date:"d-m-Y" }}</td>
+          <td>
+            <a href="{% url 'customer_ledger' i.customer.id %}">{{ i.customer.name }}</a>
+          </td>
+          <td>{{ i.distributor.name|default:"—" }}</td>
+          <td class="num">{{ i.items.count }}</td>
+          <td class="num">{{ i.total|floatformat:2 }}</td>
+          <td class="num">
+            {% if i.balance > 0 %}<strong>{{ i.balance|floatformat:2 }}</strong>
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+          <td>
+            {% if i.is_paid %}<span class="pill pill-paid">settled</span>
+            {% elif i.is_overdue %}<span class="pill pill-overdue">{{ i.days_outstanding }}d overdue</span>
+            {% else %}<span class="pill pill-due">due</span>{% endif %}
+          </td>
+          <td style="white-space:nowrap">
+            <a href="{% url 'invoice_reprint' i.id %}" class="btn btn-grey btn-mini"
+               title="Download this invoice again, exactly as it was issued">🖨️ Reprint</a>
+            {% if not is_super_admin %}
+            <a href="{% url 'return_create' i.id %}" class="btn btn-grey btn-mini"
+               title="Credit goods sent back">↩️ Return</a>
+            {% endif %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="9" style="text-align:center;padding:26px">
+          No invoices found.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p class="muted" style="margin-top:14px;font-size:12.5px">
+  A reprint is a copy of the original: same number, same date, same lines, and
+  the same previous balance the customer saw at the time. It moves no stock and
+  changes nothing in the ledger. To correct an invoice, raise a
+  <a href="{% url 'return_list' %}">sales return</a> against it.
+</p>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .stat-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+    gap:15px;margin-bottom:20px; }
+  .stat { display:flex;flex-direction:column;gap:5px; }
+  .stat-label { font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8595a8; }
+  .stat-value { font-size:25px;font-weight:700;color:var(--brand-dark);
+    font-variant-numeric:tabular-nums; }
+  .btn-mini { padding:4px 9px;font-size:12px; }
+</style>
+{% endblock %}

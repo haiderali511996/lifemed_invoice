@@ -1,0 +1,58 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Distributors{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Distributors</h1>
+  <a href="{% url 'distributor_new' %}" class="btn">＋ New Distributor</a>
+</div>
+
+<div class="card">
+  <p style="color:#8595a8;font-size:13px;margin-top:0">
+    Each distributor invoices on their own pre-printed form. Upload the blank
+    PDF and the print positions are read from it automatically.
+  </p>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th><th>Prefix</th><th>Template</th><th>Layout</th>
+          <th class="num">Invoices</th><th>Status</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in distributors %}
+        <tr>
+          <td>
+            <strong>{{ d.name }}</strong>
+            {% if d.is_default %}<span class="pill pill-paid">default</span>{% endif %}
+          </td>
+          <td>{{ d.code }}-</td>
+          <td>
+            {% if d.template %}<span class="pill pill-paid">uploaded</span>
+            {% else %}<span class="muted">none</span>{% endif %}
+          </td>
+          <td>
+            {% if d.has_layout %}<span class="pill pill-paid">detected</span>
+            {% else %}<span class="pill pill-overdue">not read</span>{% endif %}
+          </td>
+          <td class="num">{{ d.invoice_count }}</td>
+          <td>
+            {% if d.is_active %}<span class="pill pill-paid">active</span>
+            {% else %}<span class="pill pill-overdue">inactive</span>{% endif %}
+          </td>
+          <td style="white-space:nowrap">
+            <a href="{% url 'distributor_layout' d.id %}" class="btn btn-sm">Layout</a>
+            <a href="{% url 'distributor_edit' d.id %}" class="btn btn-sm btn-grey">Edit</a>
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" style="text-align:center;padding:26px">
+          No distributors yet. Add one and upload their invoice template.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

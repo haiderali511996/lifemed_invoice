@@ -1,0 +1,33 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Purchases{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Purchases</h1>
+  <a href="{% url 'purchase_new' %}" class="btn btn-green">＋ Receive Stock</a>
+</div>
+<div class="card"><div style="overflow-x:auto">
+  <table>
+    <thead><tr>
+      <th>Date</th><th>Supplier</th><th>Reference</th>
+      <th class="num">Lines</th><th class="num">Value</th><th>Received By</th>
+    </tr></thead>
+    <tbody>
+      {% for p in purchases %}
+      <tr>
+        <td>{{ p.date|date:"d-m-Y" }}</td>
+        <td><strong>{{ p.supplier.name }}</strong></td>
+        <td>{{ p.reference|default:"-" }}</td>
+        <td class="num">{{ p.items.count }}</td>
+        <td class="num">{{ p.total|floatformat:2 }}</td>
+        <td>{{ p.created_by.username|default:"-" }}</td>
+        <td><a href="{% url 'purchase_edit' p.id %}" class="btn btn-sm">Edit</a></td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="7" style="text-align:center;padding:26px">
+        No purchases recorded. Receiving stock creates batches automatically.
+      </td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div></div>
+{% endblock %}

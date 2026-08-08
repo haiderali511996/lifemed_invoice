@@ -154,6 +154,75 @@ Passenger caches the loaded code, so **every code or `.env` change needs a
 restart**. From the shell, `touch tmp/restart.txt` in the app root does the same
 thing.
 
+## 7b. Schedule database backups
+
+Everything lives in one MySQL database. Set this up before the ledgers hold
+real money.
+
+cPanel → **Cron Jobs** → add a job. Common Settings: **Once Per Day**
+(or twice daily), and this command — one line, with your own paths:
+
+```
+/home/<cpuser>/virtualenv/lifemed_invoice/3.13/bin/python /home/<cpuser>/lifemed_invoice/manage.py backup_db --quiet
+```
+
+Use the same interpreter path cPanel gave you in step 3, with `/python`
+appended in place of `/activate`.
+
+Dumps land in `~/lifemed_invoice/backups/` as gzipped SQL, named
+`backup-YYYYMMDD-HHMMSS.sql.gz`, owned 0600 in a 0700 directory. Anything
+older than 14 days is pruned automatically.
+
+Tune it in `.env`:
+
+```ini
+BACKUP_DIR=/home/<cpuser>/backups
+BACKUP_KEEP_DAYS=30
+```
+
+Test it once by hand before trusting the schedule:
+
+```bash
+python manage.py backup_db
+```
+
+`--quiet` in the cron command suppresses success output so cPanel does not
+email you daily; failures still report, which is what you want to hear about.
+
+**Restoring:**
+
+```bash
+gunzip -c backups/backup-20260806-020000.sql.gz | mysql -u cpuser_dbuser -p cpuser_dbname
+```
+
+⚠️ A backup you have never restored is not a backup. Try one restore into a
+scratch database now, while nothing depends on it. Backups sitting on the same
+server as the database also die with the server — download a copy periodically,
+or point `BACKUP_DIR` somewhere that is included in your host's off-site backup.
+
+## 7c. Adding a distributor
+
+Each distributor invoices on their own pre-printed form. Print positions are
+read from the PDF rather than measured by hand.
+
+1. **Distributors → New Distributor**
+2. Fill in the name and a **code** — this becomes the invoice prefix, and each
+   distributor keeps an independent number series (`HHC-9965`, `ODC-0001`).
+3. Upload their blank invoice **PDF** and save.
+4. The coordinates are read automatically; the confirmation says how many
+   fields, columns and totals were found, and how many item rows fit per page.
+5. **Open the preview** before invoicing. It prints sample data in every
+   detected position so you can confirm the mapping on the real form.
+
+The detector works by locating the labels the form already prints — "Customer
+Name", "Invoice Number", the column headings, "Net Payable" — and placing each
+value relative to its label. Two consequences worth knowing:
+
+- The PDF must contain **real text**. A scanned image has no labels to find and
+  will be rejected with a clear message.
+- If a field is not found, it is listed on the layout page and left blank on
+  the invoice. That is normal when the form has no such box.
+
 ## 8. Enable SSL (recommended)
 
 cPanel → **SSL/TLS Status** → select the subdomain → **Run AutoSSL**.
@@ -184,9 +253,42 @@ count as super admins.
 
 ## Troubleshooting
 
+### A page loads but 500s when you press Save
+
+This is almost always the database being a step behind the code: the new
+column exists in the models but not in MySQL. Opening the page never reads it,
+so only saving fails — which looks like a bug in the page rather than a missing
+migration.
+
+Ask the server directly:
+
+```bash
+cd ~/lifemed_invoice
+source /home/haidersirat/virtualenv/lifemed_invoice/3.13/bin/activate
+python manage.py check_schema
+```
+
+It prints any unapplied migrations and names every table and column the code
+expects but the database has not got. If it reports drift:
+
+```bash
+python manage.py migrate
+touch tmp/restart.txt
+```
+
+If `check_schema` says the schema is clean, the 500 is a real bug — get the
+traceback with:
+
+```bash
+tail -n 100 ~/lifemed_invoice/stderr.log
+```
+
+### Everything else
+
 | Symptom | Cause |
 |---|---|
 | 500 on every page, no Django output | Passenger failed to boot — read `~/lifemed_invoice/stderr.log` and the cPanel error log |
+| Page loads, 500 on save | Run `python manage.py check_schema` — see above |
 | `ImproperlyConfigured: SECRET_KEY is not set` | `.env` missing, in the wrong directory, or unreadable |
 | `DisallowedHost` | Hostname missing from `ALLOWED_HOSTS` |
 | 403 CSRF on *Generate PDF* | Origin missing from `CSRF_TRUSTED_ORIGINS`, or `SECURE_COOKIES=True` on http |

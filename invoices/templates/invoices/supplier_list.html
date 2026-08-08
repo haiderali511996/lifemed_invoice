@@ -1,0 +1,32 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Suppliers{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Suppliers</h1>
+  <a href="{% url 'supplier_new' %}" class="btn">＋ New Supplier</a>
+</div>
+<div class="card"><div style="overflow-x:auto">
+  <table>
+    <thead><tr>
+      <th>Name</th><th>Contact</th><th>Phone</th><th>NTN</th>
+      <th class="num">Purchases</th><th>Status</th><th></th>
+    </tr></thead>
+    <tbody>
+      {% for s in suppliers %}
+      <tr>
+        <td><strong>{{ s.name }}</strong></td>
+        <td>{{ s.contact_person|default:"-" }}</td>
+        <td>{{ s.phone|default:"-" }}</td>
+        <td>{{ s.ntn|default:"-" }}</td>
+        <td class="num">{{ s.purchase_count }}</td>
+        <td>{% if s.is_active %}<span class="pill pill-paid">active</span>
+            {% else %}<span class="pill pill-overdue">inactive</span>{% endif %}</td>
+        <td><a href="{% url 'supplier_edit' s.id %}" class="btn btn-sm">Edit</a></td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="7" style="text-align:center;padding:26px">No suppliers yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div></div>
+{% endblock %}

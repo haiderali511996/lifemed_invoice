@@ -1,0 +1,252 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Record Visit{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>🩺 Record a Doctor Visit</h1>
+  <a href="{% url 'daily_calls' %}" class="btn btn-grey">Back to My Day</a>
+</div>
+
+{% if me %}
+<p class="muted" style="margin:-6px 0 16px;font-size:12.5px">
+  Filing as <strong>{{ me.full_name }}</strong>{% if me.territory %} ·
+  call points in <strong>{{ me.territory.name }}</strong>{% endif %}.
+</p>
+{% endif %}
+
+{% if plan_visit %}
+<div class="alert alert-warn">
+  Reporting against the scheduled call on
+  <strong>{{ plan_visit.call_point.name }}</strong>
+  ({{ plan_visit.get_day_display }}, {{ plan_visit.visit_date|date:"d M Y" }}).
+  Saving marks that slot visited or missed automatically.
+</div>
+{% endif %}
+
+{% if form.non_field_errors %}
+<div class="alert alert-error">{{ form.non_field_errors }}</div>
+{% endif %}
+
+<form method="POST">
+  {% csrf_token %}
+
+  <div class="card" style="margin-bottom:16px">
+    <h3 style="margin-top:0">The Call</h3>
+
+    <div class="row">
+      {% if form.employee %}
+      <div class="field">
+        <label for="{{ form.employee.id_for_label }}">Team Member (MR)</label>
+        {{ form.employee }} {{ form.employee.errors }}
+      </div>
+      {% endif %}
+      <div class="field">
+        <label for="{{ form.visit_date.id_for_label }}">Visit Date</label>
+        {{ form.visit_date }} {{ form.visit_date.errors }}
+      </div>
+      <div class="field">
+        <label for="{{ form.visit_time.id_for_label }}">Time</label>
+        {{ form.visit_time }} {{ form.visit_time.errors }}
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="{{ form.call_point.id_for_label }}">Call Point</label>
+        {{ form.call_point }} {{ form.call_point.errors }}
+      </div>
+      <div class="field">
+        <label for="{{ form.new_call_point.id_for_label }}">{{ form.new_call_point.label }}</label>
+        {{ form.new_call_point }} {{ form.new_call_point.errors }}
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="{{ form.new_call_point_kind.id_for_label }}">New call point type</label>
+        {{ form.new_call_point_kind }} {{ form.new_call_point_kind.errors }}
+      </div>
+      <div class="field">
+        <label for="{{ form.new_call_point_territory.id_for_label }}">New call point territory</label>
+        {{ form.new_call_point_territory }} {{ form.new_call_point_territory.errors }}
+        <span class="hint">
+          {% if me %}Leave blank to use your own territory.
+          {% else %}Leave blank to use the MR's own territory.{% endif %}
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px">
+    <h3 style="margin-top:0">Doctor Details</h3>
+
+    <div class="row">
+      <div class="field">
+        <label for="{{ form.doctor_name.id_for_label }}">Doctor Met</label>
+        {{ form.doctor_name }} {{ form.doctor_name.errors }}
+        <span class="hint">Who you actually sat with, if different from the call point name.</span>
+      </div>
+      <div class="field">
+        <label for="{{ form.speciality.id_for_label }}">Speciality</label>
+        {{ form.speciality }} {{ form.speciality.errors }}
+      </div>
+      <div class="field">
+        <label for="{{ form.outcome.id_for_label }}">Outcome</label>
+        {{ form.outcome }} {{ form.outcome.errors }}
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="{{ form.products.id_for_label }}">Products Detailed</label>
+        {{ form.products }} {{ form.products.errors }}
+        <span class="hint">Ctrl / ⌘ click to pick more than one.</span>
+      </div>
+      <div class="field">
+        <label for="{{ form.next_visit_date.id_for_label }}">Next Visit</label>
+        {{ form.next_visit_date }} {{ form.next_visit_date.errors }}
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="{{ form.feedback.id_for_label }}">Feedback / Remarks</label>
+      {{ form.feedback }} {{ form.feedback.errors }}
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">Samples Left With the Doctor</h3>
+    <p class="hint" style="margin:0 0 12px">
+      Optional. Each line comes out of the batch you pick and lands in the
+      stock ledger, exactly like a sample issued from the Sampling screen.
+    </p>
+
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr>
+          <th style="min-width:210px">Product</th><th style="min-width:210px">Batch</th>
+          <th style="width:120px">Quantity</th><th></th>
+        </tr></thead>
+        <tbody id="lines"></tbody>
+      </table>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:16px;align-items:center">
+      <button type="button" class="btn btn-grey" onclick="addLine()">＋ Add Sample Line</button>
+      <span style="margin-left:auto;font-size:15px">
+        Total units: <strong id="grand" style="font-size:19px">0</strong>
+      </span>
+    </div>
+
+    <div style="margin-top:16px">
+      <button type="submit" class="btn btn-green">Save Visit</button>
+    </div>
+  </div>
+</form>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .field { margin-bottom:14px; }
+  .field label { display:block;margin-bottom:5px;font-size:13px;font-weight:600;color:#55657a; }
+  .field input, .field select, .field textarea {
+    width:100%;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;
+    font-size:14px;font-family:inherit; }
+  .row { display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0 14px; }
+  .hint { display:block;font-size:11px;color:#8595a8;margin-top:4px; }
+  #lines input, #lines select {
+    width:100%;padding:6px 8px;border:1px solid #dbe2ea;border-radius:5px;font-size:13px; }
+  #lines td { padding:5px; }
+  .delete-btn { background:#dc3545;color:#fff;border:none;border-radius:5px;
+    padding:6px 10px;cursor:pointer; }
+  .stock-note { display:block;font-size:11px;color:#8595a8;margin-top:3px; }
+</style>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+  const PRODUCTS = [
+    {% for p in products %}
+    { id: "{{ p.id }}", label: "{{ p.name|escapejs }}" },
+    {% endfor %}
+  ];
+
+  const BATCHES_URL = "{% url 'product_batches' 0 %}";
+
+  function addLine() {
+    const tr = document.createElement("tr");
+
+    tr.innerHTML = `
+      <td><select class="product" onchange="loadBatches(this)">
+            <option value="">-- select product --</option>
+          </select></td>
+      <td><select name="batch[]" class="batch"><option value="">-- pick product first --</option></select>
+          <span class="stock-note"></span></td>
+      <td><input name="qty[]" type="number" min="1" value="1" oninput="updateTotal()"></td>
+      <td><button type="button" class="delete-btn" onclick="removeLine(this)">✕</button></td>
+    `;
+
+    document.getElementById("lines").appendChild(tr);
+
+    const select = tr.querySelector(".product");
+
+    PRODUCTS.forEach(function (p) {
+      const option = document.createElement("option");
+      option.value = p.id;
+      /* Text, never markup, so a product name cannot inject HTML */
+      option.textContent = p.label;
+      select.appendChild(option);
+    });
+  }
+
+  function loadBatches(select) {
+    const row = select.closest("tr");
+    const batches = row.querySelector(".batch");
+    const note = row.querySelector(".stock-note");
+
+    batches.innerHTML = "";
+    note.textContent = "";
+
+    if (!select.value) return;
+
+    fetch(BATCHES_URL.replace("/0/", "/" + select.value + "/"))
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data.batches.length) {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = "-- no sellable stock --";
+          batches.appendChild(option);
+          note.textContent = "Nothing in stock to sample.";
+          return;
+        }
+
+        data.batches.forEach(function (b) {
+          const option = document.createElement("option");
+          option.value = b.id;
+          option.textContent = b.batch_no + " · exp " + b.expiry + " · " + b.quantity + " left";
+          batches.appendChild(option);
+        });
+
+        note.textContent = data.batches[0].quantity + " in stock";
+      })
+      .catch(function () { note.textContent = "Could not load batches."; });
+  }
+
+  function removeLine(button) {
+    button.closest("tr").remove();
+    updateTotal();
+  }
+
+  function updateTotal() {
+    let total = 0;
+
+    document.querySelectorAll('#lines [name="qty[]"]').forEach(function (el) {
+      total += parseInt(el.value, 10) || 0;
+    });
+
+    document.getElementById("grand").textContent = total;
+  }
+
+  window.addEventListener("load", updateTotal);
+</script>
+{% endblock %}

@@ -1,0 +1,130 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - My Sales{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>📈 My Sales</h1>
+  <form method="GET" style="display:flex;gap:10px;align-items:center" class="no-print">
+    <input type="month" name="month" value="{{ month }}"
+           style="padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
+    <button type="submit" class="btn">Show</button>
+  </form>
+</div>
+
+{% if not me %}
+<div class="alert alert-warn">
+  This login is not linked to a team member yet, so there are no sales to show.
+</div>
+{% else %}
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Invoiced</span>
+    <span class="stat-value">{{ invoiced|floatformat:2 }}</span>
+    <span class="stat-note">{{ invoices|length }} invoice(s), after discounts</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Returns</span>
+    <span class="stat-value">−{{ credited|floatformat:2 }}</span>
+    <span class="stat-note">{{ returns|length }} credit note(s)</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Net Sales</span>
+    <span class="stat-value">{{ net|floatformat:2 }}</span>
+    <span class="stat-note">{{ start|date:"d M" }} – {{ end|date:"d M Y" }}</span>
+  </div>
+  {% if rate %}
+  <div class="card stat highlight">
+    <span class="stat-label">Commission @ {{ rate|floatformat:"-2" }}%</span>
+    <span class="stat-value">{{ commission|floatformat:2 }}</span>
+    <span class="stat-note">paid with this month's salary</span>
+  </div>
+  {% endif %}
+</div>
+
+{% if not rate %}
+<div class="alert alert-warn">
+  You are on salary only — no commission rate is set on your record. If that is
+  wrong, ask the office to set it in Team Management.
+</div>
+{% endif %}
+
+<div class="card" style="margin-bottom:16px">
+  <h3 style="margin-top:0">Invoices Credited to Me</h3>
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Invoice</th><th>Date</th><th>Customer</th>
+        <th class="num">Amount</th><th class="num">Still Owed</th>
+      </tr></thead>
+      <tbody>
+        {% for i in invoices %}
+        <tr>
+          <td><strong>{{ i.invoice_no }}</strong></td>
+          <td>{{ i.date|date:"d-m-Y" }}</td>
+          <td>{{ i.customer.name }}</td>
+          <td class="num">{{ i.total|floatformat:2 }}</td>
+          <td class="num">
+            {% if i.balance > 0 %}{{ i.balance|floatformat:2 }}
+            {% else %}<span class="muted">settled</span>{% endif %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5" style="text-align:center;padding:24px">
+          No sales credited to you this month.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+      {% if invoices %}
+      <tfoot><tr>
+        <th colspan="3" style="text-align:right">Total invoiced</th>
+        <th class="num">{{ invoiced|floatformat:2 }}</th><th></th>
+      </tr></tfoot>
+      {% endif %}
+    </table>
+  </div>
+</div>
+
+{% if returns %}
+<div class="card">
+  <h3 style="margin-top:0">Returns Against My Sales</h3>
+  <p class="muted" style="font-size:12.5px;margin:0 0 12px">
+    Goods that came back are taken off net sales, so commission is not paid
+    twice on one delivery.
+  </p>
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Credit Note</th><th>Date</th><th>Against</th>
+        <th>Customer</th><th class="num">Amount</th>
+      </tr></thead>
+      <tbody>
+        {% for r in returns %}
+        <tr>
+          <td><strong>{{ r.return_no }}</strong></td>
+          <td>{{ r.date|date:"d-m-Y" }}</td>
+          <td>{{ r.invoice.invoice_no }}</td>
+          <td>{{ r.customer.name }}</td>
+          <td class="num">−{{ r.total|floatformat:2 }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .stat-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+    gap:15px;margin-bottom:20px; }
+  .stat { display:flex;flex-direction:column;gap:5px; }
+  .stat-label { font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8595a8; }
+  .stat-value { font-size:25px;font-weight:700;color:var(--brand-dark);
+    font-variant-numeric:tabular-nums; }
+  .stat-note { font-size:11.5px;color:#8595a8; }
+  .highlight { border-left:4px solid var(--brand); }
+  tfoot th { padding-top:10px;border-top:2px solid #dbe2ea;font-size:13px; }
+</style>
+{% endblock %}

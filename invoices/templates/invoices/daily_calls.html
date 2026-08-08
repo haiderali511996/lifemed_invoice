@@ -1,0 +1,171 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - My Day{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>📅 My Day</h1>
+  <div style="display:flex;gap:9px">
+    <a href="{% url 'call_report_list' %}" class="btn btn-grey">🩺 All Visits</a>
+    <a href="{% url 'call_report_new' %}" class="btn btn-green">＋ Log a Visit</a>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom:18px">
+  <form method="GET" class="day-bar">
+    <a class="btn btn-grey"
+       href="?date={{ previous_day|date:'Y-m-d' }}{% if employee %}&employee={{ employee.id }}{% endif %}">‹</a>
+
+    <input type="date" name="date" value="{{ day|date:'Y-m-d' }}">
+
+    {% if not locked_to_me %}
+    <select name="employee">
+      <option value="">-- pick a team member --</option>
+      {% for e in employees %}
+      <option value="{{ e.id }}" {% if employee and employee.id == e.id %}selected{% endif %}>
+        {{ e.full_name }}</option>
+      {% endfor %}
+    </select>
+    {% endif %}
+
+    <button type="submit" class="btn">Show</button>
+
+    <a class="btn btn-grey"
+       href="?date={{ next_day|date:'Y-m-d' }}{% if employee %}&employee={{ employee.id }}{% endif %}">›</a>
+
+    <span class="day-label">
+      {% if locked_to_me and employee %}{{ employee.full_name }} · {% endif %}
+      {{ day|date:"l, d M Y" }}</span>
+  </form>
+</div>
+
+{% if not employee %}
+<div class="alert alert-warn">
+  {% if locked_to_me %}
+  This login is not linked to a team member yet, so there is no day to show.
+  Ask the office to set the <strong>User</strong> field on your record in
+  Team Management.
+  {% else %}
+  No team member selected, and your login is not linked to one. Pick a team
+  member above — or set the <strong>User</strong> field on their record in
+  Team Management so this page opens on their own day automatically.
+  {% endif %}
+</div>
+{% else %}
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Scheduled</span>
+    <span class="stat-value">{{ scheduled|length }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Reported</span>
+    <span class="stat-value">{{ reported|length }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Unplanned</span>
+    <span class="stat-value">{{ unplanned|length }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Samples Left</span>
+    <span class="stat-value">{{ samples_today }}</span>
+  </div>
+</div>
+
+<div class="day-grid">
+  <div class="card">
+    <h3 style="margin-top:0">Today's Schedule</h3>
+
+    {% for row in scheduled %}
+    <div class="visit {% if row.done %}visit-done{% endif %}">
+      <strong>{{ row.visit.call_point.name }}</strong>
+      <span class="meta">
+        {{ row.visit.call_point.get_kind_display }}
+        {% if row.visit.call_point.speciality %} · {{ row.visit.call_point.speciality }}{% endif %}
+        {% if row.visit.call_point.address %} · {{ row.visit.call_point.address }}{% endif %}
+      </span>
+      {% if row.visit.objective %}<span class="meta">{{ row.visit.objective }}</span>{% endif %}
+
+      <div class="visit-actions">
+        {% if row.done %}
+        <span class="pill pill-paid">visited</span>
+        {% else %}
+        <a class="btn btn-green btn-mini"
+           href="{% url 'call_report_for_visit' row.visit.id %}">Record Visit</a>
+        {% endif %}
+      </div>
+    </div>
+    {% empty %}
+    <p class="muted" style="font-size:13px">
+      Nothing planned for this day. Anything visited still gets logged —
+      use <em>Log a Visit</em> and it shows up as unplanned.
+    </p>
+    {% endfor %}
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">Doctors Visited</h3>
+
+    {% for r in reported %}
+    <div class="visit visit-{{ r.outcome }}">
+      <strong>{{ r.doctor_name|default:r.call_point.name }}</strong>
+      <span class="meta">
+        {{ r.call_point.name }}
+        {% if r.speciality %} · {{ r.speciality }}{% endif %}
+        {% if r.visit_time %} · {{ r.visit_time|time:"H:i" }}{% endif %}
+        {% if not r.was_planned %} · <em>unplanned</em>{% endif %}
+      </span>
+      <span class="meta">{{ r.get_outcome_display }}</span>
+
+      {% if r.products.all %}
+      <span class="meta">Detailed:
+        {% for p in r.products.all %}{{ p.name }}{% if not forloop.last %}, {% endif %}{% endfor %}
+      </span>
+      {% endif %}
+
+      {% if r.samples_given %}
+      <span class="meta">🧪 {{ r.samples_given }} sample unit(s) left</span>
+      {% endif %}
+
+      {% if r.feedback %}<span class="meta">“{{ r.feedback }}”</span>{% endif %}
+
+      {% if r.next_visit_date %}
+      <span class="meta">Next visit: {{ r.next_visit_date|date:"d M Y" }}</span>
+      {% endif %}
+    </div>
+    {% empty %}
+    <p class="muted" style="font-size:13px">No visits reported for this day yet.</p>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .day-bar { display:flex;gap:10px;align-items:center;flex-wrap:wrap; }
+  .day-bar input, .day-bar select {
+    padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;
+    font-size:14px;font-family:inherit; }
+  .day-bar select { min-width:200px; }
+  .day-label { margin-left:auto;font-size:14px;font-weight:600;color:var(--brand-dark); }
+
+  .stat-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+    gap:15px;margin-bottom:20px; }
+  .stat { display:flex;flex-direction:column;gap:5px; }
+  .stat-label { font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8595a8; }
+  .stat-value { font-size:25px;font-weight:700;color:var(--brand-dark);
+    font-variant-numeric:tabular-nums; }
+
+  .day-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px; }
+
+  .visit { border-left:3px solid #dbe2ea;padding:9px 11px;margin-bottom:9px;
+    background:#fafcfe;border-radius:0 6px 6px 0; }
+  .visit strong { display:block;font-size:13px; }
+  .visit .meta { display:block;font-size:11px;color:#8595a8;margin-top:2px; }
+  .visit-done, .visit-met { border-left-color:#3aaa35;background:#f3fbf3; }
+  .visit-not_available { border-left-color:#dc3545;background:#fdf5f6; }
+  .visit-rescheduled { border-left-color:#e8a33d;background:#fdf9f1; }
+
+  .visit-actions { margin-top:8px; }
+  .btn-mini { padding:4px 10px;font-size:12px; }
+</style>
+{% endblock %}
