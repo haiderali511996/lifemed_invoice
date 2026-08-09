@@ -140,6 +140,30 @@ lib/
 means "queue it and carry on", a 400 means "this will never work, tell the
 MR". Conflating them is how offline apps end up silently dropping work.
 
+## The bundled certificate authority
+
+`assets/ssl-com-chain.pem` carries SSL.com's 2022 root and the intermediate
+that signed the server certificate, and `buildHttpClient()` adds them to the
+roots the app already trusts.
+
+Two real problems this solves. Android keeps its trust store in the system
+image, so a phone that has not had a platform update since before that root
+was published does not have it — and plenty of field phones haven't. And the
+server currently sends only its leaf certificate without the intermediate, so
+a client that cannot fetch the missing piece itself has no chain to validate.
+Either one produces `CERTIFICATE_VERIFY_FAILED: unable to get local issuer
+certificate` on a real device while working perfectly in an emulator.
+
+It **adds** a certificate authority; it does not disable verification. A
+forged or expired certificate is still rejected and every other host is
+validated as before. Turning verification off would have been the easy fix
+and the wrong one — it would leave every MR's credentials readable on any
+hotel wifi.
+
+Replacing the server certificate with one from a different CA means replacing
+this file too. Fetch the new root and intermediate from the AIA URLs printed
+by `openssl s_client -showcerts` against the server.
+
 ## Orders are requests, not sales
 
 The Orders tab sends what a pharmacy wants to the office. It reserves no

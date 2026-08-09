@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Thrown when the server answered, but said no.
@@ -41,13 +44,45 @@ class OfflineException implements Exception {
   String toString() => detail;
 }
 
+/// An HTTP client that also trusts the CA our own server uses.
+///
+/// Android carries its trust store in the system image, so a phone that has
+/// not had a platform update since before a root was published simply does not
+/// have it - and SSL.com's 2022 root is recent enough for that to bite real
+/// devices in the field. The same client also copes with a server that sends
+/// only its leaf certificate without the intermediate above it.
+///
+/// This ADDS a certificate authority to the ones already trusted. It does not
+/// disable verification: a forged or expired certificate is still rejected,
+/// and every other host is validated exactly as before. Turning verification
+/// off would be the easy fix here and the wrong one - it would leave every
+/// MR's credentials readable on any hotel wifi.
+Future<http.Client> buildHttpClient() async {
+  try {
+    final pem = await rootBundle.load('assets/ssl-com-chain.pem');
+
+    final context = SecurityContext(withTrustedRoots: true)
+      ..setTrustedCertificatesBytes(pem.buffer.asUint8List());
+
+    return IOClient(HttpClient(context: context));
+  } catch (_) {
+    // Asset missing or unreadable: fall back to the platform's own roots,
+    // which is what the app did before. Still verified, just less forgiving
+    // of an old device.
+    return http.Client();
+  }
+}
+
 class ApiClient {
   ApiClient({required this.baseUrl, http.Client? httpClient})
       : _http = httpClient ?? http.Client();
 
   /// e.g. https://invoice.lifemedpharmaceutical.com/api/v1
   final String baseUrl;
-  final http.Client _http;
+  http.Client _http;
+
+  /// Swap in the CA-aware client once its asset has loaded.
+  set httpClient(http.Client client) => _http = client;
 
   static const _tokenKey = 'auth_token';
   static const _timeout = Duration(seconds: 20);

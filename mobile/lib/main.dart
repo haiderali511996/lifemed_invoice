@@ -23,10 +23,13 @@ String get apiHost => Uri.parse(apiBase).host;
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  final state = AppState(
-    api: ApiClient(baseUrl: apiBase),
-    store: LocalStore(),
-  );
+  final api = ApiClient(baseUrl: apiBase);
+
+  // Built before anything is fetched, so the very first request already
+  // trusts our server's CA on devices whose own trust store does not.
+  api.httpClient = await buildHttpClient();
+
+  final state = AppState(api: api, store: LocalStore());
 
   await state.boot();
 
