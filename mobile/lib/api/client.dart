@@ -226,6 +226,15 @@ class ApiClient {
             : {'month': '${month.year}-${month.month.toString().padLeft(2, '0')}'},
       ));
 
+  Future<List<dynamic>> orders() async =>
+      List<dynamic>.from(await get('/orders/'));
+
+  Future<Map<String, dynamic>> placeOrder(Map<String, dynamic> data) async =>
+      Map<String, dynamic>.from(await post('/orders/', data));
+
+  Future<Map<String, dynamic>> cancelOrder(int id) async =>
+      Map<String, dynamic>.from(await post('/orders/$id/cancel/', {}));
+
   Future<Map<String, dynamic>> createExpense(Map<String, dynamic> data) async =>
       Map<String, dynamic>.from(await post('/expenses/', data));
 

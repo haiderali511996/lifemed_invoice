@@ -126,6 +126,10 @@ class SyncService {
         await api.createExpense(payload);
         break;
 
+      case OutboxKind.order:
+        await api.placeOrder({...payload, 'client_uuid': item.uuid});
+        break;
+
       default:
         // An unknown kind is from a newer version of the app writing into a
         // database an older one is now reading. Drop it rather than loop.

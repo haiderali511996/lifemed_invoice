@@ -140,6 +140,18 @@ lib/
 means "queue it and carry on", a 400 means "this will never work, tell the
 MR". Conflating them is how offline apps end up silently dropping work.
 
+## Orders are requests, not sales
+
+The Orders tab sends what a pharmacy wants to the office. It reserves no
+stock and fixes no price: the office prices it, picks the batches and raises
+the invoice, and *that* is what moves stock and creates a ledger entry. The
+wording on the screen says so, because an MR who believes stock is held will
+promise a delivery date the office cannot keep.
+
+Orders queue like everything else, so one can be taken in a pharmacy with no
+signal. Until it syncs it shows as "not sent yet" rather than pretending it
+has reached anyone.
+
 ## Doctors move, they are not re-created
 
 A call point is a *place*; a doctor is a *person* who currently sits there.

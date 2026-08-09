@@ -43,6 +43,8 @@ from .models import (
     InvoiceLog,
     Item,
     Manufacturer,
+    Order,
+    OrderItem,
     OVERDUE_DAYS,
     Payment,
     PayrollRun,
@@ -5775,3 +5777,336 @@ class InvoiceDateTests(TestCase):
         })
 
         self.assertEqual(Invoice.objects.get().date, timezone.localdate())
+
+
+class OrderTests(TestCase):
+    """An MR sends an order; the office turns it into an invoice."""
+
+    def setUp(self):
+        self.territory = Territory.objects.create(name="Gulberg")
+
+        self.account = User.objects.create_user("ali", password="pw12345678")
+        UserRolls.objects.filter(user=self.account).update(
+            role=UserRolls.ROLE_FIELD
+        )
+
+        self.mr = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza", designation="mr",
+            territory=self.territory, user=self.account,
+            commission_percent=Decimal("10.00"),
+        )
+        self.clinic = CallPoint.objects.create(
+            name="Shifa Clinic", territory=self.territory, kind="chemist"
+        )
+        self.product = Product.objects.create(
+            code="PAN", name="Panadol", trade_price=Decimal("120.00")
+        )
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1", quantity=500,
+            cost_price=Decimal("80.00"),
+            expiry_date=timezone.localdate() + timedelta(days=365),
+        )
+
+        self.clerk = User.objects.create_user("clerk", password="pw")
+
+    # ------------------------------------------------------- placing one
+
+    def sign_in_mr(self):
+        response = self.client.post(
+            "/api/v1/auth/login/",
+            {"username": "ali", "password": "pw12345678"},
+            content_type="application/json",
+        )
+
+        return response.json()["token"]
+
+    def place(self, token=None, **overrides):
+        payload = {
+            "client_uuid": "order-1",
+            "customer_name": "Shifa Pharmacy",
+            "call_point": self.clinic.pk,
+            "delivery_address": "Main Boulevard, Gulberg",
+            "contact_number": "0300-1234567",
+            "note": "Wants it before Friday",
+            "items": [{"product": self.product.pk, "qty": 20}],
+        }
+        payload.update(overrides)
+
+        return self.client.post(
+            "/api/v1/orders/", payload, content_type="application/json",
+            HTTP_AUTHORIZATION=f"Token {token or self.sign_in_mr()}",
+        )
+
+    def test_an_mr_can_place_an_order(self):
+        response = self.place()
+
+        self.assertEqual(response.status_code, 201)
+
+        order = Order.objects.get()
+        self.assertEqual(order.employee, self.mr)
+        self.assertEqual(order.customer_name, "Shifa Pharmacy")
+        self.assertEqual(order.call_point, self.clinic)
+        self.assertEqual(order.status, Order.PENDING)
+        self.assertEqual(order.order_no, "ORD-0001")
+
+    def test_the_trade_price_fills_in_when_the_mr_gives_none(self):
+        self.place()
+
+        line = OrderItem.objects.get()
+
+        self.assertEqual(line.qty, 20)
+        self.assertEqual(line.unit_price, Decimal("120.00"))
+        self.assertEqual(line.line_total, Decimal("2400.00"))
+
+    def test_the_mrs_own_price_is_kept_when_given(self):
+        self.place(items=[{
+            "product": self.product.pk, "qty": 10,
+            "unit_price": "100.00", "discount": "5",
+        }])
+
+        line = OrderItem.objects.get()
+
+        self.assertEqual(line.unit_price, Decimal("100.00"))
+        self.assertEqual(line.line_total, Decimal("950.00"))
+
+    def test_the_same_order_sent_twice_is_placed_once(self):
+        token = self.sign_in_mr()
+
+        first = self.place(token=token)
+        second = self.place(token=token)
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(Order.objects.count(), 1)
+
+    def test_order_numbers_run_in_sequence(self):
+        token = self.sign_in_mr()
+
+        self.place(token=token, client_uuid="a")
+        self.place(token=token, client_uuid="b")
+
+        self.assertEqual(
+            sorted(Order.objects.values_list("order_no", flat=True)),
+            ["ORD-0001", "ORD-0002"],
+        )
+
+    def test_an_order_with_no_lines_is_refused(self):
+        response = self.place(items=[])
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_an_order_needs_somebody_to_be_for(self):
+        response = self.place(customer_name="")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_placing_an_order_moves_no_stock(self):
+        """An order is a request. Stock leaves when the invoice is raised."""
+        self.place()
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 500)
+        self.assertEqual(StockMovement.objects.count(), 0)
+
+    def test_an_mr_sees_only_their_own_orders(self):
+        other = Employee.objects.create(
+            employee_code="MR-02", full_name="Sara", designation="mr",
+        )
+        Order.objects.create(
+            employee=other, customer_name="Someone Else",
+        )
+        self.place()
+
+        body = self.client.get(
+            "/api/v1/orders/", HTTP_AUTHORIZATION=f"Token {self.sign_in_mr()}"
+        ).json()
+
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]["customer_name"], "Shifa Pharmacy")
+
+    def test_an_mr_can_cancel_before_the_office_acts(self):
+        token = self.sign_in_mr()
+        self.place(token=token)
+
+        order = Order.objects.get()
+
+        response = self.client.post(
+            f"/api/v1/orders/{order.pk}/cancel/", {},
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Token {token}",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Order.objects.get().status, Order.CANCELLED)
+
+    # -------------------------------------------------- the office acting
+
+    def test_the_office_sees_open_orders_by_default(self):
+        self.place()
+        Order.objects.create(
+            employee=self.mr, customer_name="Old One", status=Order.INVOICED
+        )
+
+        self.client.login(username="clerk", password="pw")
+        response = self.client.get(reverse("order_list"))
+
+        names = [o.customer_name for o in response.context["orders"]]
+
+        self.assertIn("Shifa Pharmacy", names)
+        self.assertNotIn("Old One", names)
+
+    def test_an_order_can_be_approved_and_rejected(self):
+        self.place()
+        order = Order.objects.get()
+
+        self.client.login(username="clerk", password="pw")
+
+        self.client.post(reverse("order_status", args=[order.pk, "approve"]))
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.APPROVED)
+        self.assertEqual(order.reviewed_by, self.clerk)
+
+        self.client.post(
+            reverse("order_status", args=[order.pk, "reject"]),
+            {"note": "Out of stock"},
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.REJECTED)
+        self.assertEqual(order.review_note, "Out of stock")
+
+    def test_field_staff_cannot_approve_their_own_order(self):
+        self.place()
+        order = Order.objects.get()
+
+        self.client.login(username="ali", password="pw12345678")
+
+        self.client.post(reverse("order_status", args=[order.pk, "approve"]))
+
+        self.assertEqual(Order.objects.get().status, Order.PENDING)
+
+    # ------------------------------------------------ turning into invoice
+
+    def test_the_invoice_form_opens_prefilled_from_the_order(self):
+        self.place()
+        order = Order.objects.get()
+
+        self.client.login(username="clerk", password="pw")
+        response = self.client.get(reverse("order_invoice", args=[order.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["order"], order)
+
+        line = response.context["order_lines"][0]
+        self.assertEqual(line["name"], "Panadol")
+        self.assertEqual(line["qty"], 20)
+        self.assertEqual(line["price"], Decimal("120.00"))
+
+    def invoice_the_order(self, order, qty="20"):
+        return self.client.post(reverse("generate"), {
+            "order": order.pk,
+            "customer_name": order.customer_name, "address": "Lahore",
+            "ntn": "", "sales_tax": "", "license_no": "L-1",
+            "item_name[]": ["Panadol"], "qty[]": [qty], "price[]": ["120"],
+            "discount[]": ["0"], "batch[]": ["B-1"], "expiry[]": ["12/27"],
+            "stock_batch[]": [str(self.batch.pk)],
+        })
+
+    def test_invoicing_an_order_closes_it_and_links_them(self):
+        self.place()
+        order = Order.objects.get()
+
+        self.client.login(username="clerk", password="pw")
+        self.invoice_the_order(order)
+
+        order.refresh_from_db()
+        invoice = Invoice.objects.get()
+
+        self.assertEqual(order.status, Order.INVOICED)
+        self.assertEqual(order.invoice, invoice)
+        self.assertEqual(order.customer, invoice.customer)
+
+    def test_the_sale_is_credited_to_the_mr_who_took_the_order(self):
+        self.place()
+        order = Order.objects.get()
+
+        self.client.login(username="clerk", password="pw")
+        self.invoice_the_order(order)
+
+        self.assertEqual(Invoice.objects.get().sales_rep, self.mr)
+
+    def test_invoicing_the_order_is_what_moves_the_stock(self):
+        self.place()
+        order = Order.objects.get()
+
+        self.client.login(username="clerk", password="pw")
+        self.invoice_the_order(order)
+
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity, 480)
+
+    def test_an_already_invoiced_order_cannot_be_invoiced_again(self):
+        self.place()
+        order = Order.objects.get()
+
+        self.client.login(username="clerk", password="pw")
+        self.invoice_the_order(order)
+
+        response = self.client.get(reverse("order_invoice", args=[order.pk]))
+
+        self.assertRedirects(
+            response, reverse("order_detail", args=[order.pk])
+        )
+        self.assertEqual(Invoice.objects.count(), 1)
+
+    def test_an_invoiced_order_cannot_be_rejected_afterwards(self):
+        self.place()
+        order = Order.objects.get()
+
+        self.client.login(username="clerk", password="pw")
+        self.invoice_the_order(order)
+
+        self.client.post(reverse("order_status", args=[order.pk, "reject"]))
+
+        self.assertEqual(Order.objects.get().status, Order.INVOICED)
+
+    def test_a_new_pharmacy_becomes_a_customer_when_invoiced(self):
+        self.place(customer_name="Brand New Pharmacy")
+        order = Order.objects.get()
+
+        self.assertIsNone(order.customer)
+
+        self.client.login(username="clerk", password="pw")
+        self.invoice_the_order(order)
+
+        order.refresh_from_db()
+
+        self.assertIsNotNone(order.customer)
+        self.assertEqual(order.customer.name, "Brand New Pharmacy")
+
+    def test_an_ordinary_invoice_is_unaffected(self):
+        """No order id posted: nothing to close, nothing to link."""
+        self.client.login(username="clerk", password="pw")
+
+        self.client.post(reverse("generate"), {
+            "customer_name": "Walk In", "address": "Lahore",
+            "ntn": "", "sales_tax": "", "license_no": "L",
+            "item_name[]": ["Panadol"], "qty[]": ["1"], "price[]": ["120"],
+            "discount[]": ["0"], "batch[]": [""], "expiry[]": [""],
+        })
+
+        self.assertEqual(Invoice.objects.count(), 1)
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_order_pages_render(self):
+        self.place()
+        order = Order.objects.get()
+
+        self.client.login(username="clerk", password="pw")
+
+        for url in (reverse("order_list"),
+                    reverse("order_detail", args=[order.pk]),
+                    reverse("order_invoice", args=[order.pk])):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, 200)

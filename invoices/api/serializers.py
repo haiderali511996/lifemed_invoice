@@ -15,6 +15,8 @@ from ..models import (
     Employee,
     Expense,
     ExpenseCategory,
+    Order,
+    OrderItem,
     PlanVisit,
     Product,
     Target,
@@ -151,6 +153,43 @@ class DoctorMoveSerializer(serializers.ModelSerializer):
             "moved_on", "reason",
         ]
         read_only_fields = ["from_call_point"]
+
+
+class OrderItemSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    line_total = serializers.DecimalField(
+        max_digits=14, decimal_places=2, read_only=True
+    )
+
+    class Meta:
+        model = OrderItem
+        fields = [
+            "id", "product", "product_name", "qty", "unit_price",
+            "discount", "line_total",
+        ]
+
+
+class OrderSerializer(serializers.ModelSerializer):
+    items = OrderItemSerializer(many=True, read_only=True)
+    status_label = serializers.CharField(
+        source="get_status_display", read_only=True
+    )
+    invoice_no = serializers.CharField(
+        source="invoice.invoice_no", read_only=True, default=None
+    )
+    total = serializers.DecimalField(
+        max_digits=14, decimal_places=2, read_only=True
+    )
+
+    class Meta:
+        model = Order
+        fields = [
+            "id", "order_no", "client_uuid", "customer", "customer_name",
+            "call_point", "delivery_address", "contact_number", "note",
+            "required_by", "status", "status_label", "invoice_no", "total",
+            "items", "created_at",
+        ]
+        read_only_fields = ["order_no", "status", "created_at"]
 
 
 class EmployeeSerializer(serializers.ModelSerializer):

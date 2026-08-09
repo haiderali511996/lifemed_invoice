@@ -1195,6 +1195,176 @@ class StockMovement(models.Model):
         return f"{self.batch} {self.quantity:+d} ({self.kind})"
 
 
+
+# ------------------------------------------------------------------- ORDERS
+
+class Order(models.Model):
+    """What an MR asks the office to send, before anyone raises an invoice.
+
+    An order is a request, not a sale. It moves no stock and touches no
+    ledger: those happen when the office turns it into an invoice, which is
+    also the moment a price becomes binding. Until then it can be edited,
+    queried or refused without unpicking anything.
+
+    The customer may not exist yet - an MR often takes an order from a
+    pharmacy the office has never billed - so a name and address are carried
+    alongside the optional link to a real Customer.
+    """
+
+    ORDER_PREFIX = "ORD"
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    INVOICED = "invoiced"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+
+    STATUS_CHOICES = (
+        (PENDING, "Awaiting the office"),
+        (APPROVED, "Approved, not yet invoiced"),
+        (INVOICED, "Invoiced"),
+        (REJECTED, "Rejected"),
+        (CANCELLED, "Cancelled by the MR"),
+    )
+
+    order_no = models.CharField(max_length=20, unique=True)
+
+    employee = models.ForeignKey(
+        Employee, on_delete=models.PROTECT, related_name="orders",
+        help_text="The MR who took the order.",
+    )
+
+    customer = models.ForeignKey(
+        Customer, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="orders",
+        help_text="Left blank when the pharmacy is not on the books yet.",
+    )
+    customer_name = models.CharField(
+        max_length=255,
+        help_text="Who the goods are for, as the MR wrote it.",
+    )
+
+    call_point = models.ForeignKey(
+        CallPoint, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="orders",
+        help_text="Where to deliver, when the order came from a call.",
+    )
+
+    delivery_address = models.TextField(blank=True)
+    contact_number = models.CharField(max_length=50, blank=True)
+    note = models.TextField(blank=True)
+
+    required_by = models.DateField(
+        null=True, blank=True, help_text="When the customer wants it."
+    )
+
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default=PENDING
+    )
+
+    invoice = models.ForeignKey(
+        "Invoice", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="orders",
+    )
+
+    # Generated on the phone before the order leaves it, so a retried sync
+    # cannot place the same order twice.
+    client_uuid = models.CharField(max_length=64, blank=True, db_index=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    reviewed_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="orders_reviewed",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_note = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"{self.order_no} - {self.customer_name}"
+
+    @property
+    def total(self):
+        return sum((line.line_total for line in self.items.all()), ZERO)
+
+    @property
+    def total_units(self):
+        return sum(line.qty for line in self.items.all())
+
+    @property
+    def is_open(self):
+        """Still the office's to act on."""
+        return self.status in (self.PENDING, self.APPROVED)
+
+    @property
+    def can_invoice(self):
+        return self.status in (self.PENDING, self.APPROVED)
+
+    @property
+    def days_waiting(self):
+        return (timezone.now().date() - self.created_at.date()).days
+
+    def save(self, *args, **kwargs):
+        if not self.order_no:
+            self.order_no = self.next_order_no()
+
+        return super().save(*args, **kwargs)
+
+    @classmethod
+    def next_order_no(cls):
+        """Highest existing number + 1, compared numerically."""
+        numbers = []
+
+        for value in cls.objects.filter(
+            order_no__startswith=f"{cls.ORDER_PREFIX}-"
+        ).values_list("order_no", flat=True):
+
+            suffix = value.rsplit("-", 1)[-1]
+
+            if suffix.isdigit():
+                numbers.append(int(suffix))
+
+        return f"{cls.ORDER_PREFIX}-{(max(numbers) + 1 if numbers else 1):04d}"
+
+
+class OrderItem(models.Model):
+    """One line an MR asked for.
+
+    The price is what the MR quoted, kept so the office can see what the
+    customer was told. It is a suggestion: the invoice is where a price
+    becomes binding, and the office can change it there.
+    """
+
+    order = models.ForeignKey(
+        Order, on_delete=models.CASCADE, related_name="items"
+    )
+    product = models.ForeignKey(
+        Product, on_delete=models.PROTECT, related_name="order_items"
+    )
+
+    qty = models.PositiveIntegerField(default=1)
+    unit_price = models.DecimalField(
+        max_digits=10, decimal_places=2, default=ZERO
+    )
+    discount = models.DecimalField(max_digits=5, decimal_places=2, default=ZERO)
+
+    class Meta:
+        ordering = ["id"]
+
+    def __str__(self):
+        return f"{self.product.name} x{self.qty}"
+
+    @property
+    def line_total(self):
+        gross = self.unit_price * self.qty
+
+        return gross - (gross * self.discount / Decimal("100"))
+
+
 # ------------------------------------------------------------------ RETURNS
 
 class SalesReturn(models.Model):

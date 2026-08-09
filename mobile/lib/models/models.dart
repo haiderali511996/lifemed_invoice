@@ -246,6 +246,89 @@ class WeeklyPlan {
       };
 }
 
+class OrderLine {
+  OrderLine({
+    required this.productId,
+    required this.productName,
+    required this.qty,
+    required this.unitPrice,
+    required this.discount,
+  });
+
+  final int productId;
+  final String productName;
+  final int qty;
+  final double unitPrice;
+  final double discount;
+
+  double get lineTotal {
+    final gross = unitPrice * qty;
+
+    return gross - (gross * discount / 100);
+  }
+
+  factory OrderLine.fromJson(Map<String, dynamic> json) => OrderLine(
+        productId: _asInt(json['product']),
+        productName: _asString(json['product_name']),
+        qty: _asInt(json['qty']),
+        unitPrice: _asDouble(json['unit_price']),
+        discount: _asDouble(json['discount']),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'product': productId,
+        'qty': qty,
+        'unit_price': unitPrice.toStringAsFixed(2),
+        'discount': discount.toStringAsFixed(2),
+      };
+}
+
+class Order {
+  Order({
+    required this.id,
+    required this.orderNo,
+    required this.customerName,
+    required this.status,
+    required this.statusLabel,
+    required this.total,
+    required this.lines,
+    required this.placedAt,
+    this.invoiceNo,
+    this.pending = false,
+  });
+
+  final int id;
+  final String orderNo;
+  final String customerName;
+  final String status;
+  final String statusLabel;
+  final double total;
+  final List<OrderLine> lines;
+  final DateTime placedAt;
+  final String? invoiceNo;
+
+  /// Still sitting in the outbox, never yet seen by the office.
+  final bool pending;
+
+  bool get canCancel =>
+      !pending && (status == 'pending' || status == 'approved');
+
+  factory Order.fromJson(Map<String, dynamic> json) => Order(
+        id: _asInt(json['id']),
+        orderNo: _asString(json['order_no']),
+        customerName: _asString(json['customer_name']),
+        status: _asString(json['status']),
+        statusLabel: _asString(json['status_label']),
+        total: _asDouble(json['total']),
+        lines: (json['items'] as List? ?? [])
+            .map((line) => OrderLine.fromJson(Map<String, dynamic>.from(line)))
+            .toList(),
+        placedAt:
+            DateTime.tryParse(_asString(json['created_at'])) ?? DateTime.now(),
+        invoiceNo: json['invoice_no']?.toString(),
+      );
+}
+
 /// One line of "target vs actual".
 class Measure {
   Measure({

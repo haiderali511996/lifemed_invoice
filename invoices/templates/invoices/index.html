@@ -8,8 +8,20 @@
   <a href="{% url 'customer_list' %}" class="btn btn-grey">👥 Customers</a>
 </div>
 
+{% if order %}
+<div class="alert alert-warn">
+  Invoicing <strong>{{ order.order_no }}</strong> from
+  <strong>{{ order.employee.full_name }}</strong>, taken
+  {{ order.created_at|date:"d M Y" }}{% if order.call_point %} for delivery to
+  {{ order.call_point.name }}{% endif %}. Check the prices and pick stock
+  batches — the order carried the MR's quote, not a binding price.
+  {% if order.note %}<br /><em>“{{ order.note }}”</em>{% endif %}
+</div>
+{% endif %}
+
 <form method="POST" action="{% url 'generate' %}">
   {% csrf_token %}
+  {% if order %}<input type="hidden" name="order" value="{{ order.id }}" />{% endif %}
 
   <div class="card" style="margin-bottom: 16px">
     {% if distributors %}
@@ -479,8 +491,56 @@
     document.getElementById("grand-total").textContent = total.toFixed(2);
   }
 
+  /* Lines from an order the office is invoicing; empty otherwise. */
+  const ORDER_LINES = [
+    {% for line in order_lines %}
+    {
+      name: "{{ line.name|escapejs }}",
+      qty: "{{ line.qty }}",
+      price: "{{ line.price }}",
+      discount: "{{ line.discount }}",
+      batch: "",
+      expiry: ""
+    },
+    {% endfor %}
+  ];
+
+  /* Who the order was for, so the office does not retype the pharmacy. */
+  const ORDER_CUSTOMER = {
+    id: "{{ order.customer_id|default_if_none:'' }}",
+    name: "{{ order.customer_name|default:''|escapejs }}",
+    address: "{{ order.delivery_address|default:''|escapejs }}",
+    rep: "{{ order.employee_id|default_if_none:'' }}"
+  };
+
+  function fillFromOrder() {
+    if (ORDER_CUSTOMER.id) {
+      /* A customer already on the books: reuse the existing picker so the
+         licence, NTN and previous balance all load exactly as they would if
+         the office had chosen them by hand. */
+      const dropdown = document.getElementById("customerDropdown");
+      dropdown.value = ORDER_CUSTOMER.id;
+      fillCustomer();
+    } else {
+      document.getElementById("customer_name").value = ORDER_CUSTOMER.name;
+      document.getElementById("address").value = ORDER_CUSTOMER.address;
+    }
+
+    /* The MR who took the order earns the commission on it. */
+    const rep = document.getElementById("salesRep");
+
+    if (rep && ORDER_CUSTOMER.rep) rep.value = ORDER_CUSTOMER.rep;
+  }
+
   window.addEventListener("load", function () {
-    addRow();
+    if (ORDER_LINES.length) {
+      /* Invoicing an order: start from what the MR asked for, so the office
+         is checking the lines rather than retyping them. */
+      ORDER_LINES.forEach(addRow);
+      fillFromOrder();
+    } else {
+      addRow();
+    }
   });
 </script>
 {% endblock %}

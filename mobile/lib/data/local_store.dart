@@ -269,4 +269,5 @@ class OutboxKind {
   static const doctorUpdate = 'doctor_update';
   static const doctorMove = 'doctor_move';
   static const expense = 'expense';
+  static const order = 'order';
 }

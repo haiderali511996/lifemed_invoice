@@ -1,0 +1,139 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - {{ order.order_no }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>📦 {{ order.order_no }}</h1>
+  <div style="display:flex;gap:9px" class="no-print">
+    <a href="{% url 'order_list' %}" class="btn btn-grey">All Orders</a>
+    {% if order.can_invoice and can_act %}
+    <a href="{% url 'order_invoice' order.id %}" class="btn btn-green">
+      🧾 Raise Invoice
+    </a>
+    {% endif %}
+  </div>
+</div>
+
+{% if order.status == "invoiced" %}
+<div class="alert alert-success">
+  Invoiced as <strong>{{ order.invoice.invoice_no }}</strong>
+  on {{ order.invoice.date|date:"d M Y" }}.
+  <a href="{% url 'invoice_reprint' order.invoice.id %}">Reprint it</a>.
+</div>
+{% elif order.status == "rejected" %}
+<div class="alert alert-error">
+  Rejected{% if order.review_note %} — “{{ order.review_note }}”{% endif %}
+</div>
+{% endif %}
+
+<div class="card" style="margin-bottom:16px">
+  <div class="summary">
+    <div><span class="k">Placed by</span><span class="v">
+      {{ order.employee.full_name }}
+      <span class="muted">{{ order.employee.territory.name|default:"" }}</span></span></div>
+    <div><span class="k">Placed on</span><span class="v">
+      {{ order.created_at|date:"d M Y, H:i" }}</span></div>
+    <div><span class="k">For</span><span class="v">
+      {% if order.customer %}
+      <a href="{% url 'customer_ledger' order.customer.id %}">{{ order.customer_name }}</a>
+      {% else %}{{ order.customer_name }}
+      <span class="muted">not yet a customer — invoicing will create them</span>
+      {% endif %}</span></div>
+    <div><span class="k">Deliver to</span><span class="v">
+      {{ order.call_point.name|default:"—" }}</span></div>
+    <div><span class="k">Required by</span><span class="v">
+      {{ order.required_by|date:"d M Y"|default:"not stated" }}</span></div>
+    <div><span class="k">Contact</span><span class="v">
+      {{ order.contact_number|default:"—" }}</span></div>
+  </div>
+
+  {% if order.delivery_address %}
+  <p style="margin:16px 0 0;font-size:13.5px">
+    <strong>Address:</strong> {{ order.delivery_address }}
+  </p>
+  {% endif %}
+  {% if order.note %}
+  <p style="margin:8px 0 0;font-size:13.5px;color:#55657a">
+    “{{ order.note }}”
+  </p>
+  {% endif %}
+</div>
+
+<div class="card" style="margin-bottom:16px">
+  <h3 style="margin-top:0">What was asked for</h3>
+  <p class="muted" style="font-size:12.5px;margin:0 0 12px">
+    Prices are what the MR quoted. Nothing is binding and no stock has moved —
+    both happen when the invoice is raised, where you can change them.
+  </p>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Product</th><th class="num">Qty</th><th class="num">Price</th>
+        <th class="num">Disc %</th><th class="num">Line Total</th>
+        <th class="num">In Stock</th>
+      </tr></thead>
+      <tbody>
+        {% for line in order.items.all %}
+        <tr>
+          <td><strong>{{ line.product.name }}</strong>
+            <span class="muted">{{ line.product.code }}</span></td>
+          <td class="num">{{ line.qty }}</td>
+          <td class="num">{{ line.unit_price|floatformat:2 }}</td>
+          <td class="num">{{ line.discount|floatformat:2 }}</td>
+          <td class="num">{{ line.line_total|floatformat:2 }}</td>
+          <td class="num">
+            {% if line.product.sellable_stock < line.qty %}
+            <span class="pill pill-overdue">{{ line.product.sellable_stock }}</span>
+            {% else %}{{ line.product.sellable_stock }}{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot><tr>
+        <th style="text-align:right">Total</th>
+        <th class="num">{{ order.total_units }}</th>
+        <th colspan="2"></th>
+        <th class="num">{{ order.total|floatformat:2 }}</th>
+        <th></th>
+      </tr></tfoot>
+    </table>
+  </div>
+</div>
+
+{% if can_act and order.status != "invoiced" %}
+<div class="card no-print">
+  <h3 style="margin-top:0">Office Decision</h3>
+  <form method="POST" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center"
+        action="{% url 'order_status' order.id 'approve' %}">
+    {% csrf_token %}
+    <input type="text" name="note" placeholder="Note for the MR (optional)"
+           style="flex:1;min-width:220px;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
+    {% if order.status != "approved" %}
+    <button type="submit" class="btn btn-green">Approve</button>
+    {% endif %}
+    <button type="submit" class="btn btn-danger"
+            formaction="{% url 'order_status' order.id 'reject' %}">Reject</button>
+    {% if order.status != "pending" %}
+    <button type="submit" class="btn btn-grey"
+            formaction="{% url 'order_status' order.id 'reopen' %}">Reopen</button>
+    {% endif %}
+  </form>
+  <p class="muted" style="font-size:12.5px;margin:12px 0 0">
+    Approving is optional — you can raise the invoice straight from a pending
+    order. It is there for when the office wants to confirm before the goods
+    are picked.
+  </p>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .summary { display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px; }
+  .summary .k { display:block;font-size:11px;text-transform:uppercase;
+    letter-spacing:.5px;color:#8595a8;margin-bottom:4px; }
+  .summary .v { font-size:14px; }
+  .summary .muted, td .muted { display:block;font-size:11px; }
+  tfoot th { padding-top:10px;border-top:2px solid #dbe2ea;font-size:13px; }
+</style>
+{% endblock %}
