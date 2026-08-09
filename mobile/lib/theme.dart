@@ -24,7 +24,7 @@ ThemeData buildTheme() {
       elevation: 0,
       centerTitle: false,
     ),
-    cardTheme: CardTheme(
+    cardTheme: CardThemeData(
       elevation: 0,
       color: Colors.white,
       margin: const EdgeInsets.symmetric(vertical: 6),

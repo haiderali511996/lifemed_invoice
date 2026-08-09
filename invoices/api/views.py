@@ -22,13 +22,18 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from rest_framework.exceptions import ValidationError
+
 from ..models import (
     CallPoint,
+    Customer,
     CallReport,
     Doctor,
     Employee,
     Expense,
     ExpenseCategory,
+    Order,
+    OrderItem,
     PlanVisit,
     Product,
     Target,
@@ -46,6 +51,7 @@ from .serializers import (
     EmployeeSerializer,
     ExpenseCategorySerializer,
     ExpenseSerializer,
+    OrderSerializer,
     ProductSerializer,
     TargetSerializer,
     TerritorySerializer,
@@ -566,6 +572,154 @@ def performance(request):
         },
         "target": TargetSerializer(target).data if target else None,
     })
+
+
+# ------------------------------------------------------------------ ORDERS
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def orders(request):
+    """Orders the MR has sent to the office.
+
+    An order moves no stock and creates no ledger entry: it is a request. The
+    office turns it into an invoice, and that is where a price becomes binding
+    and stock actually leaves.
+    """
+    employee = me(request)
+
+    if employee is None:
+        return no_employee()
+
+    if request.method == "GET":
+        return Response(OrderSerializer(
+            Order.objects.filter(employee=employee)
+            .select_related("customer", "call_point", "invoice")
+            .prefetch_related("items__product"),
+            many=True,
+        ).data)
+
+    return place_order(request, employee)
+
+
+@transaction.atomic
+def place_order(request, employee):
+    client_uuid = (request.data.get("client_uuid") or "").strip()
+
+    if client_uuid:
+        existing = Order.objects.filter(
+            employee=employee, client_uuid=client_uuid
+        ).first()
+
+        if existing is not None:
+            # A resent order, not a second one.
+            return Response(
+                OrderSerializer(existing).data, status=status.HTTP_200_OK
+            )
+
+    lines = request.data.get("items") or []
+
+    if not lines:
+        return Response(
+            {"items": ["An order needs at least one product."]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    customer = Customer.objects.filter(
+        pk=request.data.get("customer")
+    ).first()
+
+    name = (request.data.get("customer_name") or "").strip()
+
+    if customer is not None:
+        name = customer.name
+
+    if not name:
+        return Response(
+            {"customer_name": ["Say who the order is for."]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    call_point = in_territory(employee).filter(
+        pk=request.data.get("call_point")
+    ).first()
+
+    order = Order.objects.create(
+        employee=employee,
+        customer=customer,
+        customer_name=name[:255],
+        call_point=call_point,
+        delivery_address=request.data.get("delivery_address") or "",
+        contact_number=(request.data.get("contact_number") or "")[:50],
+        note=request.data.get("note") or "",
+        required_by=parse_date(request.data.get("required_by") or ""),
+        client_uuid=client_uuid,
+    )
+
+    products = {
+        product.pk: product
+        for product in Product.objects.filter(is_active=True)
+    }
+
+    for line in lines:
+        product = products.get(line.get("product"))
+
+        if product is None:
+            continue
+
+        quantity = int(line.get("qty") or 0)
+
+        if quantity <= 0:
+            continue
+
+        OrderItem.objects.create(
+            order=order,
+            product=product,
+            qty=quantity,
+            # The MR's own price where they gave one, otherwise the trade
+            # price on the product, so the office sees a figure either way.
+            unit_price=line.get("unit_price") or product.trade_price,
+            discount=line.get("discount") or ZERO,
+        )
+
+    if not order.items.exists():
+        # Everything was unknown or zero; an empty order helps nobody.
+        raise ValidationError(
+            {"items": ["None of those products could be ordered."]}
+        )
+
+    return Response(
+        OrderSerializer(order).data, status=status.HTTP_201_CREATED
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def cancel_order(request, order_id):
+    """An MR withdrawing an order before the office acts on it."""
+    employee = me(request)
+
+    if employee is None:
+        return no_employee()
+
+    order = Order.objects.filter(pk=order_id, employee=employee).first()
+
+    if order is None:
+        return Response(
+            {"detail": "No such order of yours."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if not order.is_open:
+        return Response(
+            {"detail": f"{order.order_no} is already "
+                       f"{order.get_status_display().lower()}."},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    order.status = Order.CANCELLED
+    order.save(update_fields=["status", "updated_at"])
+
+    return Response(OrderSerializer(order).data)
 
 
 # ---------------------------------------------------------------- EXPENSES

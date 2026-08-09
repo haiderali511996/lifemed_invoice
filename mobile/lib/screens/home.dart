@@ -7,6 +7,7 @@ import '../theme.dart';
 import '../widgets/common.dart';
 import 'call_points.dart';
 import 'expenses.dart';
+import 'orders.dart';
 import 'performance.dart';
 import 'record_visit.dart';
 import 'schedule.dart';
@@ -26,6 +27,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final pages = const [
       _TodayPage(),
       ScheduleScreen(),
+      OrdersScreen(),
       CallPointsScreen(),
       PerformanceScreen(),
     ];
@@ -45,6 +47,11 @@ class _HomeScreenState extends State<HomeScreen> {
             icon: Icon(Icons.calendar_month_outlined),
             selectedIcon: Icon(Icons.calendar_month),
             label: 'Schedule',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.inventory_2_outlined),
+            selectedIcon: Icon(Icons.inventory_2),
+            label: 'Orders',
           ),
           NavigationDestination(
             icon: Icon(Icons.location_on_outlined),

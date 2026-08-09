@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../main.dart' show apiHost;
 import '../state/app_state.dart';
 import '../theme.dart';
 
@@ -44,6 +45,12 @@ class _LoginScreenState extends State<LoginScreen> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Image.asset('assets/logo-full.png', height: 62),
+                const SizedBox(height: 4),
+                Text(
+                  apiHost,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: muted, fontSize: 10.5),
+                ),
                 const SizedBox(height: 10),
                 const Text(
                   'Field Force',
@@ -60,11 +67,13 @@ class _LoginScreenState extends State<LoginScreen> {
                       borderRadius: BorderRadius.circular(10),
                       border: Border.all(color: const Color(0xFFF3C6CC)),
                     ),
-                    child: Text(
+                    child: SelectableText(
+                      // Selectable so the reason can be copied out and sent to
+                      // whoever is fixing it, rather than retyped off a photo.
                       state.banner!,
                       style: const TextStyle(
                         color: Color(0xFFA71D2A),
-                        fontSize: 13.5,
+                        fontSize: 13,
                       ),
                     ),
                   ),

@@ -490,6 +490,9 @@
         </a>
 
         <div class="nav-section">My Money</div>
+        <a href="{% url 'order_list' %}" class="{% if active == 'orders' %}active{% endif %}">
+          📦 <span>My Orders</span>
+        </a>
         <a href="{% url 'my_sales' %}" class="{% if active == 'my_sales' %}active{% endif %}">
           📈 <span>My Sales</span>
         </a>
@@ -511,6 +514,10 @@
           🧾 <span>New Invoice</span>
         </a>
         {% endif %}
+        <a href="{% url 'order_list' %}" class="{% if active == 'orders' %}active{% endif %}">
+          📦 <span>Orders</span>
+          {% if pending_orders %}<span class="badge">{{ pending_orders }}</span>{% endif %}
+        </a>
         <a href="{% url 'invoice_list' %}" class="{% if active == 'invoices' %}active{% endif %}">
           📄 <span>All Invoices</span>
         </a>

@@ -72,6 +72,8 @@ from .models import (
     Supplier,
     Doctor,
     DoctorMove,
+    Order,
+    OrderItem,
     ProductTarget,
     Target,
     Territory,
@@ -332,13 +334,34 @@ def logout_view(request):
 
 
 @login_required
-def index(request):
+def index(request, order_id=None):
 
     # SUPER ADMIN KO FORM NA DIKHAYE
     if is_super_admin(request.user):
         return redirect("invoice_logs")
 
     customers = Customer.objects.all()
+
+    # Raising an invoice against an order: the form opens already filled in
+    # with what the MR asked for, so the office is checking rather than
+    # retyping. Nothing is committed until they submit, as usual.
+    order = None
+
+    if order_id is not None:
+        order = get_object_or_404(
+            Order.objects.select_related("customer", "employee")
+            .prefetch_related("items__product"),
+            pk=order_id,
+        )
+
+        if not order.can_invoice:
+            messages.error(
+                request,
+                f"{order.order_no} is {order.get_status_display().lower()} "
+                f"and cannot be invoiced.",
+            )
+
+            return redirect("order_detail", order_id=order.pk)
 
     return render(
         request,
@@ -351,8 +374,31 @@ def index(request):
             "sales_reps": Employee.objects.filter(
                 is_active=True, designation="mr"
             ).select_related("territory"),
+            "order": order,
+            "order_lines": _order_lines(order),
         }
     )
+
+
+def _order_lines(order):
+    """An order's items in the shape index.html builds invoice rows from."""
+    if order is None:
+        return []
+
+    return [
+        {
+            "name": line.product.name,
+            "product_id": line.product_id,
+            "qty": line.qty,
+            "price": line.unit_price,
+            "discount": line.discount,
+            # addRow() assigns these straight onto inputs, so they have to be
+            # present - undefined would render as the text "undefined".
+            "batch": "",
+            "expiry": "",
+        }
+        for line in order.items.all()
+    ]
 
 
 @login_required
@@ -495,11 +541,20 @@ def generate_invoice(request):
 
             customer.save()
 
+        order = Order.objects.filter(
+            pk=request.POST.get("order") or None
+        ).first()
+
         invoice = Invoice.objects.create(
             customer=customer,
             distributor=distributor,
             license_no=license_no,
-            sales_rep=_sales_rep_for(request, customer),
+            # An order already names the MR who took it; crediting anyone else
+            # would pay commission to the wrong person.
+            sales_rep=(
+                order.employee if order is not None
+                else _sales_rep_for(request, customer)
+            ),
         )
 
         names = request.POST.getlist("item_name[]")
@@ -615,7 +670,11 @@ def generate_invoice(request):
                 "customer_name": customer.name,
                 "address": customer.address,
                 "invoice_no": invoice.invoice_no,
-                "date": now().strftime("%d/%m/%Y"),
+                # The invoice's own stored date, not now(): now() is UTC-aware
+                # and formats to the UTC day, so between midnight and 5am here
+                # the printed document was a day behind the ledger. One source
+                # for the date means a reprint can never disagree either.
+                "date": invoice.date.strftime("%d/%m/%Y"),
                 "license_no": invoice.license_no,
                 "ntn": customer.ntn or "",
                 "sales_tax": customer.sales_tax or "",
@@ -630,9 +689,32 @@ def generate_invoice(request):
             distributor=distributor,
         )
 
+        _close_order(order, invoice, customer, request.user)
+
         return pdf_download(pdf_bytes, invoice.invoice_no)
 
     return redirect("index")
+
+
+def _close_order(order, invoice, customer, user):
+    """Mark the order invoiced and point it at what was raised.
+
+    Also fills in the customer link if the order named a pharmacy that was
+    not on the books yet - invoicing is what puts them there, and the order
+    should point at the same record from then on.
+    """
+    if order is None or not order.can_invoice:
+        return
+
+    order.invoice = invoice
+    order.status = Order.INVOICED
+    order.reviewed_by = user
+    order.reviewed_at = timezone.now()
+
+    if order.customer_id is None:
+        order.customer = customer
+
+    order.save()
 
 
 def pdf_download(pdf_bytes, name):
@@ -3397,6 +3479,116 @@ def call_report_summary(request):
             "total_calls": sum(row["calls"] for row in ranked),
         }
     )
+
+
+# ------------------------------------------------------------------- ORDERS
+
+@login_required
+def order_list(request):
+    """What the field has asked for, and what the office still owes them."""
+    orders = Order.objects.select_related(
+        "employee", "customer", "call_point", "invoice"
+    ).prefetch_related("items__product")
+
+    status_filter = request.GET.get("status", "").strip()
+    employee_id = request.GET.get("employee", "").strip()
+
+    mine = field_employee(request.user)
+
+    if mine is not None:
+        orders = orders.filter(employee=mine)
+    elif employee_id:
+        orders = orders.filter(employee_id=employee_id)
+
+    if status_filter:
+        orders = orders.filter(status=status_filter)
+    elif mine is None:
+        # The office's default view is the work still to do, not the archive.
+        orders = orders.filter(status__in=[Order.PENDING, Order.APPROVED])
+
+    orders = list(orders)
+
+    return render(
+        request,
+        "invoices/order_list.html",
+        {
+            "active": "orders",
+            "orders": orders,
+            "employees": Employee.objects.filter(is_active=True),
+            "statuses": Order.STATUS_CHOICES,
+            "selected_status": status_filter,
+            "selected_employee": employee_id,
+            "locked_to_me": mine is not None,
+            "value": sum((order.total for order in orders), ZERO),
+            "waiting": Order.objects.filter(status=Order.PENDING).count(),
+        }
+    )
+
+
+@login_required
+def order_detail(request, order_id):
+    order = get_object_or_404(
+        Order.objects.select_related(
+            "employee", "customer", "call_point", "invoice"
+        ).prefetch_related("items__product"),
+        pk=order_id,
+    )
+
+    refused = deny_unless_mine(request, order.employee)
+
+    if refused is not None:
+        return refused
+
+    return render(
+        request,
+        "invoices/order_detail.html",
+        {
+            "active": "orders",
+            "order": order,
+            "can_act": not is_field_staff(request.user),
+        }
+    )
+
+
+@login_required
+def order_status(request, order_id, action):
+    """Approve or reject an order without raising anything yet."""
+    if is_field_staff(request.user):
+        messages.error(request, "🚫 Only the office can approve orders.")
+
+        return redirect("order_list")
+
+    order = get_object_or_404(Order, pk=order_id)
+
+    transitions = {
+        "approve": Order.APPROVED,
+        "reject": Order.REJECTED,
+        "reopen": Order.PENDING,
+    }
+
+    if action not in transitions:
+        messages.error(request, "Unknown action.")
+
+        return redirect("order_detail", order_id=order.pk)
+
+    if order.status == Order.INVOICED:
+        messages.error(
+            request,
+            f"{order.order_no} has already been invoiced as "
+            f"{order.invoice.invoice_no if order.invoice else 'an invoice'}.",
+        )
+
+        return redirect("order_detail", order_id=order.pk)
+
+    order.status = transitions[action]
+    order.reviewed_by = request.user
+    order.reviewed_at = timezone.now()
+    order.review_note = clip(request.POST.get("note", ""), 500)
+    order.save()
+
+    messages.success(request, f"{order.order_no} marked {order.get_status_display().lower()}.")
+
+    return redirect("order_detail", order_id=order.pk)
 
 
 # ------------------------------------------------------------------ TARGETS

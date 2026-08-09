@@ -82,8 +82,12 @@ class AppState extends ChangeNotifier {
       banner = error.message;
 
       return false;
-    } on OfflineException {
-      banner = 'No connection. Signing in for the first time needs one.';
+    } on OfflineException catch (error) {
+      // The underlying reason, not just "offline": on a phone with full signal
+      // this is the difference between a wrong address, a rejected
+      // certificate, and a server that is actually down.
+      banner = 'Could not reach the server.\n\n${error.cause ?? ''}\n\n'
+          'Signing in for the first time needs a connection.';
 
       return false;
     } finally {
@@ -434,6 +438,100 @@ class AppState extends ChangeNotifier {
     notifyListeners();
 
     unawaited(sync.run());
+  }
+
+  /// Send an order to the office.
+  ///
+  /// Queued like everything else, so an MR taking an order in a pharmacy with
+  /// no signal still gets it away. It reserves no stock and fixes no price -
+  /// the office decides both when they raise the invoice.
+  Future<void> placeOrder({
+    required String customerName,
+    int? customerId,
+    int? callPointId,
+    required List<OrderLine> lines,
+    String deliveryAddress = '',
+    String contactNumber = '',
+    String note = '',
+    DateTime? requiredBy,
+  }) async {
+    await store.queue(_uuid.v4(), OutboxKind.order, {
+      if (customerId != null) 'customer': customerId,
+      'customer_name': customerName,
+      if (callPointId != null) 'call_point': callPointId,
+      'delivery_address': deliveryAddress,
+      'contact_number': contactNumber,
+      'note': note,
+      if (requiredBy != null) 'required_by': _day(requiredBy),
+      'items': lines.map((line) => line.toJson()).toList(),
+    });
+
+    pending = await store.pendingCount();
+    notifyListeners();
+
+    unawaited(sync.run().then((status) {
+      pending = status.pending;
+      notifyListeners();
+    }));
+  }
+
+  /// Orders the office has seen, newest first, with anything still queued on
+  /// the phone shown above them so an MR can tell the difference.
+  Future<List<Order>> loadOrders() async {
+    final queued = await store.pending(limit: 200);
+
+    final unsent = [
+      for (final item in queued)
+        if (item.kind == OutboxKind.order)
+          Order(
+            id: -item.createdAt.millisecondsSinceEpoch,
+            orderNo: 'not sent yet',
+            customerName: '${item.payload['customer_name'] ?? ''}',
+            status: 'queued',
+            statusLabel: item.isStuck
+                ? 'Could not send — ${item.lastError ?? 'unknown error'}'
+                : 'Waiting for signal',
+            total: 0,
+            lines: const [],
+            placedAt: item.createdAt,
+            pending: true,
+          ),
+    ];
+
+    try {
+      final sent = (await api.orders())
+          .map((row) => Order.fromJson(Map<String, dynamic>.from(row)))
+          .toList();
+
+      await store.put('orders', await api.orders());
+
+      return [...unsent, ...sent];
+    } on OfflineException {
+      final cached = await store.read('orders');
+
+      if (cached is List) {
+        return [
+          ...unsent,
+          ...cached.map(
+            (row) => Order.fromJson(Map<String, dynamic>.from(row)),
+          ),
+        ];
+      }
+
+      return unsent;
+    }
+  }
+
+  Future<String?> cancelOrder(Order order) async {
+    try {
+      await api.cancelOrder(order.id);
+
+      return null;
+    } on OfflineException {
+      return 'Cancelling needs a connection.';
+    } on ApiException catch (error) {
+      return error.message;
+    }
   }
 
   Future<void> claimExpense({

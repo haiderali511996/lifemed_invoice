@@ -15,6 +15,17 @@ urlpatterns = [
     path('me/payslips/', views.my_payslips, name='my_payslips'),
     path('commission/', views.commission_report, name='commission_report'),
 
+    path('orders/', views.order_list, name='order_list'),
+    path('orders/<int:order_id>/', views.order_detail, name='order_detail'),
+    # Before the <str:action> pattern below, which would otherwise swallow
+    # "invoice" as an unknown status transition and redirect.
+    path('orders/<int:order_id>/invoice/', views.index, name='order_invoice'),
+    path(
+        'orders/<int:order_id>/<str:action>/',
+        views.order_status,
+        name='order_status',
+    ),
+
     path('targets/', views.target_list, name='target_list'),
     path('targets/new/', views.target_edit, name='target_new'),
     path('targets/<int:target_id>/edit/', views.target_edit, name='target_edit'),

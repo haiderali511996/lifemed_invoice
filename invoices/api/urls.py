@@ -27,6 +27,9 @@ urlpatterns = [
 
     path('visits/', views.visits, name='visits'),
 
+    path('orders/', views.orders, name='orders'),
+    path('orders/<int:order_id>/cancel/', views.cancel_order, name='cancel_order'),
+
     path('performance/', views.performance, name='performance'),
     path('expenses/', views.expenses, name='expenses'),
 ]

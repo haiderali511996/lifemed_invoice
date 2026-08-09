@@ -1,0 +1,91 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Orders{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>📦 {% if locked_to_me %}My Orders{% else %}Orders from the Field{% endif %}</h1>
+  <span style="font-size:15px">
+    {{ orders|length }} order(s) · <strong>{{ value|floatformat:2 }}</strong>
+  </span>
+</div>
+
+{% if not locked_to_me %}
+<div class="card" style="margin-bottom:16px">
+  <form method="GET" style="display:flex;gap:10px;flex-wrap:wrap">
+    <select name="status" style="padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
+      <option value="">Open orders</option>
+      {% for value, label in statuses %}
+      <option value="{{ value }}" {% if selected_status == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <select name="employee" style="padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
+      <option value="">All team members</option>
+      {% for e in employees %}
+      <option value="{{ e.id }}" {% if selected_employee == e.id|stringformat:"s" %}selected{% endif %}>{{ e.full_name }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit" class="btn">Filter</button>
+    {% if selected_status or selected_employee %}
+    <a href="{% url 'order_list' %}" class="btn btn-grey">Clear</a>
+    {% endif %}
+  </form>
+</div>
+{% endif %}
+
+<div class="card">
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Order</th><th>Placed</th><th>For</th>
+        {% if not locked_to_me %}<th>MR</th>{% endif %}
+        <th class="num">Lines</th><th class="num">Value</th>
+        <th>Status</th><th></th>
+      </tr></thead>
+      <tbody>
+        {% for o in orders %}
+        <tr>
+          <td><strong>{{ o.order_no }}</strong></td>
+          <td>{{ o.created_at|date:"d-m-Y" }}
+            {% if o.status == "pending" and o.days_waiting > 1 %}
+            <span class="muted">waiting {{ o.days_waiting }} day(s)</span>
+            {% endif %}</td>
+          <td>{{ o.customer_name }}
+            {% if not o.customer %}<span class="pill">new customer</span>{% endif %}
+            {% if o.call_point %}<span class="muted">deliver to {{ o.call_point.name }}</span>{% endif %}</td>
+          {% if not locked_to_me %}<td>{{ o.employee.full_name }}</td>{% endif %}
+          <td class="num">{{ o.items.count }}</td>
+          <td class="num">{{ o.total|floatformat:2 }}</td>
+          <td>
+            {% if o.status == "invoiced" %}<span class="pill pill-paid">invoiced</span>
+            {% elif o.status == "approved" %}<span class="pill pill-due">approved</span>
+            {% elif o.status == "rejected" %}<span class="pill pill-overdue">rejected</span>
+            {% elif o.status == "cancelled" %}<span class="pill">cancelled</span>
+            {% else %}<span class="pill pill-due">awaiting office</span>{% endif %}
+          </td>
+          <td style="white-space:nowrap">
+            <a href="{% url 'order_detail' o.id %}" class="btn btn-sm btn-grey">Open</a>
+            {% if o.can_invoice and not is_field_staff %}
+            <a href="{% url 'order_invoice' o.id %}" class="btn btn-sm btn-green">Invoice</a>
+            {% endif %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="{% if locked_to_me %}7{% else %}8{% endif %}"
+                style="text-align:center;padding:26px">
+          {% if locked_to_me %}
+          You have not sent any orders yet.
+          {% else %}
+          No open orders. Orders placed by MRs in the app land here.
+          {% endif %}
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  td .muted { display:block;font-size:11px; }
+</style>
+{% endblock %}

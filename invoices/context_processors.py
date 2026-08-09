@@ -4,7 +4,7 @@ The sidebar shows an overdue badge and the header shows the signed-in user's
 avatar and role, so every view would otherwise have to supply them.
 """
 
-from .models import UserRolls, is_field_staff, is_super_admin
+from .models import Order, UserRolls, is_field_staff, is_super_admin
 
 
 def erp_shell(request):
@@ -32,5 +32,11 @@ def erp_shell(request):
         # Receivables are the office's business, so an MR is neither shown the
         # badge nor charged the query that builds it.
         "overdue_count": 0 if field else overdue_invoices().count(),
+        # Orders waiting on the office. An MR sees their own menu without a
+        # badge - the number is the office's queue, not theirs.
+        "pending_orders": (
+            0 if field
+            else Order.objects.filter(status=Order.PENDING).count()
+        ),
         "search_query": request.GET.get("q", ""),
     }
