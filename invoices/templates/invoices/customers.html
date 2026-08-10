@@ -46,7 +46,14 @@
       <tbody>
         {% for customer in customers %}
         <tr>
-          <td><strong>{{ customer.name }}</strong></td>
+          <td>
+            <strong>{{ customer.name }}</strong>
+            {# Branches of a chain share a name; the address is what tells
+               one account from another. #}
+            {% if customer.address %}
+            <br /><span class="muted" style="font-size: 12px">{{ customer.address|truncatechars:60 }}</span>
+            {% endif %}
+          </td>
           <td>
             {% if customer.contact_person %}{{ customer.contact_person }}
             {% else %}<span class="muted">not set</span>{% endif %}

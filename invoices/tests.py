@@ -314,8 +314,10 @@ class GenerateInvoiceTests(TestCase):
 
         self.assertEqual(Customer.objects.get().license_no, "LIC-42")
 
-    def test_existing_customer_is_updated_not_duplicated(self):
-        Customer.objects.create(name="Acme Pharma", address="Old", license_no="OLD")
+    def test_same_name_and_address_reuses_the_customer(self):
+        Customer.objects.create(
+            name="Acme Pharma", address="Karachi", license_no="OLD"
+        )
 
         self.post()
 
@@ -323,6 +325,66 @@ class GenerateInvoiceTests(TestCase):
         self.assertEqual(Customer.objects.count(), 1)
         self.assertEqual(customer.address, "Karachi")
         self.assertEqual(customer.license_no, "LIC-42")
+
+    def test_address_typed_differently_is_still_the_same_place(self):
+        """Extra spacing or a different case must not open a second account."""
+        Customer.objects.create(name="Acme Pharma", address="  KARACHI\n")
+
+        self.post()
+
+        self.assertEqual(Customer.objects.count(), 1)
+
+    def test_a_new_address_opens_a_second_customer(self):
+        """A chain's second branch is its own account, not a move."""
+        first = Customer.objects.create(name="Acme Pharma", address="Lahore")
+
+        self.post()                                   # same name, Karachi
+
+        self.assertEqual(Customer.objects.count(), 2)
+
+        first.refresh_from_db()
+        self.assertEqual(first.address, "Lahore")     # the branch did not move
+
+        branch = Customer.objects.exclude(pk=first.pk).get()
+        self.assertEqual(branch.address, "Karachi")
+
+    def test_the_new_branch_is_the_one_invoiced(self):
+        Customer.objects.create(name="Acme Pharma", address="Lahore")
+
+        self.post()
+
+        invoice = Invoice.objects.get()
+        self.assertEqual(invoice.customer.address, "Karachi")
+
+    def test_a_customer_with_no_address_on_file_has_it_filled_in(self):
+        """A blank address names no branch, so this completes the record."""
+        existing = Customer.objects.create(name="Acme Pharma")
+
+        self.post()
+
+        self.assertEqual(Customer.objects.count(), 1)
+
+        existing.refresh_from_db()
+        self.assertEqual(existing.address, "Karachi")
+
+    def test_two_unaddressed_customers_of_one_name_are_left_alone(self):
+        """Nothing says which of them this is, so guessing would merge the
+        invoice into the wrong account."""
+        Customer.objects.create(name="Acme Pharma")
+        Customer.objects.create(name="Acme Pharma")
+
+        self.post()
+
+        self.assertEqual(Customer.objects.count(), 3)
+
+    def test_each_branch_keeps_its_own_balance(self):
+        self.post()                                   # Karachi
+        self.post(address="Lahore")
+
+        karachi, lahore = Customer.objects.order_by("id")
+
+        self.assertEqual(karachi.invoice_set.count(), 1)
+        self.assertEqual(lahore.invoice_set.count(), 1)
 
     def test_log_records_the_discounted_total(self):
         self.post()
@@ -393,8 +455,9 @@ class CustomerEditTests(TestCase):
         self.customer.refresh_from_db()
         self.assertEqual(self.customer.name, "Shifa Medical Store")
 
-    def test_rename_onto_an_existing_name_is_rejected(self):
-        Customer.objects.create(name="Al-Noor Pharmacy", address="Karachi")
+    def test_rename_onto_an_existing_name_and_address_is_rejected(self):
+        """Two accounts at one address leave invoicing no way to choose."""
+        Customer.objects.create(name="Al-Noor Pharmacy", address="Lahore")
 
         response = self.client.post(self.url(), self.payload(name="Al-Noor Pharmacy"))
 
@@ -403,13 +466,42 @@ class CustomerEditTests(TestCase):
         self.assertEqual(self.customer.name, "Shifa Pharmacy")
 
     def test_case_insensitive_duplicate_is_rejected(self):
-        """Invoicing matches names exactly, so near-duplicates split a customer."""
-        Customer.objects.create(name="Al-Noor Pharmacy", address="Karachi")
+        """Near-duplicates that differ only by case are the same account."""
+        Customer.objects.create(name="Al-Noor Pharmacy", address="Lahore")
 
         response = self.client.post(self.url(), self.payload(name="AL-NOOR PHARMACY"))
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(Customer.objects.filter(name="AL-NOOR PHARMACY").count(), 0)
+
+    def test_the_same_name_at_another_address_is_allowed(self):
+        """Branches of a chain share a name and are separate customers."""
+        Customer.objects.create(name="Al-Noor Pharmacy", address="Karachi")
+
+        response = self.client.post(self.url(), self.payload(name="Al-Noor Pharmacy"))
+
+        self.assertRedirects(response, reverse("customer_list"))
+
+        self.customer.refresh_from_db()
+        self.assertEqual(self.customer.name, "Al-Noor Pharmacy")
+        self.assertEqual(self.customer.address, "Lahore")
+
+    def test_moving_a_customer_onto_another_branch_address_is_rejected(self):
+        Customer.objects.create(name="Shifa Pharmacy", address="Karachi")
+
+        response = self.client.post(self.url(), self.payload(address="Karachi"))
+
+        self.assertEqual(response.status_code, 200)
+        self.customer.refresh_from_db()
+        self.assertEqual(self.customer.address, "Lahore")
+
+    def test_editing_a_customer_without_changing_its_address_is_allowed(self):
+        """The duplicate check must not count the record being edited."""
+        response = self.client.post(
+            self.url(), self.payload(contact_person="Dr. Bilal")
+        )
+
+        self.assertRedirects(response, reverse("customer_list"))
 
     def test_blank_name_is_rejected(self):
         response = self.client.post(self.url(), self.payload(name="   "))

@@ -84,6 +84,7 @@ from .models import (
     field_employee,
     is_field_staff,
     is_super_admin,
+    normalise_address,
 )
 
 from .pdf import TemplateError, render_invoice
@@ -189,6 +190,44 @@ def previous_balance_breakdown(customer, current_invoice, as_at=None):
         "total": total,
         "grand_total": total + current_invoice.total,
     }
+
+
+def customer_for_invoice(name, address):
+    """Which existing customer this invoice belongs to, or None to open one.
+
+    Name and address together identify a customer. Invoicing the same name at
+    a different address opens a second account rather than moving the first:
+    two branches of one chain are two customers, each with its own balance,
+    and overwriting the address would leave the earlier branch's invoices
+    pointing at somewhere it never traded.
+
+    The one exception is a customer whose address was never recorded. A blank
+    address names no branch, so filling it in is completing a record rather
+    than moving one - and refusing to would duplicate a customer over an
+    address the operator simply had not typed yet. Two blanks under one name
+    are ambiguous, so that case is left alone.
+    """
+    exact = Customer.at_address(name, address)
+
+    if exact is not None:
+        return exact
+
+    if not normalise_address(address):
+        return None
+
+    unaddressed = [
+        candidate
+        for candidate in Customer.objects.filter(name__iexact=(name or "").strip())
+        if not normalise_address(candidate.address)
+    ]
+
+    if len(unaddressed) != 1:
+        return None
+
+    customer = unaddressed[0]
+    customer.address = address
+
+    return customer
 
 
 def deny_unless_mine(request, owner):
@@ -523,20 +562,24 @@ def generate_invoice(request):
 
             return redirect("index")
 
-        customer_fields = {
-            "address": request.POST.get("address", ""),
+        address = request.POST.get("address", "")
+
+        registration = {
             "ntn": clip(request.POST.get("ntn", ""), 50),
             "sales_tax": clip(request.POST.get("sales_tax", ""), 50),
             "license_no": license_no,
         }
 
-        customer, created = Customer.objects.get_or_create(
-            name=customer_name,
-            defaults=customer_fields
-        )
+        customer = customer_for_invoice(customer_name, address)
 
-        if not created:
-            for field, value in customer_fields.items():
+        if customer is None:
+            customer = Customer.objects.create(
+                name=customer_name, address=address, **registration
+            )
+        else:
+            # Same place, so the address stands as it is. The registration
+            # details do change, and this invoice is the latest word on them.
+            for field, value in registration.items():
                 setattr(customer, field, value)
 
             customer.save()

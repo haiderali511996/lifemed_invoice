@@ -72,11 +72,18 @@
           data-address="{{ c.address|default_if_none:'' }}"
           data-license="{{ c.license_no|default_if_none:'' }}"
         >
-          {{ c.name }}
+          {# Two branches of a chain carry the same name, so the address is
+             what the operator picks between. #}
+          {{ c.name }}{% if c.address %} · {{ c.address|truncatechars:45 }}{% endif %}
         </option>
         {% endfor %}
       </select>
     </div>
+    <p class="help-note">
+      A customer is the pharmacy <em>and</em> its address. Invoicing the same
+      name at a new address opens a separate account rather than moving the
+      existing one - pick the branch here to bill the one already on the books.
+    </p>
 
     <!-- Outstanding balance before this invoice is added -->
     <div id="balance-panel" class="balance-panel" style="display: none">

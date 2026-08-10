@@ -26,10 +26,21 @@ INVOICE_START_NUMBER = int(os.getenv("INVOICE_START_NUMBER", "9965"))
 
 INVOICE_NUMBER_ATTEMPTS = 5
 
+def normalise_address(value):
+    """Collapse an address to the form two spellings of it share.
+
+    Typing the same address with a line break instead of a comma, or in a
+    different case, is the same place - and treating it as a different one
+    would open a second account for a pharmacy that already has one.
+    """
+    return " ".join((value or "").split()).casefold()
+
+
 class Customer(models.Model):
-    # Unique because invoicing looks customers up by name; duplicates would
-    # make get_or_create ambiguous and raise MultipleObjectsReturned.
-    name = models.CharField(max_length=255, unique=True)
+    # A pharmacy chain runs several branches under one name, and each branch
+    # keeps its own deliveries and its own balance - so the name alone does
+    # not identify a customer. See `at_address` for how they are told apart.
+    name = models.CharField(max_length=255)
     address = models.TextField(blank=True)
     ntn = models.CharField("CNIC / NTN", max_length=50, blank=True, null=True)
     sales_tax = models.CharField(
@@ -49,10 +60,37 @@ class Customer(models.Model):
     )
 
     class Meta:
-        ordering = ["name"]
+        # Branches of one chain sit together; id keeps the order stable
+        # without asking the database to sort a TEXT column.
+        ordering = ["name", "id"]
 
     def __str__(self):
         return self.name
+
+    @classmethod
+    def at_address(cls, name, address, exclude_pk=None):
+        """The customer trading under this name at this address, or None.
+
+        Invoicing uses this instead of matching on the name: a second branch
+        of the same pharmacy is a separate account, while a repeat invoice to
+        the branch already on the books finds it rather than opening another.
+
+        The address is a TextField, which MySQL will not index without a
+        prefix length, so the pair cannot be made unique in the database and
+        is matched here instead. The candidates sharing one name are few.
+        """
+        wanted = normalise_address(address)
+
+        matches = cls.objects.filter(name__iexact=(name or "").strip())
+
+        if exclude_pk is not None:
+            matches = matches.exclude(pk=exclude_pk)
+
+        for candidate in matches:
+            if normalise_address(candidate.address) == wanted:
+                return candidate
+
+        return None
 
     @property
     def total_invoiced(self):
