@@ -118,7 +118,14 @@ class Invoice(models.Model):
 
     @property
     def amount_paid(self):
-        return self.payments.aggregate(t=Sum("amount"))["t"] or ZERO
+        """What has actually been applied to this invoice.
+
+        Read from allocations rather than from payments pointing at it,
+        because a lump sum settles several invoices at once and money taken
+        "against the account" has to reach them too - otherwise the customer
+        ledger reads settled while every invoice still reads due.
+        """
+        return self.allocations.aggregate(t=Sum("amount"))["t"] or ZERO
 
     @property
     def amount_returned(self):
@@ -261,11 +268,94 @@ class Payment(models.Model):
     class Meta:
         ordering = ["-paid_on", "-id"]
 
+    @property
+    def unapplied(self):
+        """Money still sitting on the account, settling no particular invoice."""
+        applied = self.allocations.aggregate(t=Sum("amount"))["t"] or ZERO
+
+        return self.amount - applied
+
+    def allocate(self):
+        """Spread this payment across the customer's unpaid invoices.
+
+        The invoice it names is settled first, then anything left over goes to
+        the oldest outstanding bills - which is what both sides assume a lump
+        sum does. Whatever remains after that stays on the account as credit
+        against invoices not yet raised.
+        """
+        self.allocations.all().delete()
+
+        remaining = self.amount
+
+        targets = []
+
+        if self.invoice_id is not None:
+            targets.append(self.invoice)
+
+        targets.extend(
+            Invoice.objects.filter(customer_id=self.customer_id)
+            .exclude(pk=self.invoice_id)
+            .order_by("date", "id")
+        )
+
+        for invoice in targets:
+            if remaining <= ZERO:
+                break
+
+            # Recomputed per invoice: earlier iterations of this loop have
+            # already written allocations that reduce what is still owed.
+            owed = invoice.balance
+
+            if owed <= ZERO:
+                continue
+
+            applied = min(remaining, owed)
+
+            PaymentAllocation.objects.create(
+                payment=self, invoice=invoice, amount=applied
+            )
+
+            remaining -= applied
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+
+        # Allocated on every save so a payment recorded anywhere - the web
+        # form, the API, a management command, a test - reaches the invoices
+        # it pays for. Nothing here saves the payment again, so this cannot
+        # recurse.
+        self.allocate()
+
     def __str__(self):
         return f"{self.customer.name} - {self.amount}"
 
 
 # 1. User Role Model
+class PaymentAllocation(models.Model):
+    """How much of one payment settles one invoice.
+
+    A payment and an invoice are not one-to-one in practice: a customer hands
+    over a lump sum that clears three old bills and leaves change on account.
+    Modelling that as a link on the payment forces a false choice, so the
+    amounts live here instead.
+    """
+
+    payment = models.ForeignKey(
+        Payment, on_delete=models.CASCADE, related_name="allocations"
+    )
+    invoice = models.ForeignKey(
+        Invoice, on_delete=models.CASCADE, related_name="allocations"
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+
+    class Meta:
+        ordering = ["invoice__date", "invoice_id"]
+        unique_together = [("payment", "invoice")]
+
+    def __str__(self):
+        return f"{self.amount} of {self.payment} to {self.invoice.invoice_no}"
+
+
 class UserRolls(models.Model):
     ROLE_SUPER_ADMIN = 'super_admin'
     ROLE_MANAGER = 'manager'
