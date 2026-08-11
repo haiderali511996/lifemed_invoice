@@ -878,7 +878,8 @@ def invoice_list(request):
             "query": query,
             "selected_distributor": distributor_id,
             "status": status,
-            "total": sum((i.total for i in invoices), ZERO),
+            # Net of credit notes - returned goods were never a completed sale.
+            "total": sum((i.total - i.amount_returned for i in invoices), ZERO),
             "outstanding": sum(
                 (i.balance for i in invoices if i.balance > ZERO), ZERO
             ),
@@ -992,7 +993,13 @@ def overdue_invoices():
 def dashboard(request):
     overdue = list(overdue_invoices())
 
-    totals = Invoice.objects.aggregate(t=Sum("total"))["t"] or ZERO
+    # Net of credit notes: goods a customer sent back were never really a
+    # sale, so counting them here would overstate both what was invoiced and,
+    # since Outstanding is derived from it below, what is still owed.
+    gross = Invoice.objects.aggregate(t=Sum("total"))["t"] or ZERO
+    returned = SalesReturn.objects.aggregate(t=Sum("total"))["t"] or ZERO
+    totals = gross - returned
+
     received = Payment.objects.aggregate(t=Sum("amount"))["t"] or ZERO
 
     return render(
@@ -1591,10 +1598,19 @@ def territory_report(request):
     for territory in Territory.objects.all():
         customers = Customer.objects.filter(territory=territory)
 
-        invoiced = (
+        # Net of credit notes - a returned delivery was never a completed
+        # sale, and leaving it in would overstate both Invoiced and, since
+        # Outstanding is derived from it below, what the territory is owed.
+        gross_invoiced = (
             Invoice.objects.filter(customer__territory=territory)
             .aggregate(t=Sum("total"))["t"] or ZERO
         )
+        returned = (
+            SalesReturn.objects.filter(customer__territory=territory)
+            .aggregate(t=Sum("total"))["t"] or ZERO
+        )
+        invoiced = gross_invoiced - returned
+
         received = (
             Payment.objects.filter(customer__territory=territory)
             .aggregate(t=Sum("amount"))["t"] or ZERO

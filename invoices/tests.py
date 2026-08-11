@@ -973,6 +973,25 @@ class TerritoryAndTeamTests(TestCase):
 
         self.assertEqual(response.context["unassigned_customers"], 1)
 
+    def test_territory_report_excludes_returned_goods_from_invoiced(self):
+        """A credit note was never a completed sale, so it should not count."""
+        customer = Customer.objects.create(
+            name="Shifa", address="x", territory=self.territory
+        )
+        invoice = Invoice.objects.create(customer=customer, license_no="L")
+        Invoice.objects.filter(pk=invoice.pk).update(total=Decimal("1000.00"))
+        SalesReturn.objects.create(
+            invoice=invoice, customer=customer,
+            return_no="CN-1", total=Decimal("300.00"),
+        )
+
+        response = self.client.get(reverse("territory_report"))
+        row = response.context["rows"][0]
+
+        self.assertEqual(row["invoiced"], Decimal("700.00"))
+        self.assertEqual(row["balance"], Decimal("700.00"))
+        self.assertEqual(response.context["total_invoiced"], Decimal("700.00"))
+
 
 class WeeklyPlanTests(TestCase):
 
@@ -3832,6 +3851,38 @@ class InvoiceReprintTests(TestCase):
         self.generate()
 
         self.assertEqual(self.client.get(reverse("invoice_list")).status_code, 200)
+
+    def test_the_invoice_list_total_excludes_returned_goods(self):
+        """A credit note was never a completed sale, so it should not count."""
+        self.generate(stock=True)          # 180.00 (2 x 100 less 10%)
+        invoice = Invoice.objects.get()
+        item = invoice.items.first()
+
+        self.client.post(reverse("return_create", args=[invoice.pk]), {
+            "reason": "Damaged", "restock": "on",
+            "date": timezone.localdate().isoformat(),
+            f"qty_{item.pk}": "1",         # credits 90.00 of the 180.00
+        })
+
+        response = self.client.get(reverse("invoice_list"))
+
+        self.assertEqual(response.context["total"], Decimal("90.00"))
+
+    def test_dashboard_total_invoiced_excludes_returned_goods(self):
+        self.generate(stock=True)          # 180.00 (2 x 100 less 10%)
+        invoice = Invoice.objects.get()
+        item = invoice.items.first()
+
+        self.client.post(reverse("return_create", args=[invoice.pk]), {
+            "reason": "Damaged", "restock": "on",
+            "date": timezone.localdate().isoformat(),
+            f"qty_{item.pk}": "1",         # credits 90.00 of the 180.00
+        })
+
+        response = self.client.get(reverse("dashboard"))
+
+        self.assertEqual(response.context["total_invoiced"], Decimal("90.00"))
+        self.assertEqual(response.context["total_outstanding"], Decimal("90.00"))
 
 
 class CommissionTests(TestCase):
