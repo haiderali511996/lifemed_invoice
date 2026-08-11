@@ -68,11 +68,40 @@
       }
 
       .nav-section {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 100%;
         padding: 14px 18px 6px;
         font-size: 11px;
         letter-spacing: 1px;
         text-transform: uppercase;
         color: #7a8ea3;
+        background: none;
+        border: none;
+        font-family: inherit;
+        cursor: pointer;
+      }
+
+      .nav-section:hover {
+        color: #a9bccf;
+      }
+
+      .nav-section .chevron {
+        font-size: 12px;
+        transition: transform 0.15s ease;
+      }
+
+      .nav-section.collapsed .chevron {
+        transform: rotate(-90deg);
+      }
+
+      .nav-group {
+        overflow: hidden;
+      }
+
+      .nav-group.collapsed {
+        display: none;
       }
 
       .nav a {
@@ -469,155 +498,195 @@
 
       <nav class="nav">
         {% if is_field_staff %}
-        <div class="nav-section">My Work</div>
-        <a href="{% url 'my_dashboard' %}" class="{% if active == 'my_dashboard' %}active{% endif %}">
-          🏠 <span>My Home</span>
-        </a>
-        <a href="{% url 'daily_calls' %}" class="{% if active == 'daily' %}active{% endif %}">
-          📅 <span>My Day</span>
-        </a>
-        <a href="{% url 'my_plan' %}" class="{% if active == 'my_plan' %}active{% endif %}">
-          🗓️ <span>My Schedule</span>
-        </a>
-        <a href="{% url 'call_point_list' %}" class="{% if active == 'call_points' %}active{% endif %}">
-          📍 <span>My Call Points</span>
-        </a>
-        <a href="{% url 'call_report_list' %}" class="{% if active == 'calls' %}active{% endif %}">
-          🩺 <span>My Visits</span>
-        </a>
-        <a href="{% url 'sample_list' %}" class="{% if active == 'samples' %}active{% endif %}">
-          🧪 <span>My Samples</span>
-        </a>
+        <button type="button" class="nav-section" data-nav-key="my-work" onclick="toggleNavGroup(this)">
+          <span>My Work</span><span class="chevron">▾</span>
+        </button>
+        <div class="nav-group">
+          <a href="{% url 'my_dashboard' %}" class="{% if active == 'my_dashboard' %}active{% endif %}">
+            🏠 <span>My Home</span>
+          </a>
+          <a href="{% url 'daily_calls' %}" class="{% if active == 'daily' %}active{% endif %}">
+            📅 <span>My Day</span>
+          </a>
+          <a href="{% url 'my_plan' %}" class="{% if active == 'my_plan' %}active{% endif %}">
+            🗓️ <span>My Schedule</span>
+          </a>
+          <a href="{% url 'call_point_list' %}" class="{% if active == 'call_points' %}active{% endif %}">
+            📍 <span>My Call Points</span>
+          </a>
+          <a href="{% url 'call_report_list' %}" class="{% if active == 'calls' %}active{% endif %}">
+            🩺 <span>My Visits</span>
+          </a>
+          <a href="{% url 'sample_list' %}" class="{% if active == 'samples' %}active{% endif %}">
+            🧪 <span>My Samples</span>
+          </a>
+        </div>
 
-        <div class="nav-section">My Money</div>
-        <a href="{% url 'order_list' %}" class="{% if active == 'orders' %}active{% endif %}">
-          📦 <span>My Orders</span>
-        </a>
-        <a href="{% url 'my_sales' %}" class="{% if active == 'my_sales' %}active{% endif %}">
-          📈 <span>My Sales</span>
-        </a>
-        <a href="{% url 'expense_list' %}" class="{% if active == 'expenses' %}active{% endif %}">
-          🧾 <span>My Expenses</span>
-        </a>
-        <a href="{% url 'my_payslips' %}" class="{% if active == 'my_payslips' %}active{% endif %}">
-          💵 <span>My Payslips</span>
-        </a>
+        <button type="button" class="nav-section" data-nav-key="my-money" onclick="toggleNavGroup(this)">
+          <span>My Money</span><span class="chevron">▾</span>
+        </button>
+        <div class="nav-group">
+          <a href="{% url 'order_list' %}" class="{% if active == 'orders' %}active{% endif %}">
+            📦 <span>My Orders</span>
+          </a>
+          <a href="{% url 'my_sales' %}" class="{% if active == 'my_sales' %}active{% endif %}">
+            📈 <span>My Sales</span>
+          </a>
+          <a href="{% url 'expense_list' %}" class="{% if active == 'expenses' %}active{% endif %}">
+            🧾 <span>My Expenses</span>
+          </a>
+          <a href="{% url 'my_payslips' %}" class="{% if active == 'my_payslips' %}active{% endif %}">
+            💵 <span>My Payslips</span>
+          </a>
+        </div>
         {% else %}
-        <div class="nav-section">Overview</div>
-        <a href="{% url 'dashboard' %}" class="{% if active == 'dashboard' %}active{% endif %}">
-          📊 <span>Dashboard</span>
-        </a>
+        <button type="button" class="nav-section" data-nav-key="overview" onclick="toggleNavGroup(this)">
+          <span>Overview</span><span class="chevron">▾</span>
+        </button>
+        <div class="nav-group">
+          <a href="{% url 'dashboard' %}" class="{% if active == 'dashboard' %}active{% endif %}">
+            📊 <span>Dashboard</span>
+          </a>
+        </div>
 
-        <div class="nav-section">Sales</div>
-        {% if not is_super_admin %}
-        <a href="{% url 'index' %}" class="{% if active == 'invoice' %}active{% endif %}">
-          🧾 <span>New Invoice</span>
-        </a>
-        {% endif %}
-        <a href="{% url 'order_list' %}" class="{% if active == 'orders' %}active{% endif %}">
-          📦 <span>Orders</span>
-          {% if pending_orders %}<span class="badge">{{ pending_orders }}</span>{% endif %}
-        </a>
-        <a href="{% url 'invoice_list' %}" class="{% if active == 'invoices' %}active{% endif %}">
-          📄 <span>All Invoices</span>
-        </a>
-        <a href="{% url 'customer_list' %}" class="{% if active == 'customers' %}active{% endif %}">
-          👥 <span>Customers</span>
-        </a>
+        <button type="button" class="nav-section" data-nav-key="sales" onclick="toggleNavGroup(this)">
+          <span>Sales</span><span class="chevron">▾</span>
+        </button>
+        <div class="nav-group">
+          {% if not is_super_admin %}
+          <a href="{% url 'index' %}" class="{% if active == 'invoice' %}active{% endif %}">
+            🧾 <span>New Invoice</span>
+          </a>
+          {% endif %}
+          <a href="{% url 'order_list' %}" class="{% if active == 'orders' %}active{% endif %}">
+            📦 <span>Orders</span>
+            {% if pending_orders %}<span class="badge">{{ pending_orders }}</span>{% endif %}
+          </a>
+          <a href="{% url 'invoice_list' %}" class="{% if active == 'invoices' %}active{% endif %}">
+            📄 <span>All Invoices</span>
+          </a>
+          <a href="{% url 'customer_list' %}" class="{% if active == 'customers' %}active{% endif %}">
+            👥 <span>Customers</span>
+          </a>
+        </div>
 
-        <div class="nav-section">Accounts</div>
-        <a href="{% url 'ledger_list' %}" class="{% if active == 'ledgers' %}active{% endif %}">
-          📒 <span>Customer Ledgers</span>
-          {% if overdue_count %}<span class="badge">{{ overdue_count }}</span>{% endif %}
-        </a>
-        <a href="{% url 'payment_list' %}" class="{% if active == 'payments' %}active{% endif %}">
-          💰 <span>Payments</span>
-        </a>
-        <a href="{% url 'return_list' %}" class="{% if active == 'returns' %}active{% endif %}">
-          ↩️ <span>Sales Returns</span>
-        </a>
+        <button type="button" class="nav-section" data-nav-key="accounts" onclick="toggleNavGroup(this)">
+          <span>Accounts</span><span class="chevron">▾</span>
+        </button>
+        <div class="nav-group">
+          <a href="{% url 'ledger_list' %}" class="{% if active == 'ledgers' %}active{% endif %}">
+            📒 <span>Customer Ledgers</span>
+            {% if overdue_count %}<span class="badge">{{ overdue_count }}</span>{% endif %}
+          </a>
+          <a href="{% url 'payment_list' %}" class="{% if active == 'payments' %}active{% endif %}">
+            💰 <span>Payments</span>
+          </a>
+          <a href="{% url 'return_list' %}" class="{% if active == 'returns' %}active{% endif %}">
+            ↩️ <span>Sales Returns</span>
+          </a>
+        </div>
 
-        <div class="nav-section">Purchasing &amp; Stock</div>
-        <a href="{% url 'stock_report' %}" class="{% if active == 'stock' %}active{% endif %}">
-          📦 <span>Stock on Hand</span>
-        </a>
-        <a href="{% url 'stock_ledger' %}" class="{% if active == 'stock_ledger' %}active{% endif %}">
-          📑 <span>Stock Ledger</span>
-        </a>
-        <a href="{% url 'purchase_list' %}" class="{% if active == 'purchases' %}active{% endif %}">
-          🚚 <span>Purchases</span>
-        </a>
-        <a href="{% url 'product_list' %}" class="{% if active == 'products' %}active{% endif %}">
-          💊 <span>Products</span>
-        </a>
-        <a href="{% url 'manufacturer_list' %}" class="{% if active == 'manufacturers' %}active{% endif %}">
-          🏭 <span>Manufacturers</span>
-        </a>
-        <a href="{% url 'supplier_list' %}" class="{% if active == 'suppliers' %}active{% endif %}">
-          🤝 <span>Suppliers</span>
-        </a>
+        <button type="button" class="nav-section" data-nav-key="purchasing" onclick="toggleNavGroup(this)">
+          <span>Purchasing &amp; Stock</span><span class="chevron">▾</span>
+        </button>
+        <div class="nav-group">
+          <a href="{% url 'stock_report' %}" class="{% if active == 'stock' %}active{% endif %}">
+            📦 <span>Stock on Hand</span>
+          </a>
+          <a href="{% url 'stock_ledger' %}" class="{% if active == 'stock_ledger' %}active{% endif %}">
+            📑 <span>Stock Ledger</span>
+          </a>
+          <a href="{% url 'purchase_list' %}" class="{% if active == 'purchases' %}active{% endif %}">
+            🚚 <span>Purchases</span>
+          </a>
+          <a href="{% url 'product_list' %}" class="{% if active == 'products' %}active{% endif %}">
+            💊 <span>Products</span>
+          </a>
+          <a href="{% url 'manufacturer_list' %}" class="{% if active == 'manufacturers' %}active{% endif %}">
+            🏭 <span>Manufacturers</span>
+          </a>
+          <a href="{% url 'supplier_list' %}" class="{% if active == 'suppliers' %}active{% endif %}">
+            🤝 <span>Suppliers</span>
+          </a>
+        </div>
 
-        <div class="nav-section">Field Force</div>
-        <a href="{% url 'daily_calls' %}" class="{% if active == 'daily' %}active{% endif %}">
-          📅 <span>My Day</span>
-        </a>
-        <a href="{% url 'call_report_list' %}" class="{% if active == 'calls' %}active{% endif %}">
-          🩺 <span>Doctor Visits</span>
-        </a>
-        <a href="{% url 'sample_list' %}" class="{% if active == 'samples' %}active{% endif %}">
-          🧪 <span>Sampling</span>
-        </a>
-        <a href="{% url 'team_list' %}" class="{% if active == 'team' %}active{% endif %}">
-          🧑‍💼 <span>Team</span>
-        </a>
-        <a href="{% url 'plan_list' %}" class="{% if active == 'plans' %}active{% endif %}">
-          🗓️ <span>Weekly Plans</span>
-        </a>
-        <a href="{% url 'call_point_list' %}" class="{% if active == 'call_points' %}active{% endif %}">
-          🏥 <span>Call Points</span>
-        </a>
-        <a href="{% url 'doctor_list' %}" class="{% if active == 'doctors' %}active{% endif %}">
-          👨‍⚕️ <span>Doctors</span>
-        </a>
-        <a href="{% url 'territory_list' %}" class="{% if active == 'territories' %}active{% endif %}">
-          🗺️ <span>Territories</span>
-        </a>
+        <button type="button" class="nav-section" data-nav-key="field-force" onclick="toggleNavGroup(this)">
+          <span>Field Force</span><span class="chevron">▾</span>
+        </button>
+        <div class="nav-group">
+          <a href="{% url 'daily_calls' %}" class="{% if active == 'daily' %}active{% endif %}">
+            📅 <span>My Day</span>
+          </a>
+          <a href="{% url 'call_report_list' %}" class="{% if active == 'calls' %}active{% endif %}">
+            🩺 <span>Doctor Visits</span>
+          </a>
+          <a href="{% url 'sample_list' %}" class="{% if active == 'samples' %}active{% endif %}">
+            🧪 <span>Sampling</span>
+          </a>
+          <a href="{% url 'team_list' %}" class="{% if active == 'team' %}active{% endif %}">
+            🧑‍💼 <span>Team</span>
+          </a>
+          <a href="{% url 'plan_list' %}" class="{% if active == 'plans' %}active{% endif %}">
+            🗓️ <span>Weekly Plans</span>
+          </a>
+          <a href="{% url 'call_point_list' %}" class="{% if active == 'call_points' %}active{% endif %}">
+            🏥 <span>Call Points</span>
+          </a>
+          <a href="{% url 'doctor_list' %}" class="{% if active == 'doctors' %}active{% endif %}">
+            👨‍⚕️ <span>Doctors</span>
+          </a>
+          <a href="{% url 'territory_list' %}" class="{% if active == 'territories' %}active{% endif %}">
+            🗺️ <span>Territories</span>
+          </a>
+        </div>
 
-        <div class="nav-section">Money Out</div>
-        <a href="{% url 'expense_list' %}" class="{% if active == 'expenses' %}active{% endif %}">
-          🧾 <span>Expenses</span>
-        </a>
-        <a href="{% url 'payroll_list' %}" class="{% if active == 'payroll' %}active{% endif %}">
-          💵 <span>Payroll</span>
-        </a>
+        <button type="button" class="nav-section" data-nav-key="money-out" onclick="toggleNavGroup(this)">
+          <span>Money Out</span><span class="chevron">▾</span>
+        </button>
+        <div class="nav-group">
+          <a href="{% url 'expense_list' %}" class="{% if active == 'expenses' %}active{% endif %}">
+            🧾 <span>Expenses</span>
+          </a>
+          <a href="{% url 'payroll_list' %}" class="{% if active == 'payroll' %}active{% endif %}">
+            💵 <span>Payroll</span>
+          </a>
+        </div>
 
-        <div class="nav-section">Reports</div>
-        <a href="{% url 'expense_report' %}" class="{% if active == 'expense_report' %}active{% endif %}">
-          📈 <span>Expense Report</span>
-        </a>
-        <a href="{% url 'sample_report' %}" class="{% if active == 'sample_report' %}active{% endif %}">
-          🔬 <span>Sample Report</span>
-        </a>
-        <a href="{% url 'call_report_summary' %}" class="{% if active == 'call_summary' %}active{% endif %}">
-          📊 <span>Call Coverage</span>
-        </a>
-        <a href="{% url 'commission_report' %}" class="{% if active == 'commission_report' %}active{% endif %}">
-          💹 <span>Sales Commission</span>
-        </a>
-        <a href="{% url 'territory_report' %}" class="{% if active == 'territory_report' %}active{% endif %}">
-          📍 <span>Location-wise</span>
-        </a>
-        <a href="{% url 'invoice_logs' %}" class="{% if active == 'logs' %}active{% endif %}">
-          📋 <span>Activity Log</span>
-        </a>
+        <button type="button" class="nav-section" data-nav-key="reports" onclick="toggleNavGroup(this)">
+          <span>Reports</span><span class="chevron">▾</span>
+        </button>
+        <div class="nav-group">
+          <a href="{% url 'expense_report' %}" class="{% if active == 'expense_report' %}active{% endif %}">
+            📈 <span>Expense Report</span>
+          </a>
+          <a href="{% url 'sample_report' %}" class="{% if active == 'sample_report' %}active{% endif %}">
+            🔬 <span>Sample Report</span>
+          </a>
+          <a href="{% url 'call_report_summary' %}" class="{% if active == 'call_summary' %}active{% endif %}">
+            📊 <span>Call Coverage</span>
+          </a>
+          <a href="{% url 'commission_report' %}" class="{% if active == 'commission_report' %}active{% endif %}">
+            💹 <span>Sales Commission</span>
+          </a>
+          <a href="{% url 'territory_report' %}" class="{% if active == 'territory_report' %}active{% endif %}">
+            📍 <span>Location-wise</span>
+          </a>
+          <a href="{% url 'invoice_logs' %}" class="{% if active == 'logs' %}active{% endif %}">
+            📋 <span>Activity Log</span>
+          </a>
+        </div>
 
-        <div class="nav-section">Setup</div>
-        <a href="{% url 'distributor_list' %}" class="{% if active == 'distributors' %}active{% endif %}">
-          🏢 <span>Distributors</span>
-        </a>
-        <a href="{% url 'expense_category_list' %}" class="{% if active == 'expense_categories' %}active{% endif %}">
-          🗂️ <span>Expense Categories</span>
-        </a>
+        <button type="button" class="nav-section" data-nav-key="setup" onclick="toggleNavGroup(this)">
+          <span>Setup</span><span class="chevron">▾</span>
+        </button>
+        <div class="nav-group">
+          <a href="{% url 'distributor_list' %}" class="{% if active == 'distributors' %}active{% endif %}">
+            🏢 <span>Distributors</span>
+          </a>
+          <a href="{% url 'expense_category_list' %}" class="{% if active == 'expense_categories' %}active{% endif %}">
+            🗂️ <span>Expense Categories</span>
+          </a>
+        </div>
         {% endif %}
       </nav>
     </aside>
@@ -693,6 +762,37 @@
       function toggleSidebar() {
         document.getElementById("sidebar").classList.toggle("open");
       }
+
+      /* ---------------- SIDEBAR ACCORDION ----------------
+       * Every page is a full reload, not one page the JS lives inside of, so
+       * "remembering" a section's state means writing it to localStorage on
+       * every click and reading it back on every load - there is no other
+       * memory to keep it in between requests. */
+      function setNavGroupCollapsed(button, collapsed) {
+        button.classList.toggle("collapsed", collapsed);
+        button.setAttribute("aria-expanded", String(!collapsed));
+        button.nextElementSibling.classList.toggle("collapsed", collapsed);
+      }
+
+      function toggleNavGroup(button) {
+        const collapsed = !button.classList.contains("collapsed");
+
+        setNavGroupCollapsed(button, collapsed);
+        localStorage.setItem("nav-collapsed:" + button.dataset.navKey, collapsed ? "1" : "0");
+      }
+
+      document.querySelectorAll(".nav-section").forEach(function (button) {
+        const hasCurrentPage = !!button.nextElementSibling.querySelector("a.active");
+
+        // The section holding the page you're actually on always opens -
+        // a remembered "collapsed" from a previous visit must not hide the
+        // one link that shows where you are.
+        const collapsed = hasCurrentPage
+          ? false
+          : localStorage.getItem("nav-collapsed:" + button.dataset.navKey) === "1";
+
+        setNavGroupCollapsed(button, collapsed);
+      });
 
       function toggleDropdown(event) {
         event.stopPropagation();

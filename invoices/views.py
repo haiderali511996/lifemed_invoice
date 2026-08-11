@@ -406,6 +406,7 @@ def index(request, order_id=None):
         request,
         "invoices/index.html",
         {
+            "active": "invoice",
             "customers": customers,
             "distributors": Distributor.objects.filter(is_active=True),
             "default_distributor": Distributor.default(),
@@ -457,6 +458,7 @@ def customer_list(request):
         request,
         "invoices/customers.html",
         {
+            "active": "customers",
             "customers": customers,
             "query": query,
         }
@@ -931,6 +933,7 @@ def invoice_logs_view(request):
         request,
         "invoices/invoice_logs.html",
         {
+            "active": "logs",
             "logs": logs
         }
     )
@@ -1006,6 +1009,7 @@ def dashboard(request):
         request,
         "invoices/dashboard.html",
         {
+            "active": "dashboard",
             "total_invoiced": totals,
             "total_received": received,
             "total_outstanding": totals - received,
@@ -1046,6 +1050,7 @@ def ledger_list(request):
         request,
         "invoices/ledger_list.html",
         {
+            "active": "ledgers",
             "rows": rows,
             "query": query,
             "total_outstanding": sum((r["balance"] for r in rows), ZERO),
@@ -1158,6 +1163,7 @@ def payment_list(request):
         request,
         "invoices/payment_list.html",
         {
+            "active": "payments",
             "payments": payments,
             "total": payments.aggregate(t=Sum("amount"))["t"] or ZERO,
         }
@@ -1255,7 +1261,7 @@ def territory_list(request):
     return render(
         request,
         "invoices/territory_list.html",
-        {"territories": territories}
+        {"active": "territories", "territories": territories}
     )
 
 
@@ -1306,6 +1312,7 @@ def team_list(request):
         request,
         "invoices/team_list.html",
         {
+            "active": "team",
             "employees": employees,
             "query": query,
         }
@@ -1363,6 +1370,7 @@ def call_point_list(request):
         request,
         "invoices/call_point_list.html",
         {
+            "active": "call_points",
             "call_points": call_points,
             "query": query,
         }
@@ -1413,6 +1421,7 @@ def plan_list(request):
         request,
         "invoices/plan_list.html",
         {
+            "active": "plans",
             "plans": plans,
             "form": PlanGenerateForm(initial={"week_start": current_week_start()}),
             "current_week": current_week_start(),
@@ -1634,6 +1643,7 @@ def territory_report(request):
         request,
         "invoices/territory_report.html",
         {
+            "active": "territory_report",
             "rows": rows,
             "unassigned_customers": unassigned,
             "total_invoiced": sum((r["invoiced"] for r in rows), ZERO),
@@ -1653,7 +1663,7 @@ def distributor_list(request):
     return render(
         request,
         "invoices/distributor_list.html",
-        {"distributors": distributors}
+        {"active": "distributors", "distributors": distributors}
     )
 
 
@@ -1833,6 +1843,7 @@ def product_list(request):
         request,
         "invoices/product_list.html",
         {
+            "active": "products",
             "rows": rows,
             "query": query,
             "manufacturers": Manufacturer.objects.filter(is_active=True),
@@ -1873,7 +1884,10 @@ def supplier_list(request):
     return render(
         request,
         "invoices/supplier_list.html",
-        {"suppliers": Supplier.objects.annotate(purchase_count=Count("purchases"))}
+        {
+            "active": "suppliers",
+            "suppliers": Supplier.objects.annotate(purchase_count=Count("purchases")),
+        }
     )
 
 
@@ -1911,7 +1925,7 @@ def purchase_list(request):
     return render(
         request,
         "invoices/purchase_list.html",
-        {"purchases": purchases}
+        {"active": "purchases", "purchases": purchases}
     )
 
 
@@ -2067,6 +2081,7 @@ def stock_report(request):
         request,
         "invoices/stock_report.html",
         {
+            "active": "stock",
             "batches": batches,
             "expired": expired,
             "expiring": expiring,
@@ -2266,7 +2281,7 @@ def manufacturer_list(request):
     return render(
         request,
         "invoices/manufacturer_list.html",
-        {"manufacturers": manufacturers, "query": query}
+        {"active": "manufacturers", "manufacturers": manufacturers, "query": query}
     )
 
 
@@ -2341,6 +2356,7 @@ def return_list(request):
         request,
         "invoices/return_list.html",
         {
+            "active": "returns",
             "returns": returns,
             "total": returns.aggregate(t=Sum("total"))["t"] or ZERO,
         }
@@ -2476,6 +2492,7 @@ def stock_ledger(request):
         request,
         "invoices/stock_ledger.html",
         {
+            "active": "stock_ledger",
             "entries": entries,
             "products": Product.objects.filter(is_active=True),
             "selected_product": product_id,
@@ -2692,6 +2709,7 @@ def expense_list(request):
         request,
         "invoices/expense_list.html",
         {
+            "active": "expenses",
             "expenses": expenses,
             "total": sum((e.amount for e in counted), ZERO),
             "pending_total": sum(
@@ -2819,6 +2837,7 @@ def expense_report(request):
         request,
         "invoices/expense_report.html",
         {
+            "active": "expense_report",
             "by_category": sorted(
                 by_category.items(), key=lambda row: row[1], reverse=True
             ),
@@ -2837,6 +2856,7 @@ def expense_category_list(request):
         request,
         "invoices/expense_category_list.html",
         {
+            "active": "expense_categories",
             "categories": ExpenseCategory.objects.annotate(
                 claim_count=Count("expenses"),
                 spend=Coalesce(Sum("expenses__amount"), ZERO, output_field=MONEY),
@@ -2898,6 +2918,7 @@ def sample_list(request):
         request,
         "invoices/sample_list.html",
         {
+            "active": "samples",
             "issues": issues,
             "employees": Employee.objects.filter(is_active=True),
             "selected_employee": employee_id,
@@ -3067,6 +3088,7 @@ def sample_report(request):
         request,
         "invoices/sample_report.html",
         {
+            "active": "sample_report",
             "by_employee": ranked(by_employee),
             "by_product": ranked(by_product),
             "by_doctor": ranked(by_doctor)[:25],
@@ -3085,6 +3107,7 @@ def payroll_list(request):
         request,
         "invoices/payroll_list.html",
         {
+            "active": "payroll",
             "runs": runs,
             "form": PayrollRunForm(initial={"month": timezone.localdate()}),
         }
@@ -3314,6 +3337,7 @@ def daily_calls(request):
         request,
         "invoices/daily_calls.html",
         {
+            "active": "daily",
             "day": day,
             "previous_day": day - timedelta(days=1),
             "next_day": day + timedelta(days=1),
@@ -3471,6 +3495,7 @@ def call_report_list(request):
         request,
         "invoices/call_report_list.html",
         {
+            "active": "calls",
             "reports": reports,
             "employees": Employee.objects.filter(is_active=True),
             "selected_employee": employee_id,
@@ -3533,6 +3558,7 @@ def call_report_summary(request):
         request,
         "invoices/call_report_summary.html",
         {
+            "active": "call_summary",
             "rows": ranked,
             "month": month,
             "total_calls": sum(row["calls"] for row in ranked),
