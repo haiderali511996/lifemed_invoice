@@ -55,19 +55,32 @@ class CustomerForm(forms.ModelForm):
         if not name:
             raise forms.ValidationError("Customer name cannot be blank.")
 
-        # Invoicing matches customers by exact name, so near-duplicates that
-        # differ only by case or spacing would silently create a second record.
-        clash = Customer.objects.filter(name__iexact=name)
+        return name
 
-        if self.instance.pk:
-            clash = clash.exclude(pk=self.instance.pk)
+    def clean(self):
+        cleaned = super().clean()
 
-        if clash.exists():
-            raise forms.ValidationError(
-                "Another customer already uses this name."
+        name = cleaned.get("name")
+
+        if not name:
+            return cleaned
+
+        # A name on its own may repeat - branches of a chain share one. What
+        # may not repeat is the same name at the same address, because
+        # invoicing would then have two accounts to choose between and no way
+        # to tell which one the delivery belongs to.
+        clash = Customer.at_address(
+            name, cleaned.get("address", ""), exclude_pk=self.instance.pk
+        )
+
+        if clash is not None:
+            self.add_error(
+                "address",
+                "This customer is already on the books at this address. "
+                "Change the address to record a different branch.",
             )
 
-        return name
+        return cleaned
 
 
 class PaymentForm(forms.ModelForm):

@@ -26,10 +26,21 @@ INVOICE_START_NUMBER = int(os.getenv("INVOICE_START_NUMBER", "9965"))
 
 INVOICE_NUMBER_ATTEMPTS = 5
 
+def normalise_address(value):
+    """Collapse an address to the form two spellings of it share.
+
+    Typing the same address with a line break instead of a comma, or in a
+    different case, is the same place - and treating it as a different one
+    would open a second account for a pharmacy that already has one.
+    """
+    return " ".join((value or "").split()).casefold()
+
+
 class Customer(models.Model):
-    # Unique because invoicing looks customers up by name; duplicates would
-    # make get_or_create ambiguous and raise MultipleObjectsReturned.
-    name = models.CharField(max_length=255, unique=True)
+    # A pharmacy chain runs several branches under one name, and each branch
+    # keeps its own deliveries and its own balance - so the name alone does
+    # not identify a customer. See `at_address` for how they are told apart.
+    name = models.CharField(max_length=255)
     address = models.TextField(blank=True)
     ntn = models.CharField("CNIC / NTN", max_length=50, blank=True, null=True)
     sales_tax = models.CharField(
@@ -49,10 +60,37 @@ class Customer(models.Model):
     )
 
     class Meta:
-        ordering = ["name"]
+        # Branches of one chain sit together; id keeps the order stable
+        # without asking the database to sort a TEXT column.
+        ordering = ["name", "id"]
 
     def __str__(self):
         return self.name
+
+    @classmethod
+    def at_address(cls, name, address, exclude_pk=None):
+        """The customer trading under this name at this address, or None.
+
+        Invoicing uses this instead of matching on the name: a second branch
+        of the same pharmacy is a separate account, while a repeat invoice to
+        the branch already on the books finds it rather than opening another.
+
+        The address is a TextField, which MySQL will not index without a
+        prefix length, so the pair cannot be made unique in the database and
+        is matched here instead. The candidates sharing one name are few.
+        """
+        wanted = normalise_address(address)
+
+        matches = cls.objects.filter(name__iexact=(name or "").strip())
+
+        if exclude_pk is not None:
+            matches = matches.exclude(pk=exclude_pk)
+
+        for candidate in matches:
+            if normalise_address(candidate.address) == wanted:
+                return candidate
+
+        return None
 
     @property
     def total_invoiced(self):
@@ -118,7 +156,14 @@ class Invoice(models.Model):
 
     @property
     def amount_paid(self):
-        return self.payments.aggregate(t=Sum("amount"))["t"] or ZERO
+        """What has actually been applied to this invoice.
+
+        Read from allocations rather than from payments pointing at it,
+        because a lump sum settles several invoices at once and money taken
+        "against the account" has to reach them too - otherwise the customer
+        ledger reads settled while every invoice still reads due.
+        """
+        return self.allocations.aggregate(t=Sum("amount"))["t"] or ZERO
 
     @property
     def amount_returned(self):
@@ -261,11 +306,94 @@ class Payment(models.Model):
     class Meta:
         ordering = ["-paid_on", "-id"]
 
+    @property
+    def unapplied(self):
+        """Money still sitting on the account, settling no particular invoice."""
+        applied = self.allocations.aggregate(t=Sum("amount"))["t"] or ZERO
+
+        return self.amount - applied
+
+    def allocate(self):
+        """Spread this payment across the customer's unpaid invoices.
+
+        The invoice it names is settled first, then anything left over goes to
+        the oldest outstanding bills - which is what both sides assume a lump
+        sum does. Whatever remains after that stays on the account as credit
+        against invoices not yet raised.
+        """
+        self.allocations.all().delete()
+
+        remaining = self.amount
+
+        targets = []
+
+        if self.invoice_id is not None:
+            targets.append(self.invoice)
+
+        targets.extend(
+            Invoice.objects.filter(customer_id=self.customer_id)
+            .exclude(pk=self.invoice_id)
+            .order_by("date", "id")
+        )
+
+        for invoice in targets:
+            if remaining <= ZERO:
+                break
+
+            # Recomputed per invoice: earlier iterations of this loop have
+            # already written allocations that reduce what is still owed.
+            owed = invoice.balance
+
+            if owed <= ZERO:
+                continue
+
+            applied = min(remaining, owed)
+
+            PaymentAllocation.objects.create(
+                payment=self, invoice=invoice, amount=applied
+            )
+
+            remaining -= applied
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+
+        # Allocated on every save so a payment recorded anywhere - the web
+        # form, the API, a management command, a test - reaches the invoices
+        # it pays for. Nothing here saves the payment again, so this cannot
+        # recurse.
+        self.allocate()
+
     def __str__(self):
         return f"{self.customer.name} - {self.amount}"
 
 
 # 1. User Role Model
+class PaymentAllocation(models.Model):
+    """How much of one payment settles one invoice.
+
+    A payment and an invoice are not one-to-one in practice: a customer hands
+    over a lump sum that clears three old bills and leaves change on account.
+    Modelling that as a link on the payment forces a false choice, so the
+    amounts live here instead.
+    """
+
+    payment = models.ForeignKey(
+        Payment, on_delete=models.CASCADE, related_name="allocations"
+    )
+    invoice = models.ForeignKey(
+        Invoice, on_delete=models.CASCADE, related_name="allocations"
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+
+    class Meta:
+        ordering = ["invoice__date", "invoice_id"]
+        unique_together = [("payment", "invoice")]
+
+    def __str__(self):
+        return f"{self.amount} of {self.payment} to {self.invoice.invoice_no}"
+
+
 class UserRolls(models.Model):
     ROLE_SUPER_ADMIN = 'super_admin'
     ROLE_MANAGER = 'manager'

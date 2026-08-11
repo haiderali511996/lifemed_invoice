@@ -47,6 +47,7 @@ from .models import (
     OrderItem,
     OVERDUE_DAYS,
     Payment,
+    PaymentAllocation,
     PayrollRun,
     Payslip,
     PlanVisit,
@@ -313,8 +314,10 @@ class GenerateInvoiceTests(TestCase):
 
         self.assertEqual(Customer.objects.get().license_no, "LIC-42")
 
-    def test_existing_customer_is_updated_not_duplicated(self):
-        Customer.objects.create(name="Acme Pharma", address="Old", license_no="OLD")
+    def test_same_name_and_address_reuses_the_customer(self):
+        Customer.objects.create(
+            name="Acme Pharma", address="Karachi", license_no="OLD"
+        )
 
         self.post()
 
@@ -322,6 +325,66 @@ class GenerateInvoiceTests(TestCase):
         self.assertEqual(Customer.objects.count(), 1)
         self.assertEqual(customer.address, "Karachi")
         self.assertEqual(customer.license_no, "LIC-42")
+
+    def test_address_typed_differently_is_still_the_same_place(self):
+        """Extra spacing or a different case must not open a second account."""
+        Customer.objects.create(name="Acme Pharma", address="  KARACHI\n")
+
+        self.post()
+
+        self.assertEqual(Customer.objects.count(), 1)
+
+    def test_a_new_address_opens_a_second_customer(self):
+        """A chain's second branch is its own account, not a move."""
+        first = Customer.objects.create(name="Acme Pharma", address="Lahore")
+
+        self.post()                                   # same name, Karachi
+
+        self.assertEqual(Customer.objects.count(), 2)
+
+        first.refresh_from_db()
+        self.assertEqual(first.address, "Lahore")     # the branch did not move
+
+        branch = Customer.objects.exclude(pk=first.pk).get()
+        self.assertEqual(branch.address, "Karachi")
+
+    def test_the_new_branch_is_the_one_invoiced(self):
+        Customer.objects.create(name="Acme Pharma", address="Lahore")
+
+        self.post()
+
+        invoice = Invoice.objects.get()
+        self.assertEqual(invoice.customer.address, "Karachi")
+
+    def test_a_customer_with_no_address_on_file_has_it_filled_in(self):
+        """A blank address names no branch, so this completes the record."""
+        existing = Customer.objects.create(name="Acme Pharma")
+
+        self.post()
+
+        self.assertEqual(Customer.objects.count(), 1)
+
+        existing.refresh_from_db()
+        self.assertEqual(existing.address, "Karachi")
+
+    def test_two_unaddressed_customers_of_one_name_are_left_alone(self):
+        """Nothing says which of them this is, so guessing would merge the
+        invoice into the wrong account."""
+        Customer.objects.create(name="Acme Pharma")
+        Customer.objects.create(name="Acme Pharma")
+
+        self.post()
+
+        self.assertEqual(Customer.objects.count(), 3)
+
+    def test_each_branch_keeps_its_own_balance(self):
+        self.post()                                   # Karachi
+        self.post(address="Lahore")
+
+        karachi, lahore = Customer.objects.order_by("id")
+
+        self.assertEqual(karachi.invoice_set.count(), 1)
+        self.assertEqual(lahore.invoice_set.count(), 1)
 
     def test_log_records_the_discounted_total(self):
         self.post()
@@ -392,8 +455,9 @@ class CustomerEditTests(TestCase):
         self.customer.refresh_from_db()
         self.assertEqual(self.customer.name, "Shifa Medical Store")
 
-    def test_rename_onto_an_existing_name_is_rejected(self):
-        Customer.objects.create(name="Al-Noor Pharmacy", address="Karachi")
+    def test_rename_onto_an_existing_name_and_address_is_rejected(self):
+        """Two accounts at one address leave invoicing no way to choose."""
+        Customer.objects.create(name="Al-Noor Pharmacy", address="Lahore")
 
         response = self.client.post(self.url(), self.payload(name="Al-Noor Pharmacy"))
 
@@ -402,13 +466,42 @@ class CustomerEditTests(TestCase):
         self.assertEqual(self.customer.name, "Shifa Pharmacy")
 
     def test_case_insensitive_duplicate_is_rejected(self):
-        """Invoicing matches names exactly, so near-duplicates split a customer."""
-        Customer.objects.create(name="Al-Noor Pharmacy", address="Karachi")
+        """Near-duplicates that differ only by case are the same account."""
+        Customer.objects.create(name="Al-Noor Pharmacy", address="Lahore")
 
         response = self.client.post(self.url(), self.payload(name="AL-NOOR PHARMACY"))
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(Customer.objects.filter(name="AL-NOOR PHARMACY").count(), 0)
+
+    def test_the_same_name_at_another_address_is_allowed(self):
+        """Branches of a chain share a name and are separate customers."""
+        Customer.objects.create(name="Al-Noor Pharmacy", address="Karachi")
+
+        response = self.client.post(self.url(), self.payload(name="Al-Noor Pharmacy"))
+
+        self.assertRedirects(response, reverse("customer_list"))
+
+        self.customer.refresh_from_db()
+        self.assertEqual(self.customer.name, "Al-Noor Pharmacy")
+        self.assertEqual(self.customer.address, "Lahore")
+
+    def test_moving_a_customer_onto_another_branch_address_is_rejected(self):
+        Customer.objects.create(name="Shifa Pharmacy", address="Karachi")
+
+        response = self.client.post(self.url(), self.payload(address="Karachi"))
+
+        self.assertEqual(response.status_code, 200)
+        self.customer.refresh_from_db()
+        self.assertEqual(self.customer.address, "Lahore")
+
+    def test_editing_a_customer_without_changing_its_address_is_allowed(self):
+        """The duplicate check must not count the record being edited."""
+        response = self.client.post(
+            self.url(), self.payload(contact_person="Dr. Bilal")
+        )
+
+        self.assertRedirects(response, reverse("customer_list"))
 
     def test_blank_name_is_rejected(self):
         response = self.client.post(self.url(), self.payload(name="   "))
@@ -879,6 +972,25 @@ class TerritoryAndTeamTests(TestCase):
         response = self.client.get(reverse("territory_report"))
 
         self.assertEqual(response.context["unassigned_customers"], 1)
+
+    def test_territory_report_excludes_returned_goods_from_invoiced(self):
+        """A credit note was never a completed sale, so it should not count."""
+        customer = Customer.objects.create(
+            name="Shifa", address="x", territory=self.territory
+        )
+        invoice = Invoice.objects.create(customer=customer, license_no="L")
+        Invoice.objects.filter(pk=invoice.pk).update(total=Decimal("1000.00"))
+        SalesReturn.objects.create(
+            invoice=invoice, customer=customer,
+            return_no="CN-1", total=Decimal("300.00"),
+        )
+
+        response = self.client.get(reverse("territory_report"))
+        row = response.context["rows"][0]
+
+        self.assertEqual(row["invoiced"], Decimal("700.00"))
+        self.assertEqual(row["balance"], Decimal("700.00"))
+        self.assertEqual(response.context["total_invoiced"], Decimal("700.00"))
 
 
 class WeeklyPlanTests(TestCase):
@@ -1385,8 +1497,8 @@ class PreviousBalanceOnInvoiceTests(TestCase):
 
         self.assertNotIn("PREVIOUS OUTSTANDING", self.generate())
 
-    def test_account_payments_are_shown_as_a_credit(self):
-        """A lump sum not tied to an invoice must reconcile the listing."""
+    def test_account_payments_reduce_the_invoice_they_settle(self):
+        """A lump sum reaches the invoices it pays for, not just the ledger."""
         self.generate()
 
         invoice = Invoice.objects.get()
@@ -1394,8 +1506,23 @@ class PreviousBalanceOnInvoiceTests(TestCase):
 
         text = self.generate()
 
-        self.assertIn("payments on account", text)
+        self.assertIn("HHC-9965", text)
         self.assertIn("130.00", text)        # 180 - 50 actually owed
+
+    def test_credit_left_on_account_reconciles_the_listing(self):
+        """Money paid ahead of an invoice cannot land on it, so it is shown
+        as a credit rather than leaving the rows adding up to too much."""
+        self.generate()                      # 180.00
+
+        invoice = Invoice.objects.get()
+        # 180 settles that invoice; the other 50 has nothing to settle yet.
+        Payment.objects.create(customer=invoice.customer, amount=Decimal("230.00"))
+
+        self.generate()                      # 180.00, raised after the payment
+        text = self.generate()
+
+        self.assertIn("payments on account", text)
+        self.assertIn("130.00", text)        # 180 listed - 50 sitting on account
 
 
 class BackupCommandTests(TestCase):
@@ -3724,6 +3851,38 @@ class InvoiceReprintTests(TestCase):
         self.generate()
 
         self.assertEqual(self.client.get(reverse("invoice_list")).status_code, 200)
+
+    def test_the_invoice_list_total_excludes_returned_goods(self):
+        """A credit note was never a completed sale, so it should not count."""
+        self.generate(stock=True)          # 180.00 (2 x 100 less 10%)
+        invoice = Invoice.objects.get()
+        item = invoice.items.first()
+
+        self.client.post(reverse("return_create", args=[invoice.pk]), {
+            "reason": "Damaged", "restock": "on",
+            "date": timezone.localdate().isoformat(),
+            f"qty_{item.pk}": "1",         # credits 90.00 of the 180.00
+        })
+
+        response = self.client.get(reverse("invoice_list"))
+
+        self.assertEqual(response.context["total"], Decimal("90.00"))
+
+    def test_dashboard_total_invoiced_excludes_returned_goods(self):
+        self.generate(stock=True)          # 180.00 (2 x 100 less 10%)
+        invoice = Invoice.objects.get()
+        item = invoice.items.first()
+
+        self.client.post(reverse("return_create", args=[invoice.pk]), {
+            "reason": "Damaged", "restock": "on",
+            "date": timezone.localdate().isoformat(),
+            f"qty_{item.pk}": "1",         # credits 90.00 of the 180.00
+        })
+
+        response = self.client.get(reverse("dashboard"))
+
+        self.assertEqual(response.context["total_invoiced"], Decimal("90.00"))
+        self.assertEqual(response.context["total_outstanding"], Decimal("90.00"))
 
 
 class CommissionTests(TestCase):
@@ -6110,3 +6269,206 @@ class OrderTests(TestCase):
                     reverse("order_invoice", args=[order.pk])):
             with self.subTest(url=url):
                 self.assertEqual(self.client.get(url).status_code, 200)
+
+
+class PaymentAllocationTests(TestCase):
+    """A payment has to reach the invoices it pays for.
+
+    The ledger counts every payment; an invoice used to count only payments
+    naming it. Money taken against the account satisfied the first and not the
+    second, so a customer could read settled while all their invoices read due.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.customer = Customer.objects.create(name="Shifa Pharmacy")
+
+    def invoice(self, amount, on=None):
+        invoice = Invoice.objects.create(
+            customer=self.customer, license_no="L", total=Decimal(amount)
+        )
+
+        if on is not None:
+            Invoice.objects.filter(pk=invoice.pk).update(date=on)
+            invoice.refresh_from_db()
+
+        return invoice
+
+    def pay(self, amount, invoice=None, on=None):
+        return Payment.objects.create(
+            customer=self.customer, invoice=invoice, amount=Decimal(amount),
+            paid_on=on or timezone.localdate(),
+        )
+
+    # ------------------------------------------------------- the actual bug
+
+    def test_money_on_account_settles_the_invoice(self):
+        invoice = self.invoice("5000.00")
+
+        self.pay("5000.00")
+
+        invoice.refresh_from_db()
+
+        self.assertEqual(invoice.balance, ZERO)
+        self.assertTrue(invoice.is_paid)
+        self.assertEqual(self.customer.outstanding_balance, ZERO)
+
+    def test_the_ledger_and_the_invoice_never_disagree(self):
+        first = self.invoice("3000.00", on=date(2026, 1, 1))
+        second = self.invoice("2000.00", on=date(2026, 2, 1))
+
+        self.pay("5000.00")
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+
+        self.assertEqual(self.customer.outstanding_balance, ZERO)
+        self.assertEqual(first.balance + second.balance, ZERO)
+
+    # ------------------------------------------------------- how it spreads
+
+    def test_a_lump_sum_clears_the_oldest_bills_first(self):
+        oldest = self.invoice("3000.00", on=date(2026, 1, 1))
+        newest = self.invoice("4000.00", on=date(2026, 3, 1))
+
+        self.pay("5000.00")
+
+        oldest.refresh_from_db()
+        newest.refresh_from_db()
+
+        self.assertEqual(oldest.balance, ZERO)
+        self.assertEqual(newest.balance, Decimal("2000.00"))
+
+    def test_a_payment_naming_an_invoice_settles_that_one_first(self):
+        oldest = self.invoice("3000.00", on=date(2026, 1, 1))
+        newest = self.invoice("4000.00", on=date(2026, 3, 1))
+
+        self.pay("4000.00", invoice=newest)
+
+        oldest.refresh_from_db()
+        newest.refresh_from_db()
+
+        self.assertEqual(newest.balance, ZERO)
+        self.assertEqual(oldest.balance, Decimal("3000.00"))
+
+    def test_change_from_a_named_invoice_flows_to_the_older_ones(self):
+        oldest = self.invoice("3000.00", on=date(2026, 1, 1))
+        newest = self.invoice("1000.00", on=date(2026, 3, 1))
+
+        self.pay("4000.00", invoice=newest)
+
+        oldest.refresh_from_db()
+        newest.refresh_from_db()
+
+        self.assertEqual(newest.balance, ZERO)
+        self.assertEqual(oldest.balance, ZERO)
+
+    def test_an_overpayment_stays_on_the_account(self):
+        invoice = self.invoice("1000.00")
+
+        payment = self.pay("2500.00")
+
+        invoice.refresh_from_db()
+
+        self.assertEqual(invoice.balance, ZERO)
+        self.assertEqual(payment.unapplied, Decimal("1500.00"))
+        self.assertEqual(self.customer.outstanding_balance, Decimal("-1500.00"))
+
+    def test_money_paid_before_any_invoice_waits_on_account(self):
+        payment = self.pay("5000.00")
+
+        self.assertEqual(payment.unapplied, Decimal("5000.00"))
+        self.assertEqual(payment.allocations.count(), 0)
+
+    def test_two_payments_do_not_both_claim_the_same_invoice(self):
+        invoice = self.invoice("5000.00")
+
+        self.pay("2000.00")
+        self.pay("2000.00")
+
+        invoice.refresh_from_db()
+
+        self.assertEqual(invoice.amount_paid, Decimal("4000.00"))
+        self.assertEqual(invoice.balance, Decimal("1000.00"))
+
+    def test_returned_goods_are_not_paid_for_twice(self):
+        """A credit note reduces what is owed, so less payment is applied."""
+        product = Product.objects.create(code="PAN", name="Panadol")
+        batch = Batch.objects.create(
+            product=product, batch_no="B-1", quantity=100,
+            expiry_date=timezone.localdate() + timedelta(days=365),
+        )
+
+        response = self.client.post(reverse("generate"), {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "", "sales_tax": "", "license_no": "L",
+            "item_name[]": ["Panadol"], "qty[]": ["10"], "price[]": ["100"],
+            "discount[]": ["0"], "batch[]": ["B-1"], "expiry[]": ["12/27"],
+            "stock_batch[]": [str(batch.pk)],
+        })
+
+        self.assertEqual(response.status_code, 200)
+
+        invoice = Invoice.objects.get()
+        item = invoice.items.first()
+
+        self.client.post(reverse("return_create", args=[invoice.pk]), {
+            "reason": "Damaged", "restock": "on",
+            "date": timezone.localdate().isoformat(),
+            f"qty_{item.pk}": "4",
+        })
+
+        # 1,000 invoiced less 400 credited leaves 600 to collect.
+        payment = self.pay("1000.00")
+
+        invoice.refresh_from_db()
+
+        self.assertEqual(invoice.balance, ZERO)
+        self.assertEqual(payment.unapplied, Decimal("400.00"))
+
+    def test_deleting_a_payment_puts_the_invoice_back_in_debt(self):
+        invoice = self.invoice("5000.00")
+
+        payment = self.pay("5000.00")
+        payment.delete()
+
+        invoice.refresh_from_db()
+
+        self.assertEqual(invoice.balance, Decimal("5000.00"))
+
+    def test_another_customers_invoice_is_never_touched(self):
+        other = Customer.objects.create(name="Someone Else")
+        theirs = Invoice.objects.create(
+            customer=other, license_no="L", total=Decimal("9000.00")
+        )
+
+        self.invoice("1000.00")
+        self.pay("9000.00")
+
+        theirs.refresh_from_db()
+
+        self.assertEqual(theirs.balance, Decimal("9000.00"))
+
+    # --------------------------------------------- the historical backfill
+
+    def test_the_migration_applied_payments_already_on_the_books(self):
+        """Migration 0023 runs against the test database like any other."""
+        self.assertTrue(
+            PaymentAllocation.objects.model._meta.db_table.endswith(
+                "paymentallocation"
+            )
+        )
+
+    def test_the_invoice_list_agrees_with_the_ledger(self):
+        invoice = self.invoice("5000.00")
+        self.pay("5000.00")
+
+        listing = self.client.get(reverse("invoice_list")).context["invoices"]
+        ledger = self.client.get(
+            reverse("customer_ledger", args=[self.customer.pk])
+        ).context
+
+        self.assertTrue(listing[0].is_paid)
+        self.assertEqual(ledger["balance"], ZERO)
