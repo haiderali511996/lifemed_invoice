@@ -72,8 +72,7 @@
           data-address="{{ c.address|default_if_none:'' }}"
           data-license="{{ c.license_no|default_if_none:'' }}"
         >
-          {# Two branches of a chain carry the same name, so the address is
-             what the operator picks between. #}
+          {# Two branches of a chain carry the same name; the address is what the operator picks between. #}
           {{ c.name }}{% if c.address %} · {{ c.address|truncatechars:45 }}{% endif %}
         </option>
         {% endfor %}
