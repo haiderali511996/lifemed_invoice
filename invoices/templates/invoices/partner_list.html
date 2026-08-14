@@ -117,4 +117,193 @@
     profit was arrived at.
   </p>
 </div>
+
+<div class="card">
+  <h3 style="margin-top:0">What Each Partner Owes the Company</h3>
+
+  {% if fair_shares.square %}
+  <div class="alert" style="background:#eaf7ea;border:1px solid #b7e0b7">
+    <strong>All square.</strong> Every partner has put in exactly his share of
+    the capital.
+  </div>
+  {% else %}
+  <div class="alert alert-warn">
+    <strong>{{ fair_shares.total_owed|floatformat:2 }} is short.</strong>
+    The partners own the business in the shares below but have not funded it
+    in those shares, so some are carrying the others.
+  </div>
+  {% endif %}
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Partner</th>
+          <th class="num">Share</th>
+          <th class="num">Should Have Put In</th>
+          <th class="num">Actually Put In</th>
+          <th class="num">Owes the Company</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in fair_shares.rows %}
+        <tr>
+          <td>
+            <a href="{% url 'partner_statement' row.partner.id %}">
+              {{ row.partner.full_name }}
+            </a>
+          </td>
+          <td class="num">{{ row.share_percent|floatformat:2 }}%</td>
+          <td class="num">{{ row.expected|floatformat:2 }}</td>
+          <td class="num">{{ row.actual|floatformat:2 }}</td>
+          <td class="num">
+            {% if row.owed > 0 %}
+            <strong style="color:#a71d2a">{{ row.owed|floatformat:2 }}</strong>
+            {% elif row.owed < 0 %}
+            <span style="color:#1e7b24">
+              {{ row.owed|floatformat:2 }}
+            </span>
+            <br /><span class="muted" style="font-size:11px">put in extra</span>
+            {% else %}
+            <span class="muted">square</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr>
+          <th colspan="2" style="text-align:right">Total capital</th>
+          <th class="num">{{ fair_shares.total_capital|floatformat:2 }}</th>
+          <th class="num">{{ fair_shares.total_capital|floatformat:2 }}</th>
+          <th class="num">{{ fair_shares.total_owed|floatformat:2 }}</th>
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+
+  <p class="help-note" style="margin-top:12px">
+    Partners who own equal shares are expected to have paid in equal shares.
+    A partner who has put in less is being carried by his brothers — their
+    money is funding the stock and wages that his share of the profit is
+    earned on. A drawing taken back out counts against him here, because that
+    is where the money went.
+  </p>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">What the Business Has Needed Funding For</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <tbody>
+        <tr>
+          <td>Stock bought from suppliers</td>
+          <td class="num">{{ funding.purchases|floatformat:2 }}</td>
+        </tr>
+        <tr>
+          <td>Salaries, allowances &amp; commission</td>
+          <td class="num">{{ funding.wages|floatformat:2 }}</td>
+        </tr>
+        <tr>
+          <td>Expenses</td>
+          <td class="num">{{ funding.expenses|floatformat:2 }}</td>
+        </tr>
+        <tr style="border-top:2px solid #dbe2ea">
+          <td><strong>Money out</strong></td>
+          <td class="num"><strong>{{ funding.outgoings|floatformat:2 }}</strong></td>
+        </tr>
+        <tr>
+          <td>Less: collected from customers</td>
+          <td class="num" style="color:#1e7b24">
+            ({{ funding.collections|floatformat:2 }})
+          </td>
+        </tr>
+        <tr style="border-top:2px solid #dbe2ea">
+          <td><strong>The partners have had to cover</strong></td>
+          <td class="num"><strong>{{ funding.shortfall|floatformat:2 }}</strong></td>
+        </tr>
+        <tr>
+          <td>Capital they have put in, net of drawings</td>
+          <td class="num">{{ funding.capital_in|floatformat:2 }}</td>
+        </tr>
+        <tr style="border-top:2px solid #dbe2ea">
+          <td>
+            {% if funding.still_to_fund > 0 %}
+            <strong>Still to be funded between them</strong>
+            {% else %}
+            <strong>Funded, with this much to spare</strong>
+            {% endif %}
+          </td>
+          <td class="num">
+            <strong style="color:{% if funding.still_to_fund > 0 %}#a71d2a{% else %}#1e7b24{% endif %}">
+              {{ funding.still_to_fund|floatformat:2 }}
+            </strong>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div style="overflow-x:auto;margin-top:20px">
+    <table>
+      <thead>
+        <tr>
+          <th>Partner</th>
+          <th class="num">Share</th>
+          <th class="num">Share of Total Spend</th>
+          <th class="num">Should Pay In</th>
+          <th class="num">Already Paid In</th>
+          <th class="num">Still to Pay</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in funding.rows %}
+        <tr>
+          <td>
+            <a href="{% url 'partner_statement' row.partner.id %}">
+              {{ row.partner.full_name }}
+            </a>
+          </td>
+          <td class="num">{{ row.share_percent|floatformat:2 }}%</td>
+          <td class="num muted">{{ row.share_of_spend|floatformat:2 }}</td>
+          <td class="num">{{ row.should_pay|floatformat:2 }}</td>
+          <td class="num">{{ row.already_paid|floatformat:2 }}</td>
+          <td class="num">
+            {% if row.still_to_pay > 0 %}
+            <strong style="color:#a71d2a">{{ row.still_to_pay|floatformat:2 }}</strong>
+            {% else %}
+            <span style="color:#1e7b24">{{ row.still_to_pay|floatformat:2 }}</span>
+            <br /><span class="muted" style="font-size:11px">nothing due</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr>
+          <th colspan="2" style="text-align:right">Total</th>
+          <th class="num">{{ funding.outgoings|floatformat:2 }}</th>
+          <th class="num">{{ funding.shortfall|floatformat:2 }}</th>
+          <th class="num">{{ funding.capital_in|floatformat:2 }}</th>
+          <th class="num">{{ funding.total_still_to_pay|floatformat:2 }}</th>
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+
+  <p class="help-note" style="margin-top:12px">
+    <strong>Should Pay In</strong> is each partner's share of what is left
+    after customers have paid — not of the gross spend. Money the business has
+    already collected pays for itself; asking the partners for it a second
+    time would put in more than the business ever needed. Their share of the
+    gross is shown alongside it for reference.
+  </p>
+
+  <p class="help-note" style="margin-top:10px">
+    Suppliers are counted as paid the day the stock arrived. What is still
+    owed to them is not recorded anywhere in this system, so a business buying
+    on credit needs less cash in hand than this suggests.
+  </p>
+</div>
 {% endblock %}

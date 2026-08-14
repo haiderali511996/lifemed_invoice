@@ -37,6 +37,26 @@
   </div>
 </div>
 
+{% if standing %}
+{% if standing.owed > 0 %}
+<div class="alert alert-warn">
+  <strong>{{ partner.full_name }} owes the company
+  {{ standing.owed|floatformat:2 }}.</strong>
+  His {{ standing.share_percent|floatformat:2 }}% share of the capital put in
+  so far comes to {{ standing.expected|floatformat:2 }}, and
+  {{ standing.actual|floatformat:2 }} has come from him — so the other
+  partners are funding the difference.
+</div>
+{% elif standing.owed < 0 %}
+<div class="alert" style="background:#eaf7ea;border:1px solid #b7e0b7">
+  <strong>{{ partner.full_name }} has put in
+  {{ standing.owed|floatformat:2 }} more than his share.</strong>
+  His quarter of the capital comes to {{ standing.expected|floatformat:2 }};
+  he has funded {{ standing.actual|floatformat:2 }}.
+</div>
+{% endif %}
+{% endif %}
+
 <div class="card">
   <h3 style="margin-top:0">Capital Account</h3>
 

@@ -7080,3 +7080,379 @@ class PartnerPagesTests(TestCase):
 
                 self.assertEqual(response.status_code, 302)
                 self.assertNotIn("/partners/", response["Location"])
+
+
+class PartnerDuesTests(TestCase):
+    """What each partner still owes the company.
+
+    Equal owners are expected to have funded the business equally. A partner
+    who has put in less is being carried by his brothers, and this is the
+    arithmetic that names the difference.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.partners = {
+            partner.full_name: partner
+            for partner in Partner.objects.all()
+        }
+
+    def invest(self, name, amount):
+        return CapitalTransaction.objects.create(
+            partner=self.partners[name],
+            kind=CapitalTransaction.INVESTMENT,
+            amount=Decimal(amount),
+            date=timezone.localdate(),
+        )
+
+    def draw(self, name, amount):
+        return CapitalTransaction.objects.create(
+            partner=self.partners[name],
+            kind=CapitalTransaction.DRAWING,
+            amount=Decimal(amount),
+            date=timezone.localdate(),
+        )
+
+    def owed(self, name):
+        rows = finance.capital_fair_shares()["rows"]
+
+        return next(
+            row["owed"] for row in rows if row["partner"].full_name == name
+        )
+
+    def test_equal_partners_paying_equally_owe_nothing(self):
+        for name in self.partners:
+            self.invest(name, "800000.00")
+
+        self.assertTrue(finance.capital_fair_shares()["square"])
+
+        for name in self.partners:
+            with self.subTest(partner=name):
+                self.assertEqual(self.owed(name), ZERO)
+
+    def test_a_partner_who_paid_less_owes_the_difference(self):
+        """Three put in 800,000 and one put in 600,000. The total is
+        3,000,000, so a quarter is 750,000 - the short partner owes 150,000
+        and each of the others has 50,000 more in than his share."""
+        self.invest("Mustafa Ali", "800000.00")
+        self.invest("Mujtaba Ali", "600000.00")
+        self.invest("Muhabbat Ali", "800000.00")
+        self.invest("Haider Ali", "800000.00")
+
+        result = finance.capital_fair_shares()
+
+        self.assertEqual(result["total_capital"], Decimal("3000000.00"))
+        self.assertFalse(result["square"])
+
+        self.assertEqual(self.owed("Mujtaba Ali"), Decimal("150000.00"))
+        self.assertEqual(self.owed("Mustafa Ali"), Decimal("-50000.00"))
+        self.assertEqual(result["total_owed"], Decimal("150000.00"))
+
+    def test_a_drawing_puts_a_partner_behind_his_brothers(self):
+        """Taking money back out is the same as never having put it in."""
+        for name in self.partners:
+            self.invest(name, "800000.00")
+
+        self.draw("Haider Ali", "400000.00")
+
+        # 3,200,000 in less 400,000 out leaves 2,800,000; a quarter is 700,000.
+        self.assertEqual(self.owed("Haider Ali"), Decimal("300000.00"))
+
+    def test_what_a_partner_is_short_shows_on_his_own_statement(self):
+        self.invest("Mustafa Ali", "800000.00")
+        self.invest("Mujtaba Ali", "600000.00")
+        self.invest("Muhabbat Ali", "800000.00")
+        self.invest("Haider Ali", "800000.00")
+
+        response = self.client.get(
+            reverse("partner_statement", args=[self.partners["Mujtaba Ali"].pk])
+        )
+
+        self.assertEqual(response.context["standing"]["owed"], Decimal("150000.00"))
+        self.assertContains(response, "owes the company")
+
+    def test_the_partner_list_names_who_is_short(self):
+        self.invest("Mustafa Ali", "800000.00")
+        self.invest("Mujtaba Ali", "600000.00")
+        self.invest("Muhabbat Ali", "800000.00")
+        self.invest("Haider Ali", "800000.00")
+
+        html = self.client.get(reverse("partner_list")).content.decode()
+
+        self.assertIn("150000.00", html)
+        self.assertIn("What Each Partner Owes the Company", html)
+
+
+class FundingRequirementTests(TestCase):
+    """What the company has spent, and each partner's share of the bill."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.supplier = Supplier.objects.create(name="Getz Pharma")
+        self.product = Product.objects.create(code="PAN", name="Panadol")
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1", quantity=100,
+            cost_price=Decimal("60.00"),
+            expiry_date=timezone.localdate() + timedelta(days=365),
+        )
+
+    def buy(self, quantity=100, cost="60.00"):
+        purchase = Purchase.objects.create(
+            supplier=self.supplier, date=timezone.localdate()
+        )
+        PurchaseItem.objects.create(
+            purchase=purchase, product=self.product, batch=self.batch,
+            quantity=quantity, cost_price=Decimal(cost),
+        )
+
+        return purchase
+
+    def test_stock_bought_is_money_the_partners_must_fund(self):
+        self.buy()
+
+        funding = finance.funding_needed()
+
+        self.assertEqual(funding["purchases"], Decimal("6000.00"))
+        self.assertEqual(funding["outgoings"], Decimal("6000.00"))
+        self.assertEqual(funding["shortfall"], Decimal("6000.00"))
+
+    def test_what_customers_pay_reduces_what_the_partners_must_find(self):
+        """Money the business collects funds itself; charging the partners
+        for it again would put in more than was ever needed."""
+        self.buy()
+
+        customer = Customer.objects.create(name="Shifa", address="Lahore")
+        Payment.objects.create(customer=customer, amount=Decimal("2000.00"))
+
+        funding = finance.funding_needed()
+
+        self.assertEqual(funding["collections"], Decimal("2000.00"))
+        self.assertEqual(funding["shortfall"], Decimal("4000.00"))
+
+    def test_each_partner_is_billed_a_quarter_of_the_shortfall(self):
+        self.buy()
+
+        funding = finance.funding_needed()
+
+        for row in funding["rows"]:
+            with self.subTest(partner=row["partner"].full_name):
+                self.assertEqual(row["should_pay"], Decimal("1500.00"))
+                self.assertEqual(row["still_to_pay"], Decimal("1500.00"))
+
+    def test_capital_already_in_comes_off_what_a_partner_still_owes(self):
+        self.buy()
+
+        partner = Partner.objects.order_by("full_name").first()
+        CapitalTransaction.objects.create(
+            partner=partner, kind=CapitalTransaction.INVESTMENT,
+            amount=Decimal("1000.00"), date=timezone.localdate(),
+        )
+
+        row = next(
+            r for r in finance.funding_needed()["rows"]
+            if r["partner"].pk == partner.pk
+        )
+
+        self.assertEqual(row["should_pay"], Decimal("1500.00"))
+        self.assertEqual(row["already_paid"], Decimal("1000.00"))
+        self.assertEqual(row["still_to_pay"], Decimal("500.00"))
+
+    def test_a_partner_who_has_funded_enough_owes_nothing_further(self):
+        self.buy()
+
+        partner = Partner.objects.order_by("full_name").first()
+        CapitalTransaction.objects.create(
+            partner=partner, kind=CapitalTransaction.INVESTMENT,
+            amount=Decimal("5000.00"), date=timezone.localdate(),
+        )
+
+        row = next(
+            r for r in finance.funding_needed()["rows"]
+            if r["partner"].pk == partner.pk
+        )
+
+        self.assertEqual(row["still_to_pay"], Decimal("-3500.00"))
+        self.assertEqual(finance.funding_needed()["total_still_to_pay"],
+                         Decimal("4500.00"))
+
+    def test_wages_and_expenses_are_part_of_the_bill(self):
+        category = ExpenseCategory.objects.create(name="Rent")
+        Expense.objects.create(
+            category=category, amount=Decimal("2000.00"),
+            status=Expense.APPROVED, date=timezone.localdate(),
+        )
+
+        funding = finance.funding_needed()
+
+        self.assertEqual(funding["expenses"], Decimal("2000.00"))
+        self.assertEqual(funding["outgoings"], Decimal("2000.00"))
+
+    def test_the_share_of_gross_spend_is_shown_alongside(self):
+        """Asked for explicitly, so it is shown - but it is not what is
+        charged, because collections have already covered part of it."""
+        self.buy()
+
+        customer = Customer.objects.create(name="Shifa", address="Lahore")
+        Payment.objects.create(customer=customer, amount=Decimal("2000.00"))
+
+        row = finance.funding_needed()["rows"][0]
+
+        self.assertEqual(row["share_of_spend"], Decimal("1500.00"))
+        self.assertEqual(row["should_pay"], Decimal("1000.00"))
+
+
+class CompanyAssessmentTests(TestCase):
+    """Profit and loss by quarter, half year and year."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.customer = Customer.objects.create(name="Shifa", address="Lahore")
+
+    def invoice_on(self, when, total):
+        invoice = Invoice.objects.create(
+            customer=self.customer, license_no="L"
+        )
+        Invoice.objects.filter(pk=invoice.pk).update(
+            date=when, total=Decimal(total)
+        )
+
+        return invoice
+
+    # ------------------------------------------------------------ the periods
+
+    def test_a_year_splits_into_four_quarters(self):
+        periods = finance.periods_in(finance.QUARTER, 2026)
+
+        self.assertEqual(len(periods), 4)
+        self.assertEqual(periods[0], ("Q1 2026", date(2026, 1, 1), date(2026, 3, 31)))
+        self.assertEqual(periods[3], ("Q4 2026", date(2026, 10, 1), date(2026, 12, 31)))
+
+    def test_a_year_splits_into_two_halves(self):
+        periods = finance.periods_in(finance.HALF, 2026)
+
+        self.assertEqual(len(periods), 2)
+        self.assertEqual(periods[0], ("H1 2026", date(2026, 1, 1), date(2026, 6, 30)))
+        self.assertEqual(periods[1], ("H2 2026", date(2026, 7, 1), date(2026, 12, 31)))
+
+    def test_a_year_is_one_whole_period(self):
+        periods = finance.periods_in(finance.YEAR, 2026)
+
+        self.assertEqual(periods, [("2026", date(2026, 1, 1), date(2026, 12, 31))])
+
+    def test_february_ends_on_the_right_day_in_a_leap_year(self):
+        """Hard-coding 28 would drop a day's trading every fourth year."""
+        _, end = finance.period_range(finance.QUARTER, 2028, 1)
+
+        self.assertEqual(end, date(2028, 3, 31))
+
+        _, february_end = finance.period_range(finance.YEAR, 2028, 1)
+        self.assertEqual(february_end, date(2028, 12, 31))
+
+    # ------------------------------------------------------------- the result
+
+    def test_sales_land_in_the_quarter_they_were_billed(self):
+        self.invoice_on(date(2026, 2, 10), "1000.00")     # Q1
+        self.invoice_on(date(2026, 8, 20), "3000.00")     # Q3
+
+        rows = finance.assessment(finance.QUARTER, 2026)["rows"]
+
+        self.assertEqual(rows[0]["pnl"]["revenue"], Decimal("1000.00"))
+        self.assertEqual(rows[1]["pnl"]["revenue"], ZERO)
+        self.assertEqual(rows[2]["pnl"]["revenue"], Decimal("3000.00"))
+        self.assertEqual(rows[3]["pnl"]["revenue"], ZERO)
+
+    def test_the_quarters_add_up_to_the_year(self):
+        self.invoice_on(date(2026, 2, 10), "1000.00")
+        self.invoice_on(date(2026, 8, 20), "3000.00")
+
+        quarters = finance.assessment(finance.QUARTER, 2026)
+        year = finance.assessment(finance.YEAR, 2026)
+
+        self.assertEqual(quarters["totals"]["revenue"], Decimal("4000.00"))
+        self.assertEqual(
+            quarters["totals"]["net_profit"],
+            year["rows"][0]["pnl"]["net_profit"],
+        )
+
+    def test_another_years_trading_is_not_counted(self):
+        self.invoice_on(date(2025, 2, 10), "9999.00")
+
+        report = finance.assessment(finance.QUARTER, 2026)
+
+        self.assertEqual(report["totals"]["revenue"], ZERO)
+
+    def test_each_partner_gets_a_quarter_of_each_period(self):
+        self.invoice_on(date(2026, 2, 10), "1000.00")
+
+        first_quarter = finance.assessment(finance.QUARTER, 2026)["rows"][0]
+
+        self.assertEqual(len(first_quarter["shares"]), 4)
+
+        for share in first_quarter["shares"]:
+            with self.subTest(partner=share["partner"].full_name):
+                self.assertEqual(share["amount"], Decimal("250.00"))
+
+    def test_a_partners_year_total_is_their_periods_added_up(self):
+        self.invoice_on(date(2026, 2, 10), "1000.00")
+        self.invoice_on(date(2026, 8, 20), "3000.00")
+
+        totals = finance.assessment(finance.QUARTER, 2026)["partner_totals"]
+
+        for total in totals:
+            with self.subTest(partner=total["partner"].full_name):
+                self.assertEqual(total["amount"], Decimal("1000.00"))
+
+    # --------------------------------------------------------------- the page
+
+    def test_the_page_renders_for_every_period_length(self):
+        self.invoice_on(date(2026, 2, 10), "1000.00")
+
+        for kind, _ in finance.PERIOD_CHOICES:
+            with self.subTest(period=kind):
+                response = self.client.get(
+                    reverse("assessment_report"), {"period": kind, "year": 2026}
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.context["report"]["kind"], kind)
+
+    def test_an_unknown_period_falls_back_rather_than_erroring(self):
+        response = self.client.get(
+            reverse("assessment_report"), {"period": "fortnightly"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["report"]["kind"], finance.QUARTER)
+
+    def test_a_year_with_no_trading_falls_back_to_one_that_has(self):
+        """An empty grid with no explanation is worse than the nearest year."""
+        self.invoice_on(date(2026, 2, 10), "1000.00")
+
+        response = self.client.get(
+            reverse("assessment_report"), {"year": "1999"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(response.context["selected_year"], finance.trading_years())
+
+    def test_the_field_team_cannot_see_the_assessment(self):
+        mr_user = User.objects.create_user("ali", password="pw")
+        Employee.objects.create(
+            employee_code="MR-01", full_name="Ali", designation="mr",
+            user=mr_user,
+        )
+        UserRolls.objects.filter(user=mr_user).update(role=UserRolls.ROLE_FIELD)
+
+        self.client.logout()
+        self.client.login(username="ali", password="pw")
+
+        response = self.client.get(reverse("assessment_report"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertNotIn("/partners/", response["Location"])

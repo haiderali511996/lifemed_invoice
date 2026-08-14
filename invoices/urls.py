@@ -31,6 +31,11 @@ urlpatterns = [
     path('partners/capital/', views.capital_record, name='capital_record'),
     path('partners/profit/', views.profit_report, name='profit_report'),
     path(
+        'partners/assessment/',
+        views.assessment_report,
+        name='assessment_report',
+    ),
+    path(
         'partners/<int:partner_id>/',
         views.partner_statement,
         name='partner_statement',

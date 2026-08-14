@@ -701,6 +701,9 @@
           <a href="{% url 'profit_report' %}" class="{% if active == 'profit_report' %}active{% endif %}">
             💹 <span>Profit &amp; Shares</span>
           </a>
+          <a href="{% url 'assessment_report' %}" class="{% if active == 'assessment' %}active{% endif %}">
+            📆 <span>Company Assessment</span>
+          </a>
         </div>
 
         <button type="button" class="nav-section" data-nav-key="reports" onclick="toggleNavGroup(this)">

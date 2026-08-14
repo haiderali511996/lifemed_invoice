@@ -4167,6 +4167,8 @@ def partner_list(request):
             "active": "partners",
             "rows": rows,
             "net_profit": net_profit,
+            "fair_shares": finance.capital_fair_shares(),
+            "funding": finance.funding_needed(),
             "total_share": Partner.total_share(),
             # Shown rather than silently corrected: shares that do not make
             # 100 mean somebody's profit is unassigned, and only the owners
@@ -4217,6 +4219,16 @@ def partner_statement(request, partner_id):
 
     statement = finance.partner_statement(partner)
 
+    # This partner's row out of the fair-share table, so the statement can say
+    # whether he is square with his brothers without recomputing it here.
+    standing = next(
+        (
+            row for row in finance.capital_fair_shares()["rows"]
+            if row["partner"].pk == partner.pk
+        ),
+        None,
+    )
+
     running = ZERO
     entries = []
 
@@ -4233,6 +4245,7 @@ def partner_statement(request, partner_id):
             "statement": statement,
             "partner": partner,
             "entries": entries,
+            "standing": standing,
         }
     )
 
@@ -4294,5 +4307,33 @@ def profit_report(request):
             "position": finance.where_the_money_is(),
             "start": request.GET.get("start", ""),
             "end": request.GET.get("end", ""),
+        }
+    )
+
+
+@login_required
+def assessment_report(request):
+    """Profit and loss quarter by quarter, half by half, or year by year."""
+    kind = request.GET.get("period", finance.QUARTER)
+
+    years = finance.trading_years()
+
+    year = safe_int(request.GET.get("year", "")) or timezone.localdate().year
+
+    # A year with nothing in it would render an empty grid with no
+    # explanation, so fall back to one there is something to show for.
+    if year not in years:
+        year = years[0]
+
+    return render(
+        request,
+        "invoices/assessment_report.html",
+        {
+            "active": "assessment",
+            "report": finance.assessment(kind, year),
+            "period_choices": finance.PERIOD_CHOICES,
+            "years": years,
+            "selected_period": kind,
+            "selected_year": year,
         }
     )

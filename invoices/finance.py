@@ -17,6 +17,8 @@ Three things it is careful about, because partners divide the result:
   rather than being quietly dropped.
 """
 
+from calendar import monthrange
+from datetime import date
 from decimal import Decimal
 
 from django.db.models import DecimalField, ExpressionWrapper, F, Sum
@@ -339,6 +341,119 @@ def distribution(start=None, end=None):
     }
 
 
+def collections(start=None, end=None):
+    """Cash taken from customers."""
+    return _sum(_between(Payment.objects.all(), "paid_on", start, end), "amount")
+
+
+def capital_fair_shares():
+    """Whether each partner has actually funded the share he owns.
+
+    Partners who own the business in equal quarters are expected to have paid
+    for it in equal quarters. One who has put in less than his share is being
+    carried by his brothers - their money is funding stock and wages that his
+    quarter of the profit is earned on. That difference is a debt to the
+    company, and this is where it is named.
+
+    Measured on net capital, so a partner who takes a drawing back out falls
+    behind by exactly what he took - which is what has happened to the money.
+    """
+    partners = list(Partner.objects.filter(is_active=True))
+
+    contributed = [(partner, partner.net_contributed) for partner in partners]
+    total = sum((amount for _, amount in contributed), ZERO)
+
+    rows = []
+
+    for partner, actual in contributed:
+        expected = (
+            total * partner.share_percent / Decimal("100")
+        ).quantize(PENNY)
+
+        rows.append({
+            "partner": partner,
+            "share_percent": partner.share_percent,
+            "expected": expected,
+            "actual": money(actual),
+            # Positive: owes the company. Negative: has funded more than his
+            # share, so the company is carrying his money.
+            "owed": money(expected - actual),
+        })
+
+    owed = sum((row["owed"] for row in rows if row["owed"] > ZERO), ZERO)
+
+    return {
+        "rows": rows,
+        "total_capital": money(total),
+        "total_owed": money(owed),
+        "square": all(row["owed"] == ZERO for row in rows),
+    }
+
+
+def funding_needed(start=None, end=None):
+    """What the business has spent that the partners have to fund.
+
+    Buying stock, paying the team and settling expenses all take money out;
+    what customers pay brings it back in. The difference is what the partners
+    have had to cover between them, and their shares of it are what each one
+    is expected to bring.
+
+    Purchases are counted as though the supplier was paid on receipt. Money
+    still owed to suppliers is not recorded anywhere in this system, so a
+    business buying on credit needs less cash than this suggests.
+    """
+    bought = purchases_total(start, end)
+    spent = operating_expenses(start, end)
+    paid_out = employment_cost(start, end)
+    taken = collections(start, end)
+
+    outgoings = bought + spent + paid_out
+    shortfall = outgoings - taken
+
+    introduced = capital_introduced() - capital_withdrawn()
+
+    # Each partner's slice of the bill. Charged on what is left after the
+    # customers have paid, not on the gross spend: money the business has
+    # already collected pays for itself, and asking the partners for it
+    # again would put in more than the business ever needed.
+    rows = []
+
+    for partner in Partner.objects.filter(is_active=True):
+        due = (
+            shortfall * partner.share_percent / Decimal("100")
+        ).quantize(PENNY)
+
+        paid = partner.net_contributed
+
+        rows.append({
+            "partner": partner,
+            "share_percent": partner.share_percent,
+            "share_of_spend": (
+                outgoings * partner.share_percent / Decimal("100")
+            ).quantize(PENNY),
+            "should_pay": due,
+            "already_paid": money(paid),
+            "still_to_pay": money(due - paid),
+        })
+
+    return {
+        "purchases": money(bought),
+        "expenses": money(spent),
+        "wages": money(paid_out),
+        "outgoings": money(outgoings),
+        "collections": money(taken),
+        "shortfall": money(shortfall),
+        "capital_in": money(introduced),
+        # More than the partners have put in means the business is funding
+        # itself out of what it collects; less means it still needs them.
+        "still_to_fund": money(shortfall - introduced),
+        "rows": rows,
+        "total_still_to_pay": money(
+            sum((row["still_to_pay"] for row in rows if row["still_to_pay"] > ZERO), ZERO)
+        ),
+    }
+
+
 def partner_statement(partner, start=None, end=None):
     """One partner's capital account: what they put in, took out, and earned."""
     net = profit_and_loss(start, end)["net_profit"]
@@ -361,3 +476,135 @@ def partner_statement(partner, start=None, end=None):
         "capital_balance": money(invested - drawn + profit_share),
         "company_net_profit": net,
     }
+
+
+# --------------------------------------------------------------- assessment
+
+QUARTER = "quarter"
+HALF = "half"
+YEAR = "year"
+
+PERIOD_CHOICES = (
+    (QUARTER, "Quarterly"),
+    (HALF, "Half-yearly"),
+    (YEAR, "Yearly"),
+)
+
+# How many periods of each kind fit in a year, and how many months each runs.
+PERIOD_SHAPE = {
+    QUARTER: (4, 3),
+    HALF: (2, 6),
+    YEAR: (1, 12),
+}
+
+
+def period_range(kind, year, index):
+    """First and last day of the index-th quarter, half or year."""
+    _, months = PERIOD_SHAPE[kind]
+
+    first_month = (index - 1) * months + 1
+    last_month = first_month + months - 1
+
+    return (
+        date(year, first_month, 1),
+        date(year, last_month, monthrange(year, last_month)[1]),
+    )
+
+
+def period_label(kind, year, index):
+    if kind == YEAR:
+        return str(year)
+
+    return f"{'Q' if kind == QUARTER else 'H'}{index} {year}"
+
+
+def periods_in(kind, year):
+    """Every period of this kind in one year, oldest first."""
+    count, _ = PERIOD_SHAPE[kind]
+
+    return [
+        (period_label(kind, year, index), *period_range(kind, year, index))
+        for index in range(1, count + 1)
+    ]
+
+
+def assessment(kind, year):
+    """The trading result period by period, with each partner's share.
+
+    Partners want to see whether the business is improving, not only what it
+    has made since it started - so this reports each quarter, half or year on
+    its own rather than as a running total.
+
+    A period's profit is worked out from what traded inside it. Capital and
+    drawings are left out on purpose: they move a partner's own money, not
+    the business's result.
+    """
+    if kind not in PERIOD_SHAPE:
+        kind = QUARTER
+
+    partners = list(Partner.objects.filter(is_active=True))
+
+    rows = []
+
+    for label, start, end in periods_in(kind, year):
+        result = profit_and_loss(start, end)
+
+        rows.append({
+            "label": label,
+            "start": start,
+            "end": end,
+            "pnl": result,
+            "shares": [
+                {
+                    "partner": partner,
+                    "amount": partner.share_of(result["net_profit"]),
+                }
+                for partner in partners
+            ],
+        })
+
+    totals = {
+        field: money(sum((row["pnl"][field] for row in rows), ZERO))
+        for field in (
+            "revenue", "cost_of_goods_sold", "gross_profit",
+            "wages", "expenses", "samples", "net_profit",
+        )
+    }
+
+    return {
+        "kind": kind,
+        "year": year,
+        "rows": rows,
+        "partners": partners,
+        "totals": totals,
+        "partner_totals": [
+            {
+                "partner": partner,
+                "amount": money(
+                    sum(
+                        (
+                            row["shares"][position]["amount"]
+                            for row in rows
+                        ),
+                        ZERO,
+                    )
+                ),
+            }
+            for position, partner in enumerate(partners)
+        ],
+    }
+
+
+def trading_years():
+    """Years there is anything to report on, newest first.
+
+    Taken from the invoices actually raised, so the year picker never offers
+    a year with nothing in it - and always offers this one.
+    """
+    years = set(
+        Invoice.objects.dates("date", "year").values_list("date__year", flat=True)
+    )
+
+    years.add(date.today().year)
+
+    return sorted(years, reverse=True)

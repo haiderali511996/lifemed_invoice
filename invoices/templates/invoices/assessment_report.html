@@ -1,0 +1,152 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Company Assessment{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>📆 Company Assessment</h1>
+  <button onclick="window.print()" class="btn btn-grey no-print">Print</button>
+</div>
+
+<div class="card no-print" style="margin-bottom:16px">
+  <form method="GET" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+    <div>
+      <label style="display:block;font-size:12px;color:#55657a;margin-bottom:4px">Report by</label>
+      <select name="period" style="padding:8px 11px;border:1px solid #dbe2ea;border-radius:7px">
+        {% for value, label in period_choices %}
+        <option value="{{ value }}" {% if selected_period == value %}selected{% endif %}>
+          {{ label }}
+        </option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label style="display:block;font-size:12px;color:#55657a;margin-bottom:4px">Year</label>
+      <select name="year" style="padding:8px 11px;border:1px solid #dbe2ea;border-radius:7px">
+        {% for year in years %}
+        <option value="{{ year }}" {% if selected_year == year %}selected{% endif %}>
+          {{ year }}
+        </option>
+        {% endfor %}
+      </select>
+    </div>
+    <button type="submit" class="btn">Show</button>
+  </form>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Trading Result — {{ report.year }}</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Period</th>
+          <th class="num">Sales</th>
+          <th class="num">Cost of Goods</th>
+          <th class="num">Gross Profit</th>
+          <th class="num">Wages</th>
+          <th class="num">Expenses</th>
+          <th class="num">Samples</th>
+          <th class="num">Net Profit</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in report.rows %}
+        <tr>
+          <td>
+            <strong>{{ row.label }}</strong>
+            <br /><span class="muted" style="font-size:11px">
+              {{ row.start|date:"d M" }} – {{ row.end|date:"d M Y" }}
+            </span>
+          </td>
+          <td class="num">{{ row.pnl.revenue|floatformat:2 }}</td>
+          <td class="num">{{ row.pnl.cost_of_goods_sold|floatformat:2 }}</td>
+          <td class="num">
+            {{ row.pnl.gross_profit|floatformat:2 }}
+            <br /><span class="muted" style="font-size:11px">
+              {{ row.pnl.gross_margin|floatformat:1 }}%
+            </span>
+          </td>
+          <td class="num">{{ row.pnl.wages|floatformat:2 }}</td>
+          <td class="num">{{ row.pnl.expenses|floatformat:2 }}</td>
+          <td class="num">{{ row.pnl.samples|floatformat:2 }}</td>
+          <td class="num">
+            <strong style="color:{% if row.pnl.net_profit < 0 %}#a71d2a{% else %}#1e7b24{% endif %}">
+              {{ row.pnl.net_profit|floatformat:2 }}
+            </strong>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr>
+          <th>{{ report.year }} total</th>
+          <th class="num">{{ report.totals.revenue|floatformat:2 }}</th>
+          <th class="num">{{ report.totals.cost_of_goods_sold|floatformat:2 }}</th>
+          <th class="num">{{ report.totals.gross_profit|floatformat:2 }}</th>
+          <th class="num">{{ report.totals.wages|floatformat:2 }}</th>
+          <th class="num">{{ report.totals.expenses|floatformat:2 }}</th>
+          <th class="num">{{ report.totals.samples|floatformat:2 }}</th>
+          <th class="num">{{ report.totals.net_profit|floatformat:2 }}</th>
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Each Partner's Share, Period by Period</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Partner</th>
+          <th class="num">Share</th>
+          {% for row in report.rows %}
+          <th class="num">{{ row.label }}</th>
+          {% endfor %}
+          <th class="num">{{ report.year }} Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for total in report.partner_totals %}
+        <tr>
+          <td>
+            <a href="{% url 'partner_statement' total.partner.id %}">
+              {{ total.partner.full_name }}
+            </a>
+          </td>
+          <td class="num">{{ total.partner.share_percent|floatformat:2 }}%</td>
+          {% for row in report.rows %}
+          <td class="num">
+            {% for share in row.shares %}
+            {% if share.partner.id == total.partner.id %}
+            <span style="color:{% if share.amount < 0 %}#a71d2a{% else %}#1e7b24{% endif %}">
+              {{ share.amount|floatformat:2 }}
+            </span>
+            {% endif %}
+            {% endfor %}
+          </td>
+          {% endfor %}
+          <td class="num"><strong>{{ total.amount|floatformat:2 }}</strong></td>
+        </tr>
+        {% empty %}
+        <tr>
+          <td colspan="{{ report.rows|length|add:3 }}" style="text-align:center;padding:26px">
+            No active partners.
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="help-note" style="margin-top:12px">
+    Each period stands on its own — this is what the business made in that
+    quarter, half or year, not a running total. Capital and drawings are left
+    out on purpose: they move a partner's own money rather than the
+    business's result. See
+    <a href="{% url 'partner_list' %}">Partners</a> for those.
+  </p>
+</div>
+{% endblock %}
