@@ -216,6 +216,7 @@ urlpatterns = [
     path('expenses/', views.expense_list, name='expense_list'),
     path('expenses/new/', views.expense_edit, name='expense_new'),
     path('reports/sales/', views.sales_report, name='sales_report'),
+    path('reports/ageing/', views.ageing_report, name='ageing_report'),
     path('expenses/report/', views.expense_report, name='expense_report'),
     path(
         'expenses/<int:expense_id>/edit/',

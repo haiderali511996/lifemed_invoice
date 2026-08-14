@@ -4380,3 +4380,19 @@ def sales_report(request):
             "end": end.isoformat() if end else "",
         }
     )
+
+
+@login_required
+def ageing_report(request):
+    """Who owes, and how long they have owed it for."""
+    ageing = finance.receivables_ageing()
+
+    return render(
+        request,
+        "invoices/ageing_report.html",
+        {
+            "active": "ageing",
+            "ageing": ageing,
+            "oldest": finance.oldest_debts(),
+        }
+    )

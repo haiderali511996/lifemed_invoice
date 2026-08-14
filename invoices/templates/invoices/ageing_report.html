@@ -1,0 +1,140 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Receivables Ageing{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>⏳ Receivables Ageing</h1>
+  <button onclick="window.print()" class="btn btn-grey no-print">Print</button>
+</div>
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Owed in Total</span>
+    <span class="stat-value">{{ ageing.total|floatformat:2 }}</span>
+    <span class="stat-sub">as at {{ ageing.as_at|date:"d M Y" }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Up to 30 Days</span>
+    <span class="stat-value">{{ ageing.totals.current|floatformat:2 }}</span>
+    <span class="stat-sub">recent trading</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Over 60 Days</span>
+    <span class="stat-value" style="color:#a71d2a">{{ ageing.overdue|floatformat:2 }}</span>
+    <span class="stat-sub">chase these first</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Over 90 Days</span>
+    <span class="stat-value" style="color:#a71d2a">{{ ageing.totals.d90_plus|floatformat:2 }}</span>
+    <span class="stat-sub">at risk of never arriving</span>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">By Customer</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Customer</th>
+          <th class="num">Invoices</th>
+          {% for key, label, lower, upper in ageing.buckets %}
+          <th class="num">{{ label }}</th>
+          {% endfor %}
+          <th class="num">Total</th>
+          <th class="num">Oldest</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in ageing.rows %}
+        <tr>
+          <td>
+            <strong>{{ row.customer.name }}</strong>
+            {% if row.customer.address %}
+            <br /><span class="muted" style="font-size:11px">{{ row.customer.address|truncatechars:45 }}</span>
+            {% endif %}
+          </td>
+          <td class="num">{{ row.invoices }}</td>
+          <td class="num">{% if row.current %}{{ row.current|floatformat:2 }}{% else %}-{% endif %}</td>
+          <td class="num">{% if row.d31_60 %}{{ row.d31_60|floatformat:2 }}{% else %}-{% endif %}</td>
+          <td class="num" style="color:#8a6100">
+            {% if row.d61_90 %}{{ row.d61_90|floatformat:2 }}{% else %}-{% endif %}
+          </td>
+          <td class="num" style="color:#a71d2a">
+            {% if row.d90_plus %}<strong>{{ row.d90_plus|floatformat:2 }}</strong>{% else %}-{% endif %}
+          </td>
+          <td class="num"><strong>{{ row.total|floatformat:2 }}</strong></td>
+          <td class="num">{{ row.oldest_days }}d</td>
+          <td style="white-space:nowrap">
+            <a href="{% url 'customer_ledger' row.customer.id %}" class="btn btn-sm">Ledger</a>
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="9" style="text-align:center;padding:26px">
+          Nothing outstanding — every invoice is settled.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+      {% if ageing.rows %}
+      <tfoot>
+        <tr>
+          <th colspan="2" style="text-align:right">Total</th>
+          <th class="num">{{ ageing.totals.current|floatformat:2 }}</th>
+          <th class="num">{{ ageing.totals.d31_60|floatformat:2 }}</th>
+          <th class="num">{{ ageing.totals.d61_90|floatformat:2 }}</th>
+          <th class="num">{{ ageing.totals.d90_plus|floatformat:2 }}</th>
+          <th class="num">{{ ageing.total|floatformat:2 }}</th>
+          <th colspan="2"></th>
+        </tr>
+      </tfoot>
+      {% endif %}
+    </table>
+  </div>
+
+  <p class="help-note" style="margin-top:12px">
+    Age is counted from the invoice date — no due date is recorded anywhere,
+    so that is the only honest starting point. If you give 30 days' credit,
+    read the second column as just overdue and the last two as trouble.
+  </p>
+</div>
+
+{% if oldest %}
+<div class="card">
+  <h3 style="margin-top:0">Oldest Unpaid Invoices</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Invoice</th>
+          <th>Customer</th>
+          <th>Date</th>
+          <th class="num">Days</th>
+          <th class="num">Still Owed</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in oldest %}
+        <tr>
+          <td><strong>{{ row.invoice.invoice_no }}</strong></td>
+          <td>{{ row.invoice.customer.name }}</td>
+          <td>{{ row.invoice.date|date:"d M Y" }}</td>
+          <td class="num" style="color:{% if row.days > 90 %}#a71d2a{% elif row.days > 60 %}#8a6100{% endif %}">
+            <strong>{{ row.days }}</strong>
+          </td>
+          <td class="num">{{ row.owing|floatformat:2 }}</td>
+          <td style="white-space:nowrap">
+            <a href="{% url 'payment_create' row.invoice.customer.id %}" class="btn btn-sm btn-green">
+              Record Payment
+            </a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

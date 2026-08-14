@@ -21,16 +21,21 @@ from calendar import monthrange
 from datetime import date, timedelta
 from decimal import Decimal
 
-from django.db.models import Count, DecimalField, ExpressionWrapper, F, Sum
+from django.db.models import (
+    Count, DecimalField, ExpressionWrapper, F, OuterRef, Subquery, Sum,
+)
+from django.db.models.functions import Coalesce
 
 from .models import (
     Batch,
     CapitalTransaction,
+    Customer,
     Expense,
     Invoice,
     Item,
     Partner,
     Payment,
+    PaymentAllocation,
     PayrollRun,
     Payslip,
     PurchaseItem,
@@ -896,3 +901,122 @@ def month_to_date(today=None):
         "start": start,
         "days_elapsed": elapsed + 1,
     }
+
+
+# --------------------------------------------------------------------- ageing
+
+# How old a debt is, counted from the day it was invoiced. No due date is
+# recorded anywhere, so the invoice date is the only honest starting point.
+AGEING_BUCKETS = (
+    ("current", "Up to 30 days", 0, 30),
+    ("d31_60", "31 - 60 days", 31, 60),
+    ("d61_90", "61 - 90 days", 61, 90),
+    ("d90_plus", "Over 90 days", 91, None),
+)
+
+
+def _outstanding_invoices():
+    """Invoices with money still on them, and how much.
+
+    The paid and credited figures come from subqueries rather than two
+    aggregates in one query: joined that way they multiply each other out,
+    and Sum(distinct=True) is not a fix because it drops genuinely repeated
+    amounts.
+    """
+    paid = Subquery(
+        PaymentAllocation.objects.filter(invoice=OuterRef("pk"))
+        .values("invoice")
+        .annotate(total=Sum("amount"))
+        .values("total"),
+        output_field=MONEY,
+    )
+
+    credited = Subquery(
+        SalesReturn.objects.filter(invoice=OuterRef("pk"))
+        .values("invoice")
+        .annotate(total=Sum("total"))
+        .values("total"),
+        output_field=MONEY,
+    )
+
+    return (
+        Invoice.objects.select_related("customer")
+        .annotate(
+            settled=Coalesce(paid, ZERO, output_field=MONEY),
+            returned=Coalesce(credited, ZERO, output_field=MONEY),
+        )
+        .annotate(
+            owing=ExpressionWrapper(
+                F("total") - F("settled") - F("returned"), output_field=MONEY
+            )
+        )
+        .filter(owing__gt=ZERO)
+        .order_by("date", "id")
+    )
+
+
+def receivables_ageing(as_at=None):
+    """What is owed, sorted by how long it has been owed for.
+
+    A single "outstanding" figure says how much; it does not say how worried
+    to be. Money a week old is a sale, money four months old is a problem,
+    and only splitting them apart tells you which pharmacy to ring first.
+    """
+    as_at = as_at or date.today()
+
+    customers = {}
+    totals = {key: ZERO for key, *_ in AGEING_BUCKETS}
+
+    for invoice in _outstanding_invoices():
+        age = (as_at - invoice.date).days
+
+        for key, _, lower, upper in AGEING_BUCKETS:
+            if age >= lower and (upper is None or age <= upper):
+                bucket = key
+                break
+        else:                                   # pragma: no cover - unreachable
+            bucket = "d90_plus"
+
+        row = customers.setdefault(invoice.customer_id, {
+            "customer": invoice.customer,
+            "total": ZERO,
+            "oldest_days": 0,
+            "invoices": 0,
+            **{key: ZERO for key, *_ in AGEING_BUCKETS},
+        })
+
+        row[bucket] += invoice.owing
+        row["total"] += invoice.owing
+        row["invoices"] += 1
+        row["oldest_days"] = max(row["oldest_days"], age)
+
+        totals[bucket] += invoice.owing
+
+    rows = sorted(
+        customers.values(), key=lambda row: row["total"], reverse=True
+    )
+
+    grand_total = sum(totals.values(), ZERO)
+
+    return {
+        "rows": rows,
+        "buckets": AGEING_BUCKETS,
+        "totals": {key: money(value) for key, value in totals.items()},
+        "total": money(grand_total),
+        "overdue": money(totals["d61_90"] + totals["d90_plus"]),
+        "as_at": as_at,
+    }
+
+
+def oldest_debts(limit=15, as_at=None):
+    """The individual invoices that have been outstanding longest."""
+    as_at = as_at or date.today()
+
+    return [
+        {
+            "invoice": invoice,
+            "owing": money(invoice.owing),
+            "days": (as_at - invoice.date).days,
+        }
+        for invoice in _outstanding_invoices()[:limit]
+    ]

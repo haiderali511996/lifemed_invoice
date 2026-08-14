@@ -7690,3 +7690,149 @@ class ExpiryExposureTests(TestCase):
         self.assertEqual(
             response.context["expiry"]["expiring_value"], Decimal("6000.00")
         )
+
+
+class ReceivablesAgeingTests(TestCase):
+    """How old the debt is, not just how much of it there is."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.customer = Customer.objects.create(name="Shifa", address="Lahore")
+        self.today = date(2026, 6, 30)
+
+    def bill(self, days_ago, total, customer=None):
+        invoice = Invoice.objects.create(
+            customer=customer or self.customer, license_no="L"
+        )
+        Invoice.objects.filter(pk=invoice.pk).update(
+            date=self.today - timedelta(days=days_ago), total=Decimal(total)
+        )
+
+        return Invoice.objects.get(pk=invoice.pk)
+
+    def ageing(self):
+        return finance.receivables_ageing(as_at=self.today)
+
+    def test_a_recent_invoice_sits_in_the_first_bucket(self):
+        self.bill(10, "1000.00")
+
+        totals = self.ageing()["totals"]
+
+        self.assertEqual(totals["current"], Decimal("1000.00"))
+        self.assertEqual(totals["d90_plus"], ZERO)
+
+    def test_each_bucket_catches_its_own_age(self):
+        self.bill(10, "100.00")      # up to 30
+        self.bill(45, "200.00")      # 31-60
+        self.bill(75, "400.00")      # 61-90
+        self.bill(200, "800.00")     # over 90
+
+        totals = self.ageing()["totals"]
+
+        self.assertEqual(totals["current"], Decimal("100.00"))
+        self.assertEqual(totals["d31_60"], Decimal("200.00"))
+        self.assertEqual(totals["d61_90"], Decimal("400.00"))
+        self.assertEqual(totals["d90_plus"], Decimal("800.00"))
+        self.assertEqual(self.ageing()["total"], Decimal("1500.00"))
+
+    def test_the_boundaries_fall_on_the_right_side(self):
+        """An invoice exactly 30 days old is not yet in the 31-60 column."""
+        self.bill(30, "100.00")
+        self.bill(31, "200.00")
+
+        totals = self.ageing()["totals"]
+
+        self.assertEqual(totals["current"], Decimal("100.00"))
+        self.assertEqual(totals["d31_60"], Decimal("200.00"))
+
+    def test_a_settled_invoice_drops_out(self):
+        invoice = self.bill(45, "1000.00")
+        Payment.objects.create(
+            customer=self.customer, invoice=invoice, amount=Decimal("1000.00")
+        )
+
+        self.assertEqual(self.ageing()["total"], ZERO)
+        self.assertEqual(self.ageing()["rows"], [])
+
+    def test_a_part_payment_leaves_only_the_remainder_ageing(self):
+        invoice = self.bill(45, "1000.00")
+        Payment.objects.create(
+            customer=self.customer, invoice=invoice, amount=Decimal("400.00")
+        )
+
+        self.assertEqual(self.ageing()["totals"]["d31_60"], Decimal("600.00"))
+
+    def test_money_paid_against_the_account_still_reduces_the_ageing(self):
+        """A lump sum settles invoices, so it must not leave them showing as
+        outstanding here while the ledger reads paid."""
+        self.bill(45, "1000.00")
+        Payment.objects.create(customer=self.customer, amount=Decimal("1000.00"))
+
+        self.assertEqual(self.ageing()["total"], ZERO)
+
+    def test_credited_goods_come_off_the_debt(self):
+        invoice = self.bill(45, "1000.00")
+        SalesReturn.objects.create(
+            invoice=invoice, customer=self.customer,
+            return_no="CN-1", total=Decimal("300.00"),
+        )
+
+        self.assertEqual(self.ageing()["totals"]["d31_60"], Decimal("700.00"))
+
+    def test_customers_are_ranked_with_the_biggest_debt_first(self):
+        other = Customer.objects.create(name="Al-Noor", address="Karachi")
+
+        self.bill(10, "500.00")
+        self.bill(10, "5000.00", customer=other)
+
+        rows = self.ageing()["rows"]
+
+        self.assertEqual(rows[0]["customer"], other)
+        self.assertEqual(rows[0]["total"], Decimal("5000.00"))
+
+    def test_a_customers_oldest_debt_is_reported(self):
+        self.bill(10, "100.00")
+        self.bill(200, "100.00")
+
+        self.assertEqual(self.ageing()["rows"][0]["oldest_days"], 200)
+
+    def test_what_is_over_sixty_days_is_called_out(self):
+        self.bill(10, "100.00")
+        self.bill(75, "400.00")
+        self.bill(200, "800.00")
+
+        self.assertEqual(self.ageing()["overdue"], Decimal("1200.00"))
+
+    def test_the_oldest_invoices_are_listed_oldest_first(self):
+        self.bill(10, "100.00")
+        self.bill(200, "800.00")
+
+        oldest = finance.oldest_debts(as_at=self.today)
+
+        self.assertEqual(oldest[0]["days"], 200)
+        self.assertEqual(oldest[0]["owing"], Decimal("800.00"))
+
+    def test_the_page_renders(self):
+        self.bill(45, "1000.00")
+
+        response = self.client.get(reverse("ageing_report"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Shifa")
+
+    def test_the_field_team_cannot_see_who_owes_what(self):
+        mr_user = User.objects.create_user("ali", password="pw")
+        Employee.objects.create(
+            employee_code="MR-01", full_name="Ali", designation="mr",
+            user=mr_user,
+        )
+        UserRolls.objects.filter(user=mr_user).update(role=UserRolls.ROLE_FIELD)
+
+        self.client.logout()
+        self.client.login(username="ali", password="pw")
+
+        self.assertEqual(
+            self.client.get(reverse("ageing_report")).status_code, 302
+        )
