@@ -1020,3 +1020,63 @@ def oldest_debts(limit=15, as_at=None):
         }
         for invoice in _outstanding_invoices()[:limit]
     ]
+
+
+# ------------------------------------------------- what a new cost lands on
+
+def split_across_partners(amount):
+    """One amount divided among the active partners by their shares.
+
+    Used when something is bought or spent, so whoever entered it can see
+    immediately whose money it was. The remainder from rounding is reported
+    rather than dropped, for the same reason it is on the profit report.
+    """
+    partners = list(Partner.objects.filter(is_active=True))
+
+    rows = [
+        {"partner": partner, "amount": partner.share_of(amount)}
+        for partner in partners
+    ]
+
+    allocated = sum((row["amount"] for row in rows), ZERO)
+
+    shares = {row["amount"] for row in rows}
+
+    return {
+        "amount": money(amount),
+        "rows": rows,
+        "allocated": money(allocated),
+        "rounding": money(amount - allocated),
+        # Equal partners get one sentence rather than a list of four
+        # identical numbers.
+        "equal": len(shares) == 1 and len(rows) > 1,
+        "each": rows[0]["amount"] if rows else ZERO,
+        "count": len(rows),
+    }
+
+
+def describe_partner_cost(amount, kind="cost"):
+    """A one-line explanation of whose money a purchase or expense was.
+
+    Returns None when there are no partners on the books, so a business that
+    has not recorded its owners is not told about shares that do not exist.
+    """
+    split = split_across_partners(amount)
+
+    if not split["rows"]:
+        return None
+
+    if kind == "purchase":
+        verb = f"ties up {split['amount']} of the partners' money in stock"
+    else:
+        verb = f"comes out of the partners' capital: {split['amount']}"
+
+    if split["equal"]:
+        detail = f"{split['each']} each, across {split['count']} partners"
+    else:
+        detail = ", ".join(
+            f"{row['partner'].full_name} {row['amount']}"
+            for row in split["rows"]
+        )
+
+    return f"This {verb} — {detail}."

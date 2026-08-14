@@ -1982,6 +1982,14 @@ def purchase_create(request):
                 f"Received {len(lines)} line(s) from {purchase.supplier.name}.",
             )
 
+            # Buying stock is not a cost - it turns the partners' cash into
+            # goods on a shelf - but it is their cash, and whoever raised the
+            # purchase should see whose money just went into it.
+            note = finance.describe_partner_cost(purchase.total, kind="purchase")
+
+            if note:
+                messages.info(request, note)
+
             return redirect("purchase_list")
 
         for error in errors:
@@ -2755,6 +2763,25 @@ def expense_list(request):
     )
 
 
+def _partner_funding_note():
+    """How a new cost divides between the partners, for a form's footnote."""
+    partners = list(Partner.objects.filter(is_active=True))
+
+    if not partners:
+        return ""
+
+    shares = {partner.share_percent for partner in partners}
+
+    if len(shares) == 1:
+        return (
+            f"It is shared between {len(partners)} partners at "
+            f"{partners[0].share_percent:.2f}% each, so each of them carries "
+            f"that share of it."
+        )
+
+    return "It is shared between the partners in the shares on the Partners page."
+
+
 @login_required
 def expense_edit(request, expense_id=None):
     expense = get_object_or_404(Expense, pk=expense_id) if expense_id else None
@@ -2788,6 +2815,14 @@ def expense_edit(request, expense_id=None):
                 request, f"Saved {saved.category.name} — {saved.amount}."
             )
 
+            # A claim is money the owners will not get back, so say so at the
+            # moment it is entered rather than only in a report months later.
+            if saved.status != Expense.REJECTED:
+                note = finance.describe_partner_cost(saved.amount)
+
+                if note:
+                    messages.info(request, note)
+
             return redirect("expense_list")
 
     else:
@@ -2797,9 +2832,13 @@ def expense_edit(request, expense_id=None):
         request,
         "invoices/expense_form.html",
         {
+            "active": "expenses",
             "form": form,
             "expense": expense,
             "heading": "Edit Expense" if expense else "New Expense",
+            # Stated before the claim is saved, not only afterwards: whoever
+            # is entering it should know whose money it is as they type.
+            "partner_note": _partner_funding_note(),
         }
     )
 

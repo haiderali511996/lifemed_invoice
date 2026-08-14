@@ -7836,3 +7836,135 @@ class ReceivablesAgeingTests(TestCase):
         self.assertEqual(
             self.client.get(reverse("ageing_report")).status_code, 302
         )
+
+
+class PartnerFundingNoticeTests(TestCase):
+    """Whoever spends the company's money should be told whose it was."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.supplier = Supplier.objects.create(name="Getz Pharma")
+        self.product = Product.objects.create(code="PAN", name="Panadol")
+        # A company cost rather than a claim, so no employee is needed.
+        self.category = ExpenseCategory.objects.create(
+            name="Office Rent", per_employee=False
+        )
+
+    def messages_from(self, response):
+        return [str(m) for m in response.context["messages"]]
+
+    # ------------------------------------------------------------- the split
+
+    def test_a_cost_divides_by_the_partners_shares(self):
+        split = finance.split_across_partners(Decimal("1000.00"))
+
+        self.assertEqual(len(split["rows"]), 4)
+        self.assertTrue(split["equal"])
+        self.assertEqual(split["each"], Decimal("250.00"))
+        self.assertEqual(split["allocated"], Decimal("1000.00"))
+        self.assertEqual(split["rounding"], ZERO)
+
+    def test_a_remainder_that_will_not_divide_is_reported(self):
+        split = finance.split_across_partners(Decimal("100.01"))
+
+        self.assertEqual(split["allocated"], Decimal("100.00"))
+        self.assertEqual(split["rounding"], Decimal("0.01"))
+
+    def test_an_expense_is_described_as_coming_out_of_capital(self):
+        note = finance.describe_partner_cost(Decimal("4000.00"))
+
+        self.assertIn("capital", note)
+        self.assertIn("1000.00", note)
+
+    def test_a_purchase_is_described_as_money_tied_up_not_lost(self):
+        """Stock is not a cost - it is the partners' cash in another form,
+        and calling it a cost would be wrong."""
+        note = finance.describe_partner_cost(Decimal("4000.00"), kind="purchase")
+
+        self.assertIn("ties up", note)
+        self.assertIn("stock", note)
+
+    def test_nothing_is_claimed_when_there_are_no_partners(self):
+        Partner.objects.all().delete()
+
+        self.assertIsNone(finance.describe_partner_cost(Decimal("1000.00")))
+
+    # -------------------------------------------------------- at entry time
+
+    def test_recording_an_expense_says_whose_money_it_was(self):
+        response = self.client.post(
+            reverse("expense_new"),
+            {
+                "category": self.category.pk,
+                "employee": "", "territory": "",
+                "date": timezone.localdate().isoformat(),
+                "amount": "4000.00",
+                "description": "Rent", "reference": "",
+                "status": Expense.APPROVED,
+            },
+            follow=True,
+        )
+
+        notes = " ".join(self.messages_from(response))
+
+        self.assertIn("capital", notes)
+        self.assertIn("1000.00", notes)
+
+    def test_receiving_stock_says_whose_money_went_into_it(self):
+        response = self.client.post(
+            reverse("purchase_new"),
+            {
+                "supplier": self.supplier.pk,
+                "reference": "SI-1",
+                "date": timezone.localdate().isoformat(),
+                "note": "",
+                "product[]": [str(self.product.pk)],
+                "batch_no[]": ["B-1"],
+                "expiry_date[]": [
+                    (timezone.localdate() + timedelta(days=400)).isoformat()
+                ],
+                "quantity[]": ["100"],
+                "cost_price[]": ["40.00"],
+            },
+            follow=True,
+        )
+
+        notes = " ".join(self.messages_from(response))
+
+        self.assertIn("ties up", notes)
+        self.assertIn("1000.00", notes)          # 4,000 of stock, a quarter each
+
+    def test_editing_a_rejected_claim_does_not_charge_it_to_the_partners(self):
+        """A refused claim never leaves the bank, so correcting one must not
+        announce it as the owners' money. (A new claim cannot start rejected -
+        the form has no status field - so this is the case that can happen.)"""
+        rejected = Expense.objects.create(
+            category=self.category, amount=Decimal("4000.00"),
+            status=Expense.REJECTED, date=timezone.localdate(),
+        )
+
+        response = self.client.post(
+            reverse("expense_edit", args=[rejected.pk]),
+            {
+                "category": self.category.pk,
+                "employee": "", "territory": "",
+                "date": timezone.localdate().isoformat(),
+                "amount": "3500.00",
+                "description": "Rent", "reference": "",
+            },
+            follow=True,
+        )
+
+        notes = " ".join(self.messages_from(response))
+
+        rejected.refresh_from_db()
+        self.assertEqual(rejected.status, Expense.REJECTED)
+        self.assertNotIn("capital", notes)
+
+    def test_the_expense_form_says_so_before_it_is_saved(self):
+        response = self.client.get(reverse("expense_new"))
+
+        self.assertContains(response, "paid out of the company")
+        self.assertIn("25.00%", response.context["partner_note"])

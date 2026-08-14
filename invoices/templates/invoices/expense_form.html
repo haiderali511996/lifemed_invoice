@@ -27,6 +27,13 @@
       <a href="{% url 'expense_list' %}" class="btn btn-grey">Cancel</a>
     </div>
   </form>
+
+  {% if partner_note %}
+  <p class="help" style="margin-top:18px;border-top:1px solid #eef2f6;padding-top:14px">
+    <strong>This is paid out of the company's capital.</strong>
+    {{ partner_note }}
+  </p>
+  {% endif %}
 </div>
 {% endblock %}
 
