@@ -710,6 +710,9 @@
           <span>Reports</span><span class="chevron">▾</span>
         </button>
         <div class="nav-group">
+          <a href="{% url 'sales_report' %}" class="{% if active == 'sales_report' %}active{% endif %}">
+            📈 <span>Daily Sales</span>
+          </a>
           <a href="{% url 'expense_report' %}" class="{% if active == 'expense_report' %}active{% endif %}">
             📈 <span>Expense Report</span>
           </a>

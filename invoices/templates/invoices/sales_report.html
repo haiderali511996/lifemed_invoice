@@ -1,0 +1,230 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Daily Sales{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>📈 Daily Sales</h1>
+  <button onclick="window.print()" class="btn btn-grey no-print">Print</button>
+</div>
+
+<div class="card no-print" style="margin-bottom:16px">
+  <form method="GET" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+    <div>
+      <label style="display:block;font-size:12px;color:#55657a;margin-bottom:4px">From</label>
+      <input type="date" name="start" value="{{ start }}"
+             style="padding:8px 11px;border:1px solid #dbe2ea;border-radius:7px" />
+    </div>
+    <div>
+      <label style="display:block;font-size:12px;color:#55657a;margin-bottom:4px">To</label>
+      <input type="date" name="end" value="{{ end }}"
+             style="padding:8px 11px;border:1px solid #dbe2ea;border-radius:7px" />
+    </div>
+    <button type="submit" class="btn">Show</button>
+  </form>
+</div>
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Sales</span>
+    <span class="stat-value">{{ summary.revenue|floatformat:2 }}</span>
+    <span class="stat-sub">{{ summary.invoices }} invoice(s)</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Average a Day</span>
+    <span class="stat-value">{{ summary.per_day|floatformat:2 }}</span>
+    <span class="stat-sub">over {{ summary.days }} trading day(s)</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Average Invoice</span>
+    <span class="stat-value">{{ summary.per_invoice|floatformat:2 }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Gross Profit</span>
+    <span class="stat-value" style="color:{% if pnl.gross_profit < 0 %}#a71d2a{% else %}#1e7b24{% endif %}">
+      {{ pnl.gross_profit|floatformat:2 }}
+    </span>
+    <span class="stat-sub">{{ pnl.gross_margin|floatformat:1 }}% margin</span>
+  </div>
+</div>
+
+{% if pnl.uncosted.count %}
+<div class="alert alert-warn">
+  <strong>{{ pnl.uncosted.count }} line(s) worth {{ pnl.uncosted.value|floatformat:2 }}
+  were sold without being picked from stock.</strong>
+  Nothing was charged against them, so the margin above is flattering by up to
+  that much — and no stock moved for them either.
+</div>
+{% endif %}
+
+<div class="card">
+  <h3 style="margin-top:0">Day by Day</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th class="num">Invoices</th>
+          <th class="num">Sales</th>
+          <th class="num">Cost</th>
+          <th class="num">Gross Profit</th>
+          <th class="num">Margin</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td>
+            <strong>{{ row.date|date:"D d M Y" }}</strong>
+            {% if summary.best and row.date == summary.best.date %}
+            <span class="pill pill-paid" style="margin-left:6px">best day</span>
+            {% endif %}
+          </td>
+          <td class="num">{{ row.invoices }}</td>
+          <td class="num"><strong>{{ row.revenue|floatformat:2 }}</strong></td>
+          <td class="num">{{ row.cost|floatformat:2 }}</td>
+          <td class="num" style="color:{% if row.gross_profit < 0 %}#a71d2a{% else %}#1e7b24{% endif %}">
+            {{ row.gross_profit|floatformat:2 }}
+          </td>
+          <td class="num">{{ row.margin|floatformat:1 }}%</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6" style="text-align:center;padding:26px">
+          Nothing was sold between these dates.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+      {% if rows %}
+      <tfoot>
+        <tr>
+          <th>{{ summary.days }} trading day(s)</th>
+          <th class="num">{{ summary.invoices }}</th>
+          <th class="num">{{ pnl.revenue|floatformat:2 }}</th>
+          <th class="num">{{ pnl.cost_of_goods_sold|floatformat:2 }}</th>
+          <th class="num">{{ pnl.gross_profit|floatformat:2 }}</th>
+          <th class="num">{{ pnl.gross_margin|floatformat:1 }}%</th>
+        </tr>
+      </tfoot>
+      {% endif %}
+    </table>
+  </div>
+
+  <p class="help-note" style="margin-top:12px">
+    Only days that traded are listed — a closed Sunday is left out rather than
+    shown as a bad day.
+  </p>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">What Is Selling</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Product</th>
+          <th class="num">Units</th>
+          <th class="num">Sales</th>
+          <th class="num">Cost</th>
+          <th class="num">Gross Profit</th>
+          <th class="num">Margin</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in products %}
+        <tr>
+          <td>
+            <strong>{{ row.name }}</strong>
+            <br /><span class="muted" style="font-size:11px">{{ row.code }}</span>
+          </td>
+          <td class="num">{{ row.units }}</td>
+          <td class="num">{{ row.revenue|floatformat:2 }}</td>
+          <td class="num">{{ row.cost|floatformat:2 }}</td>
+          <td class="num" style="color:{% if row.gross_profit < 0 %}#a71d2a{% else %}#1e7b24{% endif %}">
+            {{ row.gross_profit|floatformat:2 }}
+          </td>
+          <td class="num">{{ row.margin|floatformat:1 }}%</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6" style="text-align:center;padding:26px">
+          No stock-linked sales in this period.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="help-note" style="margin-top:12px">
+    Net of returns, and only lines picked from stock — a hand-typed line has
+    no product to credit.
+  </p>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Who Is Buying</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Customer</th>
+          <th class="num">Invoices</th>
+          <th class="num">Sales</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in customers %}
+        <tr>
+          <td>
+            <a href="{% url 'customer_ledger' row.customer_id %}">{{ row.name }}</a>
+            {% if row.address %}
+            <br /><span class="muted" style="font-size:11px">{{ row.address|truncatechars:50 }}</span>
+            {% endif %}
+          </td>
+          <td class="num">{{ row.invoices }}</td>
+          <td class="num"><strong>{{ row.revenue|floatformat:2 }}</strong></td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="3" style="text-align:center;padding:26px">
+          No sales in this period.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if reps %}
+<div class="card">
+  <h3 style="margin-top:0">Sales by Team Member</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Team Member</th>
+          <th class="num">Invoices</th>
+          <th class="num">Sales</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in reps %}
+        <tr>
+          <td>
+            {% if row.credited %}{{ row.name }}
+            {% else %}<span class="muted">{{ row.name }}</span>{% endif %}
+          </td>
+          <td class="num">{{ row.invoices }}</td>
+          <td class="num">{{ row.revenue|floatformat:2 }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="help-note" style="margin-top:12px">
+    Invoices with nobody credited earn no commission. If that line is large,
+    the sales rep is being left blank when invoices are raised.
+  </p>
+</div>
+{% endif %}
+{% endblock %}

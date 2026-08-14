@@ -18,10 +18,10 @@ Three things it is careful about, because partners divide the result:
 """
 
 from calendar import monthrange
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
-from django.db.models import DecimalField, ExpressionWrapper, F, Sum
+from django.db.models import Count, DecimalField, ExpressionWrapper, F, Sum
 
 from .models import (
     Batch,
@@ -608,3 +608,291 @@ def trading_years():
     years.add(date.today().year)
 
     return sorted(years, reverse=True)
+
+
+# ------------------------------------------------------------- selling rhythm
+
+def _net_line_value():
+    """Value of a sold line after its own discount."""
+    return ExpressionWrapper(
+        F("qty") * F("price") * (Decimal("100") - F("discount")) / Decimal("100"),
+        output_field=MONEY,
+    )
+
+
+def daily_sales(start=None, end=None):
+    """What was sold on each trading day, with the cost against it.
+
+    Only days that actually traded appear. A distributor closed on Sunday
+    should not read a row of zeroes as a bad day.
+    """
+    days = {}
+
+    def row_for(day):
+        return days.setdefault(day, {
+            "date": day, "invoices": 0,
+            "invoiced": ZERO, "credited": ZERO, "cost": ZERO,
+        })
+
+    for entry in (
+        _between(Invoice.objects.all(), "date", start, end)
+        .values("date")
+        .annotate(total=Sum("total"), count=Count("id"))
+    ):
+        row = row_for(entry["date"])
+        row["invoiced"] = entry["total"] or ZERO
+        row["invoices"] = entry["count"]
+
+    for entry in (
+        _between(SalesReturn.objects.all(), "date", start, end)
+        .values("date")
+        .annotate(total=Sum("total"))
+    ):
+        row_for(entry["date"])["credited"] = entry["total"] or ZERO
+
+    for entry in (
+        _between(Item.objects.all(), "invoice__date", start, end)
+        .values("invoice__date")
+        .annotate(
+            total=Sum(
+                ExpressionWrapper(
+                    F("qty") * F("unit_cost"), output_field=MONEY
+                )
+            )
+        )
+    ):
+        row_for(entry["invoice__date"])["cost"] = entry["total"] or ZERO
+
+    for entry in (
+        _between(
+            SalesReturnItem.objects.filter(sales_return__restock=True),
+            "sales_return__date", start, end,
+        )
+        .values("sales_return__date")
+        .annotate(
+            total=Sum(
+                ExpressionWrapper(
+                    F("qty") * F("unit_cost"), output_field=MONEY
+                )
+            )
+        )
+    ):
+        row_for(entry["sales_return__date"])["cost"] -= entry["total"] or ZERO
+
+    rows = []
+
+    for day in sorted(days):
+        row = days[day]
+        sold = row["invoiced"] - row["credited"]
+        gross = sold - row["cost"]
+
+        rows.append({
+            "date": day,
+            "invoices": row["invoices"],
+            "revenue": money(sold),
+            "cost": money(row["cost"]),
+            "gross_profit": money(gross),
+            "margin": money(gross * Decimal("100") / sold) if sold else ZERO,
+        })
+
+    return rows
+
+
+def selling_days(start=None, end=None):
+    """How many distinct days actually traded, and the average taken on one."""
+    rows = daily_sales(start, end)
+
+    total = sum((row["revenue"] for row in rows), ZERO)
+    invoices = sum(row["invoices"] for row in rows)
+
+    return {
+        "days": len(rows),
+        "invoices": invoices,
+        "revenue": money(total),
+        "per_day": money(total / len(rows)) if rows else ZERO,
+        "per_invoice": money(total / invoices) if invoices else ZERO,
+        "best": max(rows, key=lambda row: row["revenue"]) if rows else None,
+    }
+
+
+def top_products(start=None, end=None, limit=20):
+    """What is actually moving, by value and by the profit it earned.
+
+    Net of returns: a product sold and sent straight back has not moved.
+    """
+    sold = (
+        _between(
+            Item.objects.filter(product__isnull=False), "invoice__date", start, end
+        )
+        .values("product_id", "product__name", "product__code")
+        .annotate(
+            units=Sum("qty"),
+            revenue=Sum(_net_line_value()),
+            cost=Sum(
+                ExpressionWrapper(
+                    F("qty") * F("unit_cost"), output_field=MONEY
+                )
+            ),
+        )
+    )
+
+    returned = {}
+
+    for entry in (
+        _between(
+            SalesReturnItem.objects.filter(item__product__isnull=False),
+            "sales_return__date", start, end,
+        )
+        .values("item__product_id")
+        .annotate(
+            units=Sum("qty"),
+            revenue=Sum(
+                ExpressionWrapper(
+                    F("qty") * F("price")
+                    * (Decimal("100") - F("discount")) / Decimal("100"),
+                    output_field=MONEY,
+                )
+            ),
+        )
+    ):
+        returned[entry["item__product_id"]] = entry
+
+    rows = []
+
+    for entry in sold:
+        back = returned.get(entry["product_id"], {})
+
+        revenue = (entry["revenue"] or ZERO) - (back.get("revenue") or ZERO)
+        cost = entry["cost"] or ZERO
+        units = (entry["units"] or 0) - (back.get("units") or 0)
+
+        rows.append({
+            "product_id": entry["product_id"],
+            "name": entry["product__name"],
+            "code": entry["product__code"],
+            "units": units,
+            "revenue": money(revenue),
+            "cost": money(cost),
+            "gross_profit": money(revenue - cost),
+            "margin": (
+                money((revenue - cost) * Decimal("100") / revenue)
+                if revenue else ZERO
+            ),
+        })
+
+    rows.sort(key=lambda row: row["revenue"], reverse=True)
+
+    return rows[:limit]
+
+
+def top_customers(start=None, end=None, limit=20):
+    """Who is buying, net of what they sent back."""
+    credited = dict(
+        _between(SalesReturn.objects.all(), "date", start, end)
+        .values_list("customer_id")
+        .annotate(total=Sum("total"))
+    )
+
+    rows = []
+
+    for entry in (
+        _between(Invoice.objects.all(), "date", start, end)
+        .values("customer_id", "customer__name", "customer__address")
+        .annotate(total=Sum("total"), count=Count("id"))
+    ):
+        revenue = (entry["total"] or ZERO) - (
+            credited.get(entry["customer_id"]) or ZERO
+        )
+
+        rows.append({
+            "customer_id": entry["customer_id"],
+            "name": entry["customer__name"],
+            "address": entry["customer__address"],
+            "invoices": entry["count"],
+            "revenue": money(revenue),
+        })
+
+    rows.sort(key=lambda row: row["revenue"], reverse=True)
+
+    return rows[:limit]
+
+
+def sales_by_rep(start=None, end=None):
+    """What each MR sold. Invoices with nobody credited are kept separate."""
+    rows = []
+
+    for entry in (
+        _between(Invoice.objects.all(), "date", start, end)
+        .values("sales_rep_id", "sales_rep__full_name")
+        .annotate(total=Sum("total"), count=Count("id"))
+    ):
+        rows.append({
+            "name": entry["sales_rep__full_name"] or "Not credited to anyone",
+            "credited": entry["sales_rep_id"] is not None,
+            "invoices": entry["count"],
+            "revenue": money(entry["total"] or ZERO),
+        })
+
+    rows.sort(key=lambda row: row["revenue"], reverse=True)
+
+    return rows
+
+
+def expiry_exposure(within_days=90):
+    """Stock about to die, in money rather than in batch counts.
+
+    A count says three batches; it does not say whether that is a rounding
+    error or a month's profit. Only the money tells you whether to discount
+    it and move it.
+    """
+    today = date.today()
+    horizon = today + timedelta(days=within_days)
+
+    live = Batch.objects.filter(quantity__gt=0)
+
+    def valued(queryset):
+        return queryset.aggregate(
+            t=Sum(
+                ExpressionWrapper(
+                    F("quantity") * F("cost_price"), output_field=MONEY
+                )
+            )
+        )["t"] or ZERO
+
+    expired = live.filter(expiry_date__lt=today)
+    expiring = live.filter(expiry_date__gte=today, expiry_date__lte=horizon)
+
+    return {
+        "expired_value": money(valued(expired)),
+        "expired_count": expired.count(),
+        "expiring_value": money(valued(expiring)),
+        "expiring_count": expiring.count(),
+        "within_days": within_days,
+    }
+
+
+def month_to_date(today=None):
+    """This month so far, and the same run of days last month.
+
+    Compared against the same number of days rather than the whole of last
+    month, so a comparison made on the 3rd is not measured against a full
+    month it was never going to beat.
+    """
+    today = today or date.today()
+
+    start = today.replace(day=1)
+    elapsed = (today - start).days
+
+    previous_end = start - timedelta(days=1)
+    previous_start = previous_end.replace(day=1)
+
+    return {
+        "this_month": profit_and_loss(start, today),
+        "last_month": profit_and_loss(
+            previous_start,
+            min(previous_start + timedelta(days=elapsed), previous_end),
+        ),
+        "today": profit_and_loss(today, today),
+        "start": start,
+        "days_elapsed": elapsed + 1,
+    }

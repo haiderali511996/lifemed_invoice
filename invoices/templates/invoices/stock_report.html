@@ -19,13 +19,13 @@
   </div>
   <div class="card stat">
     <span class="stat-label">Expired</span>
-    <span class="stat-value" style="color:#a71d2a">{{ expired|length }}</span>
-    <span class="stat-sub">batch(es) — do not sell</span>
+    <span class="stat-value" style="color:#a71d2a">{{ expiry.expired_value|floatformat:2 }}</span>
+    <span class="stat-sub">{{ expiry.expired_count }} batch(es) — do not sell</span>
   </div>
   <div class="card stat">
     <span class="stat-label">Expiring within {{ expiry_days }} days</span>
-    <span class="stat-value" style="color:#8a6100">{{ expiring|length }}</span>
-    <span class="stat-sub">batch(es)</span>
+    <span class="stat-value" style="color:#8a6100">{{ expiry.expiring_value|floatformat:2 }}</span>
+    <span class="stat-sub">{{ expiry.expiring_count }} batch(es) at cost</span>
   </div>
   <div class="card stat">
     <span class="stat-label">Below reorder level</span>

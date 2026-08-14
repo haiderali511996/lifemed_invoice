@@ -7456,3 +7456,237 @@ class CompanyAssessmentTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertNotIn("/partners/", response["Location"])
+
+
+class DailySalesReportTests(TestCase):
+    """How the business is selling, day by day."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.product = Product.objects.create(code="PAN", name="Panadol")
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1", quantity=1000,
+            cost_price=Decimal("60.00"),
+            expiry_date=timezone.localdate() + timedelta(days=900),
+        )
+
+    def sell(self, on, qty="10", price="100", customer="Shifa Pharmacy"):
+        self.client.post(reverse("generate"), {
+            "customer_name": customer, "address": "Lahore",
+            "ntn": "", "sales_tax": "", "license_no": "L",
+            "item_name[]": ["Panadol"], "qty[]": [qty], "price[]": [price],
+            "discount[]": ["0"], "batch[]": ["B-1"], "expiry[]": ["12/27"],
+            "stock_batch[]": [str(self.batch.pk)],
+        })
+
+        invoice = Invoice.objects.order_by("-id").first()
+        Invoice.objects.filter(pk=invoice.pk).update(date=on)
+
+        return invoice
+
+    def test_each_trading_day_gets_its_own_row(self):
+        self.sell(date(2026, 5, 1))
+        self.sell(date(2026, 5, 3))
+
+        rows = finance.daily_sales(date(2026, 5, 1), date(2026, 5, 31))
+
+        self.assertEqual([row["date"] for row in rows],
+                         [date(2026, 5, 1), date(2026, 5, 3)])
+
+    def test_a_day_with_no_trading_is_left_out_not_shown_as_zero(self):
+        """A closed Sunday is not a bad day, and should not read like one."""
+        self.sell(date(2026, 5, 1))
+
+        rows = finance.daily_sales(date(2026, 5, 1), date(2026, 5, 31))
+
+        self.assertEqual(len(rows), 1)
+
+    def test_a_day_carries_its_sales_cost_and_profit(self):
+        self.sell(date(2026, 5, 1), qty="10", price="100")
+
+        row = finance.daily_sales(date(2026, 5, 1), date(2026, 5, 31))[0]
+
+        self.assertEqual(row["revenue"], Decimal("1000.00"))
+        self.assertEqual(row["cost"], Decimal("600.00"))
+        self.assertEqual(row["gross_profit"], Decimal("400.00"))
+        self.assertEqual(row["margin"], Decimal("40.00"))
+
+    def test_two_invoices_on_one_day_are_added_together(self):
+        self.sell(date(2026, 5, 1), qty="10")
+        self.sell(date(2026, 5, 1), qty="5")
+
+        rows = finance.daily_sales(date(2026, 5, 1), date(2026, 5, 31))
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["invoices"], 2)
+        self.assertEqual(rows[0]["revenue"], Decimal("1500.00"))
+
+    def test_the_averages_are_over_days_that_traded(self):
+        self.sell(date(2026, 5, 1), qty="10")     # 1,000
+        self.sell(date(2026, 5, 3), qty="20")     # 2,000
+
+        summary = finance.selling_days(date(2026, 5, 1), date(2026, 5, 31))
+
+        self.assertEqual(summary["days"], 2)
+        self.assertEqual(summary["revenue"], Decimal("3000.00"))
+        self.assertEqual(summary["per_day"], Decimal("1500.00"))
+        self.assertEqual(summary["per_invoice"], Decimal("1500.00"))
+        self.assertEqual(summary["best"]["date"], date(2026, 5, 3))
+
+    def test_a_credit_note_reduces_the_day_it_was_raised_on(self):
+        invoice = self.sell(date(2026, 5, 1), qty="10")
+        item = invoice.items.first()
+
+        self.client.post(reverse("return_create", args=[invoice.pk]), {
+            "reason": "Wrong order", "restock": "on",
+            "date": date(2026, 5, 1).isoformat(),
+            f"qty_{item.pk}": "4",
+        })
+
+        row = finance.daily_sales(date(2026, 5, 1), date(2026, 5, 31))[0]
+
+        self.assertEqual(row["revenue"], Decimal("600.00"))
+        self.assertEqual(row["cost"], Decimal("360.00"))
+
+    # ------------------------------------------------------- what is selling
+
+    def test_products_are_ranked_by_what_they_sold(self):
+        other = Product.objects.create(code="BRU", name="Brufen")
+        other_batch = Batch.objects.create(
+            product=other, batch_no="B-2", quantity=500,
+            cost_price=Decimal("30.00"),
+            expiry_date=timezone.localdate() + timedelta(days=900),
+        )
+
+        self.sell(date(2026, 5, 1), qty="10", price="100")     # 1,000
+
+        self.client.post(reverse("generate"), {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "", "sales_tax": "", "license_no": "L",
+            "item_name[]": ["Brufen"], "qty[]": ["100"], "price[]": ["50"],
+            "discount[]": ["0"], "batch[]": ["B-2"], "expiry[]": ["12/27"],
+            "stock_batch[]": [str(other_batch.pk)],
+        })
+        Invoice.objects.filter(pk=Invoice.objects.order_by("-id").first().pk).update(
+            date=date(2026, 5, 2)
+        )
+
+        rows = finance.top_products(date(2026, 5, 1), date(2026, 5, 31))
+
+        self.assertEqual(rows[0]["name"], "Brufen")           # 5,000
+        self.assertEqual(rows[0]["units"], 100)
+        self.assertEqual(rows[0]["gross_profit"], Decimal("2000.00"))
+        self.assertEqual(rows[1]["name"], "Panadol")
+
+    def test_customers_are_ranked_by_what_they_bought(self):
+        self.sell(date(2026, 5, 1), qty="10", customer="Al-Noor Pharmacy")
+        self.sell(date(2026, 5, 2), qty="30", customer="Shifa Pharmacy")
+
+        rows = finance.top_customers(date(2026, 5, 1), date(2026, 5, 31))
+
+        self.assertEqual(rows[0]["name"], "Shifa Pharmacy")
+        self.assertEqual(rows[0]["revenue"], Decimal("3000.00"))
+
+    def test_invoices_credited_to_nobody_are_shown_separately(self):
+        """A large uncredited line means the rep is being left blank, and
+        that is commission nobody is being paid."""
+        self.sell(date(2026, 5, 1))
+
+        rows = finance.sales_by_rep(date(2026, 5, 1), date(2026, 5, 31))
+
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0]["credited"])
+        self.assertEqual(rows[0]["name"], "Not credited to anyone")
+
+    # ------------------------------------------------------------- the page
+
+    def test_the_page_renders_and_defaults_to_the_last_month(self):
+        response = self.client.get(reverse("sales_report"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.context["end"], timezone.localdate().isoformat()
+        )
+
+    def test_the_page_honours_an_explicit_range(self):
+        self.sell(date(2026, 5, 1))
+
+        response = self.client.get(reverse("sales_report"), {
+            "start": "2026-05-01", "end": "2026-05-31",
+        })
+
+        self.assertEqual(len(response.context["rows"]), 1)
+
+    def test_the_field_team_cannot_see_the_sales_report(self):
+        mr_user = User.objects.create_user("ali", password="pw")
+        Employee.objects.create(
+            employee_code="MR-01", full_name="Ali", designation="mr",
+            user=mr_user,
+        )
+        UserRolls.objects.filter(user=mr_user).update(role=UserRolls.ROLE_FIELD)
+
+        self.client.logout()
+        self.client.login(username="ali", password="pw")
+
+        response = self.client.get(reverse("sales_report"))
+
+        self.assertEqual(response.status_code, 302)
+
+
+class ExpiryExposureTests(TestCase):
+    """Stock about to die, in money rather than batch counts."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.product = Product.objects.create(code="PAN", name="Panadol")
+
+    def batch(self, days, quantity=100, cost="60.00"):
+        return Batch.objects.create(
+            product=self.product,
+            batch_no=f"B-{days}",
+            quantity=quantity,
+            cost_price=Decimal(cost),
+            expiry_date=timezone.localdate() + timedelta(days=days),
+        )
+
+    def test_expiring_stock_is_valued_not_just_counted(self):
+        self.batch(days=30, quantity=100, cost="60.00")
+
+        exposure = finance.expiry_exposure(90)
+
+        self.assertEqual(exposure["expiring_count"], 1)
+        self.assertEqual(exposure["expiring_value"], Decimal("6000.00"))
+
+    def test_stock_beyond_the_horizon_is_not_counted_as_at_risk(self):
+        self.batch(days=800)
+
+        exposure = finance.expiry_exposure(90)
+
+        self.assertEqual(exposure["expiring_count"], 0)
+        self.assertEqual(exposure["expiring_value"], ZERO)
+
+    def test_already_expired_stock_is_valued_on_its_own(self):
+        self.batch(days=-10, quantity=50, cost="80.00")
+
+        exposure = finance.expiry_exposure(90)
+
+        self.assertEqual(exposure["expired_count"], 1)
+        self.assertEqual(exposure["expired_value"], Decimal("4000.00"))
+
+    def test_empty_batches_carry_no_risk(self):
+        self.batch(days=30, quantity=0)
+
+        self.assertEqual(finance.expiry_exposure(90)["expiring_value"], ZERO)
+
+    def test_the_stock_page_shows_the_money_at_risk(self):
+        self.batch(days=30, quantity=100, cost="60.00")
+
+        response = self.client.get(reverse("stock_report"))
+
+        self.assertEqual(
+            response.context["expiry"]["expiring_value"], Decimal("6000.00")
+        )

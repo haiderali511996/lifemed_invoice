@@ -12,9 +12,24 @@
 
 <div class="stat-grid">
   <div class="card stat">
+    <span class="stat-label">Sold Today</span>
+    <span class="stat-value">{{ recent.today.revenue|floatformat:2 }}</span>
+    <span class="stat-sub">gross profit {{ recent.today.gross_profit|floatformat:2 }}</span>
+  </div>
+
+  <div class="card stat">
+    <span class="stat-label">This Month So Far</span>
+    <span class="stat-value">{{ recent.this_month.revenue|floatformat:2 }}</span>
+    <span class="stat-sub">
+      {{ recent.days_elapsed }} day(s) · same run last month
+      {{ recent.last_month.revenue|floatformat:2 }}
+    </span>
+  </div>
+
+  <div class="card stat">
     <span class="stat-label">Total Invoiced</span>
     <span class="stat-value">{{ total_invoiced|floatformat:2 }}</span>
-    <span class="stat-sub">{{ invoice_count }} invoice(s)</span>
+    <span class="stat-sub">{{ invoice_count }} invoice(s), all time</span>
   </div>
 
   <div class="card stat">
@@ -30,7 +45,9 @@
     <span class="stat-value" style="color: #a71d2a">
       {{ total_outstanding|floatformat:2 }}
     </span>
-    <span class="stat-sub">{{ customer_count }} customer(s)</span>
+    <span class="stat-sub">
+      {{ collected_share|floatformat:1 }}% of billing collected
+    </span>
   </div>
 
   <div class="card stat">

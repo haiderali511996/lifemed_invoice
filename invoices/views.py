@@ -1017,6 +1017,11 @@ def dashboard(request):
 
     received = Payment.objects.aggregate(t=Sum("amount"))["t"] or ZERO
 
+    # An all-time total only ever grows, so on its own it says nothing about
+    # how the business is doing now. These give the figures something to be
+    # measured against.
+    recent = finance.month_to_date()
+
     return render(
         request,
         "invoices/dashboard.html",
@@ -1030,6 +1035,12 @@ def dashboard(request):
             "overdue_days": OVERDUE_DAYS,
             "customer_count": Customer.objects.count(),
             "invoice_count": Invoice.objects.count(),
+            "recent": recent,
+            "expiry": finance.expiry_exposure(),
+            "collected_share": (
+                (received * Decimal("100") / totals).quantize(Decimal("0.1"))
+                if totals else ZERO
+            ),
         }
     )
 
@@ -2094,6 +2105,9 @@ def stock_report(request):
         "invoices/stock_report.html",
         {
             "active": "stock",
+            # Valued, not counted: "three batches" does not say whether that
+            # is a rounding error or a month's profit about to be binned.
+            "expiry": finance.expiry_exposure(EXPIRY_WARNING_DAYS),
             "batches": batches,
             "expired": expired,
             "expiring": expiring,
@@ -4335,5 +4349,34 @@ def assessment_report(request):
             "years": years,
             "selected_period": kind,
             "selected_year": year,
+        }
+    )
+
+
+@login_required
+def sales_report(request):
+    """How the business is selling: day by day, and what is driving it."""
+    start = parse_date(request.GET.get("start", ""))
+    end = parse_date(request.GET.get("end", ""))
+
+    # Defaults to the last 30 days rather than all time: this page is for
+    # reading the current rhythm, and a year of history flattens it.
+    if start is None and end is None:
+        end = timezone.localdate()
+        start = end - timedelta(days=29)
+
+    return render(
+        request,
+        "invoices/sales_report.html",
+        {
+            "active": "sales_report",
+            "rows": finance.daily_sales(start, end),
+            "summary": finance.selling_days(start, end),
+            "pnl": finance.profit_and_loss(start, end),
+            "products": finance.top_products(start, end),
+            "customers": finance.top_customers(start, end, limit=10),
+            "reps": finance.sales_by_rep(start, end),
+            "start": start.isoformat() if start else "",
+            "end": end.isoformat() if end else "",
         }
     )
