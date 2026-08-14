@@ -1,0 +1,120 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Partners{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>🤝 Partners</h1>
+  <div style="display:flex;gap:8px">
+    <a href="{% url 'capital_record' %}" class="btn btn-green">＋ Record Capital</a>
+    <a href="{% url 'partner_new' %}" class="btn">＋ New Partner</a>
+  </div>
+</div>
+
+{% if not balanced %}
+<div class="alert alert-warn">
+  <strong>The partners' shares come to {{ total_share|floatformat:2 }}%, not 100%.</strong>
+  {% if total_share < 100 %}
+  Part of the profit is assigned to nobody, so the shares below add up to
+  less than the business earned.
+  {% else %}
+  That hands out more profit than was earned.
+  {% endif %}
+  Fix it on each partner's edit page.
+</div>
+{% endif %}
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Capital In</span>
+    <span class="stat-value">{{ totals.invested|floatformat:2 }}</span>
+    <span class="stat-sub">Put in by the partners</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Drawings</span>
+    <span class="stat-value" style="color:#a71d2a">{{ totals.drawn|floatformat:2 }}</span>
+    <span class="stat-sub">Taken back out</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Retained Profit</span>
+    <span class="stat-value" style="color:{% if net_profit < 0 %}#a71d2a{% else %}#1e7b24{% endif %}">
+      {{ net_profit|floatformat:2 }}
+    </span>
+    <span class="stat-sub">All time, after every cost</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Owed to Partners</span>
+    <span class="stat-value">{{ totals.capital_balance|floatformat:2 }}</span>
+    <span class="stat-sub">Capital plus their profit</span>
+  </div>
+</div>
+
+<div class="card">
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Partner</th>
+          <th class="num">Share</th>
+          <th class="num">Capital In</th>
+          <th class="num">Drawings</th>
+          <th class="num">Net Capital</th>
+          <th class="num">Profit Share</th>
+          <th class="num">Balance</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td>
+            <strong>{{ row.partner.full_name }}</strong>
+            {% if not row.partner.is_active %}
+            <br /><span class="muted" style="font-size:12px">no longer a partner</span>
+            {% endif %}
+          </td>
+          <td class="num">{{ row.partner.share_percent|floatformat:2 }}%</td>
+          <td class="num">{{ row.invested|floatformat:2 }}</td>
+          <td class="num" style="color:#a71d2a">
+            {% if row.drawn %}{{ row.drawn|floatformat:2 }}{% else %}-{% endif %}
+          </td>
+          <td class="num">{{ row.net_contributed|floatformat:2 }}</td>
+          <td class="num" style="color:{% if row.profit_share < 0 %}#a71d2a{% else %}#1e7b24{% endif %}">
+            {{ row.profit_share|floatformat:2 }}
+          </td>
+          <td class="num"><strong>{{ row.capital_balance|floatformat:2 }}</strong></td>
+          <td style="white-space:nowrap">
+            <a href="{% url 'partner_statement' row.partner.id %}" class="btn btn-sm">Statement</a>
+            <a href="{% url 'partner_edit' row.partner.id %}" class="btn btn-sm btn-grey">Edit</a>
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="8" style="text-align:center;padding:26px">
+          No partners recorded yet.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+      {% if rows %}
+      <tfoot>
+        <tr>
+          <th>Total</th>
+          <th class="num">{{ total_share|floatformat:2 }}%</th>
+          <th class="num">{{ totals.invested|floatformat:2 }}</th>
+          <th class="num">{{ totals.drawn|floatformat:2 }}</th>
+          <th class="num">{{ totals.net_contributed|floatformat:2 }}</th>
+          <th class="num">{{ totals.profit_share|floatformat:2 }}</th>
+          <th class="num">{{ totals.capital_balance|floatformat:2 }}</th>
+          <th></th>
+        </tr>
+      </tfoot>
+      {% endif %}
+    </table>
+  </div>
+
+  <p class="help-note" style="margin-top:14px">
+    <strong>Balance</strong> is what the business would owe each partner if it
+    stopped today: what they put in, less what they took out, plus their share
+    of everything earned since. See
+    <a href="{% url 'profit_report' %}">Profit &amp; Shares</a> for how that
+    profit was arrived at.
+  </p>
+</div>
+{% endblock %}

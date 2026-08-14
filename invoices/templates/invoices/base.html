@@ -317,6 +317,45 @@
         box-shadow: 0 1px 3px rgba(20, 48, 77, 0.05);
       }
 
+      /* The row of headline figures above a report. Several pages carry
+         their own copy of these rules in a block of their own; those load
+         after this one and win, so nothing they already do changes. */
+      .stat-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 15px;
+        margin-bottom: 20px;
+      }
+
+      .stat {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+
+      .stat-label {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: #8595a8;
+      }
+
+      .stat-value {
+        font-size: 25px;
+        font-weight: 700;
+        color: var(--brand-dark);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .stat-sub {
+        font-size: 12px;
+        color: #8595a8;
+      }
+
+      .muted {
+        color: #8595a8;
+      }
+
       .btn {
         display: inline-block;
         text-decoration: none;
@@ -649,6 +688,18 @@
           </a>
           <a href="{% url 'payroll_list' %}" class="{% if active == 'payroll' %}active{% endif %}">
             💵 <span>Payroll</span>
+          </a>
+        </div>
+
+        <button type="button" class="nav-section" data-nav-key="ownership" onclick="toggleNavGroup(this)">
+          <span>Ownership</span><span class="chevron">▾</span>
+        </button>
+        <div class="nav-group">
+          <a href="{% url 'partner_list' %}" class="{% if active == 'partners' %}active{% endif %}">
+            🤝 <span>Partners</span>
+          </a>
+          <a href="{% url 'profit_report' %}" class="{% if active == 'profit_report' %}active{% endif %}">
+            💹 <span>Profit &amp; Shares</span>
           </a>
         </div>
 

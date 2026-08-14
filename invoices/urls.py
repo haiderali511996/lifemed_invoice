@@ -26,6 +26,21 @@ urlpatterns = [
         name='order_status',
     ),
 
+    path('partners/', views.partner_list, name='partner_list'),
+    path('partners/new/', views.partner_edit, name='partner_new'),
+    path('partners/capital/', views.capital_record, name='capital_record'),
+    path('partners/profit/', views.profit_report, name='profit_report'),
+    path(
+        'partners/<int:partner_id>/',
+        views.partner_statement,
+        name='partner_statement',
+    ),
+    path(
+        'partners/<int:partner_id>/edit/',
+        views.partner_edit,
+        name='partner_edit',
+    ),
+
     path('targets/', views.target_list, name='target_list'),
     path('targets/new/', views.target_edit, name='target_new'),
     path('targets/<int:target_id>/edit/', views.target_edit, name='target_edit'),

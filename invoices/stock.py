@@ -172,6 +172,9 @@ def record_sales_return(sales_return, lines, user=None):
             price=item.price,
             discount=item.discount,
             batch=batch if sales_return.restock else None,
+            # The cost these goods went out at, so putting them back reverses
+            # exactly what the sale charged rather than today's cost price.
+            unit_cost=item.unit_cost,
         )
 
         total += returned.line_total

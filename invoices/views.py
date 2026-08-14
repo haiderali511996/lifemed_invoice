@@ -17,12 +17,14 @@ from datetime import timedelta
 from .forms import (
     CallPointForm,
     CallReportForm,
+    CapitalTransactionForm,
     CustomerForm,
     DistributorForm,
     EmployeeForm,
     ExpenseCategoryForm,
     ExpenseForm,
     ManufacturerForm,
+    PartnerForm,
     PayrollRunForm,
     SampleIssueForm,
     PaymentForm,
@@ -36,6 +38,7 @@ from .forms import (
     TargetForm,
     TerritoryForm,
 )
+from . import finance
 from .layout import LayoutError, describe, detect_layout
 from .stock import (
     StockError, adjust, allocate_fefo, issue, receive, record_sales_return,
@@ -57,6 +60,8 @@ from .models import (
     Item,
     InvoiceLog,
     Manufacturer,
+    Partner,
+    CapitalTransaction,
     Payment,
     PayrollRun,
     Payslip,
@@ -666,6 +671,10 @@ def generate_invoice(request):
                 discount=disc,
                 product=stock_batch.product if stock_batch else None,
                 stock_batch=stock_batch,
+                # Snapshotted now: receiving this batch number again later
+                # overwrites its cost price, and the profit already earned on
+                # this sale must not move when it does.
+                unit_cost=stock_batch.cost_price if stock_batch else ZERO,
             )
 
             if stock_batch is not None:
@@ -682,8 +691,11 @@ def generate_invoice(request):
                     # the ledger, so say so and leave the line unlinked.
                     messages.error(request, str(error))
 
+                    # No stock moved, so no cost was incurred either - leaving
+                    # one behind would charge the partners for goods that
+                    # never left the shelf.
                     Item.objects.filter(pk=item.pk).update(
-                        product=None, stock_batch=None
+                        product=None, stock_batch=None, unit_cost=ZERO
                     )
 
             pdf_rows.append({
@@ -4121,5 +4133,166 @@ def employee_login_setup(request, employee_id):
         {
             "employee": employee,
             "suggested": suggested,
+        }
+    )
+
+
+# ---------------------------------------------------------------- OWNERSHIP
+
+@login_required
+def partner_list(request):
+    """Who owns the business, and where each partner's account stands."""
+    partners = list(Partner.objects.all())
+
+    net_profit = finance.profit_and_loss()["net_profit"]
+
+    rows = [
+        {
+            "partner": partner,
+            "invested": partner.invested,
+            "drawn": partner.drawn,
+            "net_contributed": partner.net_contributed,
+            "profit_share": partner.share_of(net_profit),
+            "capital_balance": (
+                partner.net_contributed + partner.share_of(net_profit)
+            ),
+        }
+        for partner in partners
+    ]
+
+    return render(
+        request,
+        "invoices/partner_list.html",
+        {
+            "active": "partners",
+            "rows": rows,
+            "net_profit": net_profit,
+            "total_share": Partner.total_share(),
+            # Shown rather than silently corrected: shares that do not make
+            # 100 mean somebody's profit is unassigned, and only the owners
+            # can say whose it is.
+            "balanced": Partner.shares_are_balanced(),
+            "totals": {
+                "invested": sum((r["invested"] for r in rows), ZERO),
+                "drawn": sum((r["drawn"] for r in rows), ZERO),
+                "net_contributed": sum((r["net_contributed"] for r in rows), ZERO),
+                "profit_share": sum((r["profit_share"] for r in rows), ZERO),
+                "capital_balance": sum((r["capital_balance"] for r in rows), ZERO),
+            },
+        }
+    )
+
+
+@login_required
+def partner_edit(request, partner_id=None):
+    partner = get_object_or_404(Partner, pk=partner_id) if partner_id else None
+
+    if request.method == "POST":
+        form = PartnerForm(request.POST, instance=partner)
+
+        if form.is_valid():
+            saved = form.save()
+            messages.success(request, f"Saved {saved.full_name}.")
+
+            return redirect("partner_list")
+
+    else:
+        form = PartnerForm(instance=partner)
+
+    return render(
+        request,
+        "invoices/partner_form.html",
+        {
+            "active": "partners",
+            "form": form,
+            "partner": partner,
+        }
+    )
+
+
+@login_required
+def partner_statement(request, partner_id):
+    """One partner's capital account, entry by entry."""
+    partner = get_object_or_404(Partner, pk=partner_id)
+
+    statement = finance.partner_statement(partner)
+
+    running = ZERO
+    entries = []
+
+    for transaction in statement["transactions"]:
+        running += transaction.signed_amount
+
+        entries.append({"transaction": transaction, "balance": running})
+
+    return render(
+        request,
+        "invoices/partner_statement.html",
+        {
+            "active": "partners",
+            "statement": statement,
+            "partner": partner,
+            "entries": entries,
+        }
+    )
+
+
+@login_required
+def capital_record(request):
+    """Record money a partner put in or took out."""
+    partner_id = request.GET.get("partner", "").strip()
+
+    if request.method == "POST":
+        form = CapitalTransactionForm(request.POST)
+
+        if form.is_valid():
+            entry = form.save(commit=False)
+            entry.recorded_by = request.user
+            entry.save()
+
+            messages.success(
+                request,
+                f"Recorded {entry.get_kind_display().lower()} of "
+                f"{entry.amount:.2f} for {entry.partner.full_name}.",
+            )
+
+            return redirect("partner_statement", partner_id=entry.partner_id)
+
+    else:
+        form = CapitalTransactionForm(
+            initial={
+                "date": timezone.localdate(),
+                "partner": partner_id or None,
+            }
+        )
+
+    return render(
+        request,
+        "invoices/capital_form.html",
+        {
+            "active": "partners",
+            "form": form,
+        }
+    )
+
+
+@login_required
+def profit_report(request):
+    """The trading result, and how it divides between the partners."""
+    start = parse_date(request.GET.get("start", ""))
+    end = parse_date(request.GET.get("end", ""))
+
+    split = finance.distribution(start, end)
+
+    return render(
+        request,
+        "invoices/profit_report.html",
+        {
+            "active": "profit_report",
+            "split": split,
+            "pnl": split["profit_and_loss"],
+            "position": finance.where_the_money_is(),
+            "start": request.GET.get("start", ""),
+            "end": request.GET.get("end", ""),
         }
     )

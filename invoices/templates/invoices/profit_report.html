@@ -1,0 +1,234 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Profit &amp; Partner Shares{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>💹 Profit &amp; Partner Shares</h1>
+  <button onclick="window.print()" class="btn btn-grey no-print">Print</button>
+</div>
+
+<div class="card no-print" style="margin-bottom:16px">
+  <form method="GET" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+    <div>
+      <label style="display:block;font-size:12px;color:#55657a;margin-bottom:4px">From</label>
+      <input type="date" name="start" value="{{ start }}"
+             style="padding:8px 11px;border:1px solid #dbe2ea;border-radius:7px" />
+    </div>
+    <div>
+      <label style="display:block;font-size:12px;color:#55657a;margin-bottom:4px">To</label>
+      <input type="date" name="end" value="{{ end }}"
+             style="padding:8px 11px;border:1px solid #dbe2ea;border-radius:7px" />
+    </div>
+    <button type="submit" class="btn">Apply</button>
+    {% if start or end %}
+    <a href="{% url 'profit_report' %}" class="btn btn-grey">All time</a>
+    {% endif %}
+  </form>
+</div>
+
+{% if not split.balanced %}
+<div class="alert alert-warn">
+  <strong>Shares total {{ split.total_share|floatformat:2 }}%, not 100%.</strong>
+  The split below is therefore incomplete.
+</div>
+{% endif %}
+
+{% if pnl.uncosted.count %}
+<div class="alert alert-warn">
+  <strong>{{ pnl.uncosted.count }} invoice line(s) worth
+  {{ pnl.uncosted.value|floatformat:2 }} carry no cost.</strong>
+  They were typed in by hand rather than picked from stock, so nothing was
+  charged against them and the gross profit below is flattering by up to that
+  much.
+</div>
+{% endif %}
+
+{% if pnl.draft_payroll %}
+<div class="alert alert-warn">
+  <strong>{{ pnl.draft_payroll }} payroll run(s) are still in draft</strong>
+  and are not counted as a cost yet. Finalise them to see the true profit.
+</div>
+{% endif %}
+
+<div class="card">
+  <h3 style="margin-top:0">Trading Result</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <tbody>
+        <tr>
+          <td>Sales, less goods credited back</td>
+          <td class="num"><strong>{{ pnl.revenue|floatformat:2 }}</strong></td>
+        </tr>
+        <tr>
+          <td style="padding-left:22px">Less: what those goods cost</td>
+          <td class="num" style="color:#a71d2a">
+            ({{ pnl.cost_of_goods_sold|floatformat:2 }})
+          </td>
+        </tr>
+        <tr style="border-top:2px solid #dbe2ea">
+          <td><strong>Gross profit</strong></td>
+          <td class="num">
+            <strong>{{ pnl.gross_profit|floatformat:2 }}</strong>
+            <span class="muted" style="font-size:12px">
+              ({{ pnl.gross_margin|floatformat:1 }}%)
+            </span>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding-left:22px">Less: salaries, allowances &amp; commission</td>
+          <td class="num" style="color:#a71d2a">({{ pnl.wages|floatformat:2 }})</td>
+        </tr>
+        <tr>
+          <td style="padding-left:22px">Less: expenses</td>
+          <td class="num" style="color:#a71d2a">({{ pnl.expenses|floatformat:2 }})</td>
+        </tr>
+        <tr>
+          <td style="padding-left:22px">Less: samples given to doctors</td>
+          <td class="num" style="color:#a71d2a">({{ pnl.samples|floatformat:2 }})</td>
+        </tr>
+        <tr style="border-top:2px solid #dbe2ea">
+          <td><strong>Net profit</strong></td>
+          <td class="num">
+            <strong style="font-size:18px;color:{% if pnl.net_profit < 0 %}#a71d2a{% else %}#1e7b24{% endif %}">
+              {{ pnl.net_profit|floatformat:2 }}
+            </strong>
+            <span class="muted" style="font-size:12px">
+              ({{ pnl.net_margin|floatformat:1 }}%)
+            </span>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="help-note" style="margin-top:12px">
+    Expenses reimbursed through a payslip are counted once, under expenses —
+    the payslip figure above has them taken back out, so no claim is charged
+    to the partners twice.
+  </p>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Each Partner's Share</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Partner</th>
+          <th class="num">Share</th>
+          <th class="num">Profit Share</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in split.rows %}
+        <tr>
+          <td>
+            <a href="{% url 'partner_statement' row.partner.id %}">
+              {{ row.partner.full_name }}
+            </a>
+          </td>
+          <td class="num">{{ row.share_percent|floatformat:2 }}%</td>
+          <td class="num" style="color:{% if row.profit_share < 0 %}#a71d2a{% else %}#1e7b24{% endif %}">
+            <strong>{{ row.profit_share|floatformat:2 }}</strong>
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="3" style="text-align:center;padding:26px">
+          No active partners. Add them under Partners.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+      {% if split.rows %}
+      <tfoot>
+        <tr>
+          <th colspan="2" style="text-align:right">Allocated</th>
+          <th class="num">{{ split.allocated|floatformat:2 }}</th>
+        </tr>
+        {% if split.rounding %}
+        <tr>
+          <th colspan="2" style="text-align:right">
+            Rounding left over
+          </th>
+          <th class="num">{{ split.rounding|floatformat:2 }}</th>
+        </tr>
+        {% endif %}
+        <tr>
+          <th colspan="2" style="text-align:right">Net profit</th>
+          <th class="num">{{ split.net_profit|floatformat:2 }}</th>
+        </tr>
+      </tfoot>
+      {% endif %}
+    </table>
+  </div>
+
+  {% if split.rounding %}
+  <p class="help-note" style="margin-top:12px">
+    Each share is rounded to the paisa, which can leave a paisa or two over.
+    It is shown rather than hidden so the column adds up exactly.
+  </p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Where the Partners' Money Is</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <tbody>
+        <tr>
+          <td>Stock on the shelves, at what it cost</td>
+          <td class="num">{{ position.stock_at_cost|floatformat:2 }}</td>
+        </tr>
+        <tr>
+          <td>Owed by customers, net of credit notes</td>
+          <td class="num">{{ position.receivables|floatformat:2 }}</td>
+        </tr>
+        <tr style="border-top:2px solid #dbe2ea">
+          <td><strong>Held in stock and debtors</strong></td>
+          <td class="num"><strong>{{ position.tracked_assets|floatformat:2 }}</strong></td>
+        </tr>
+        <tr><td colspan="2" style="height:10px"></td></tr>
+        <tr>
+          <td>Capital put in by the partners</td>
+          <td class="num">{{ position.capital_introduced|floatformat:2 }}</td>
+        </tr>
+        <tr>
+          <td>Less: drawings taken out</td>
+          <td class="num" style="color:#a71d2a">
+            ({{ position.capital_withdrawn|floatformat:2 }})
+          </td>
+        </tr>
+        <tr>
+          <td>Profit kept in the business</td>
+          <td class="num">{{ position.retained_profit|floatformat:2 }}</td>
+        </tr>
+        <tr style="border-top:2px solid #dbe2ea">
+          <td><strong>Partners' funds</strong></td>
+          <td class="num"><strong>{{ position.partners_funds|floatformat:2 }}</strong></td>
+        </tr>
+        <tr style="border-top:2px solid #dbe2ea">
+          <td>Difference — cash, bank and unpaid supplier bills</td>
+          <td class="num">{{ position.unaccounted|floatformat:2 }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="alert" style="margin-top:14px;background:#eef4fb;border:1px solid #cddff0">
+    <strong>This is not a balance sheet, and the two halves are not meant to
+    meet.</strong>
+    The system records stock and what customers owe, but it has no bank
+    account and does not track what is still owed to suppliers. The difference
+    on the last line is exactly that: money in hand and at the bank, less
+    unpaid supplier bills. It is real, it is simply not recorded here — so it
+    is shown as a gap rather than presented as if the books balanced.
+  </div>
+
+  <p class="help-note" style="margin-top:10px">
+    Goods bought from suppliers to date, at cost:
+    <strong>{{ position.purchases_total|floatformat:2 }}</strong>. What is not
+    still on the shelves has been sold, sampled or written off.
+  </p>
+</div>
+{% endblock %}

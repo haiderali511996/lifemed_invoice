@@ -6,6 +6,7 @@ from .models import (
     Batch,
     CallPoint,
     CallReport,
+    CapitalTransaction,
     Customer,
     Distributor,
     Employee,
@@ -13,6 +14,7 @@ from .models import (
     ExpenseCategory,
     Invoice,
     Manufacturer,
+    Partner,
     PayrollRun,
     SampleIssue,
     Payment,
@@ -751,3 +753,114 @@ class CallReportForm(forms.ModelForm):
             self.save_m2m()
 
         return report
+
+
+class PartnerForm(forms.ModelForm):
+    """A shareholder and the slice of profit they take."""
+
+    class Meta:
+        model = Partner
+        fields = [
+            "full_name", "share_percent", "phone", "user",
+            "joined_on", "is_active", "note",
+        ]
+        widgets = {
+            "joined_on": forms.DateInput(attrs={"type": "date"}),
+            "note": forms.Textarea(attrs={"rows": 2}),
+            "share_percent": forms.NumberInput(
+                attrs={"step": "0.01", "min": "0", "max": "100"}
+            ),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.fields["user"].required = False
+        self.fields["user"].empty_label = "— No login account —"
+        self.fields["joined_on"].required = False
+
+    def clean_full_name(self):
+        name = self.cleaned_data["full_name"].strip()
+
+        if not name:
+            raise forms.ValidationError("A partner needs a name.")
+
+        clash = Partner.objects.filter(full_name__iexact=name)
+
+        if self.instance.pk:
+            clash = clash.exclude(pk=self.instance.pk)
+
+        if clash.exists():
+            raise forms.ValidationError("That partner is already on the books.")
+
+        return name
+
+    def clean_share_percent(self):
+        share = self.cleaned_data["share_percent"]
+
+        if share is None or share < Decimal("0"):
+            raise forms.ValidationError("A share cannot be negative.")
+
+        if share > Decimal("100"):
+            raise forms.ValidationError("A share cannot be more than 100%.")
+
+        return share
+
+    def clean(self):
+        cleaned = super().clean()
+
+        share = cleaned.get("share_percent")
+
+        # Shares over 100 would hand out more profit than was earned. Under
+        # 100 is allowed while partners are being entered one at a time; the
+        # page says so until they add up.
+        if share is not None and cleaned.get("is_active"):
+            others = Partner.objects.filter(is_active=True)
+
+            if self.instance.pk:
+                others = others.exclude(pk=self.instance.pk)
+
+            total = sum(
+                (partner.share_percent for partner in others), Decimal("0")
+            ) + share
+
+            if total > Decimal("100"):
+                self.add_error(
+                    "share_percent",
+                    f"That takes the partners' shares to {total}%. "
+                    f"They cannot come to more than 100%.",
+                )
+
+        return cleaned
+
+
+class CapitalTransactionForm(forms.ModelForm):
+    """Money a partner puts in, or takes out."""
+
+    class Meta:
+        model = CapitalTransaction
+        fields = ["partner", "kind", "amount", "date", "method", "reference", "note"]
+        widgets = {
+            "date": forms.DateInput(attrs={"type": "date"}),
+            "amount": forms.NumberInput(attrs={"step": "0.01", "min": "0.01"}),
+            "reference": forms.TextInput(
+                attrs={"placeholder": "Cheque no. / transaction ID"}
+            ),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.fields["partner"].queryset = Partner.objects.filter(is_active=True)
+        self.fields["reference"].required = False
+        self.fields["note"].required = False
+
+    def clean_amount(self):
+        amount = self.cleaned_data["amount"]
+
+        # The direction is `kind`; a negative here would mean two different
+        # things at once and quietly reverse the entry.
+        if amount is None or amount <= Decimal("0"):
+            raise forms.ValidationError("Amount must be greater than zero.")
+
+        return amount

@@ -1,0 +1,141 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - {{ partner.full_name }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>🤝 {{ partner.full_name }}</h1>
+  <div style="display:flex;gap:8px">
+    <a href="{% url 'capital_record' %}?partner={{ partner.id }}" class="btn btn-green">
+      ＋ Record Capital
+    </a>
+    <a href="{% url 'partner_edit' partner.id %}" class="btn btn-grey">Edit</a>
+    <button onclick="window.print()" class="btn btn-grey no-print">Print</button>
+  </div>
+</div>
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Share of the Business</span>
+    <span class="stat-value">{{ partner.share_percent|floatformat:2 }}%</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Net Capital</span>
+    <span class="stat-value">{{ statement.net_contributed|floatformat:2 }}</span>
+    <span class="stat-sub">In, less drawings</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Share of Profit</span>
+    <span class="stat-value" style="color:{% if statement.profit_share < 0 %}#a71d2a{% else %}#1e7b24{% endif %}">
+      {{ statement.profit_share|floatformat:2 }}
+    </span>
+    <span class="stat-sub">{{ partner.share_percent|floatformat:2 }}% of
+      {{ statement.company_net_profit|floatformat:2 }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Capital Balance</span>
+    <span class="stat-value">{{ statement.capital_balance|floatformat:2 }}</span>
+    <span class="stat-sub">What the business owes them</span>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Capital Account</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Entry</th>
+          <th>Method</th>
+          <th>Reference</th>
+          <th class="num">In</th>
+          <th class="num">Out</th>
+          <th class="num">Balance</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for entry in entries %}
+        <tr>
+          <td>{{ entry.transaction.date|date:"d M Y" }}</td>
+          <td>
+            {{ entry.transaction.get_kind_display }}
+            {% if entry.transaction.note %}
+            <br /><span class="muted" style="font-size:12px">{{ entry.transaction.note }}</span>
+            {% endif %}
+          </td>
+          <td>{{ entry.transaction.get_method_display }}</td>
+          <td>{{ entry.transaction.reference|default:"-" }}</td>
+          <td class="num" style="color:#1e7b24">
+            {% if entry.transaction.kind == "investment" %}
+            {{ entry.transaction.amount|floatformat:2 }}
+            {% endif %}
+          </td>
+          <td class="num" style="color:#a71d2a">
+            {% if entry.transaction.kind == "drawing" %}
+            {{ entry.transaction.amount|floatformat:2 }}
+            {% endif %}
+          </td>
+          <td class="num"><strong>{{ entry.balance|floatformat:2 }}</strong></td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" style="text-align:center;padding:26px">
+          Nothing recorded yet for {{ partner.full_name }}.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+      {% if entries %}
+      <tfoot>
+        <tr>
+          <th colspan="4" style="text-align:right">Totals</th>
+          <th class="num">{{ statement.invested|floatformat:2 }}</th>
+          <th class="num">{{ statement.drawn|floatformat:2 }}</th>
+          <th class="num">{{ statement.net_contributed|floatformat:2 }}</th>
+        </tr>
+      </tfoot>
+      {% endif %}
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">What {{ partner.full_name }} Is Owed</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <tbody>
+        <tr>
+          <td>Capital put in</td>
+          <td class="num">{{ statement.invested|floatformat:2 }}</td>
+        </tr>
+        <tr>
+          <td>Less: drawings taken out</td>
+          <td class="num" style="color:#a71d2a">({{ statement.drawn|floatformat:2 }})</td>
+        </tr>
+        <tr>
+          <td>
+            Share of profit
+            <span class="muted" style="font-size:12px">
+              — {{ partner.share_percent|floatformat:2 }}% of
+              {{ statement.company_net_profit|floatformat:2 }}
+            </span>
+          </td>
+          <td class="num">{{ statement.profit_share|floatformat:2 }}</td>
+        </tr>
+        <tr style="border-top:2px solid #dbe2ea">
+          <td><strong>Capital balance</strong></td>
+          <td class="num">
+            <strong style="font-size:18px">{{ statement.capital_balance|floatformat:2 }}</strong>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="help-note" style="margin-top:12px">
+    The profit share is this partner's cut of everything the business has
+    earned since it started, not of one year. See
+    <a href="{% url 'profit_report' %}">Profit &amp; Shares</a> for the
+    workings, and to look at a single period.
+  </p>
+</div>
+{% endblock %}

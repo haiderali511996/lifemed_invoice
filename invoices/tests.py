@@ -28,10 +28,12 @@ from .forms import (
     DistributorForm, EmployeeForm, ExpenseForm, ManufacturerForm,
 )
 from .layout import LayoutError, detect_layout
+from . import finance
 from .models import (
     Batch,
     CallPoint,
     CallReport,
+    CapitalTransaction,
     Distributor,
     Doctor,
     DoctorMove,
@@ -46,6 +48,7 @@ from .models import (
     Order,
     OrderItem,
     OVERDUE_DAYS,
+    Partner,
     Payment,
     PaymentAllocation,
     PayrollRun,
@@ -56,6 +59,7 @@ from .models import (
     Purchase,
     PurchaseItem,
     SalesReturn,
+    SalesReturnItem,
     SampleIssue,
     SampleIssueItem,
     StockMovement,
@@ -6472,3 +6476,607 @@ class PaymentAllocationTests(TestCase):
 
         self.assertTrue(listing[0].is_paid)
         self.assertEqual(ledger["balance"], ZERO)
+
+
+class PartnerCapitalTests(TestCase):
+    """Four brothers own this business in equal quarters.
+
+    The money each has put in, taken out, and earned has to be right to the
+    paisa, because the four of them divide it between themselves.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        # The seed migration already created the four; this reads them back
+        # rather than making new ones, so the seed itself is under test.
+        self.partners = list(Partner.objects.order_by("full_name"))
+
+    # ------------------------------------------------------------- the seed
+
+    def test_the_four_partners_are_on_the_books(self):
+        self.assertEqual(
+            sorted(p.full_name for p in self.partners),
+            ["Haider Ali", "Muhabbat Ali", "Mujtaba Ali", "Mustafa Ali"],
+        )
+
+    def test_they_hold_equal_shares_making_a_whole(self):
+        for partner in self.partners:
+            with self.subTest(partner=partner.full_name):
+                self.assertEqual(partner.share_percent, Decimal("25.00"))
+
+        self.assertEqual(Partner.total_share(), Decimal("100.00"))
+        self.assertTrue(Partner.shares_are_balanced())
+
+    # -------------------------------------------------------- capital account
+
+    def invest(self, partner, amount, on=None):
+        return CapitalTransaction.objects.create(
+            partner=partner, kind=CapitalTransaction.INVESTMENT,
+            amount=Decimal(amount), date=on or timezone.localdate(),
+        )
+
+    def draw(self, partner, amount, on=None):
+        return CapitalTransaction.objects.create(
+            partner=partner, kind=CapitalTransaction.DRAWING,
+            amount=Decimal(amount), date=on or timezone.localdate(),
+        )
+
+    def test_investments_add_up(self):
+        partner = self.partners[0]
+
+        self.invest(partner, "500000.00")
+        self.invest(partner, "250000.00")
+
+        self.assertEqual(partner.invested, Decimal("750000.00"))
+
+    def test_a_drawing_reduces_what_the_partner_has_in(self):
+        partner = self.partners[0]
+
+        self.invest(partner, "500000.00")
+        self.draw(partner, "120000.00")
+
+        self.assertEqual(partner.invested, Decimal("500000.00"))
+        self.assertEqual(partner.drawn, Decimal("120000.00"))
+        self.assertEqual(partner.net_contributed, Decimal("380000.00"))
+
+    def test_amounts_are_stored_positive_and_the_kind_carries_the_direction(self):
+        """A sign error must not be able to turn a drawing into an investment."""
+        partner = self.partners[0]
+
+        investment = self.invest(partner, "1000.00")
+        drawing = self.draw(partner, "1000.00")
+
+        self.assertEqual(investment.amount, Decimal("1000.00"))
+        self.assertEqual(drawing.amount, Decimal("1000.00"))
+        self.assertEqual(investment.signed_amount, Decimal("1000.00"))
+        self.assertEqual(drawing.signed_amount, Decimal("-1000.00"))
+
+    def test_one_partners_money_is_not_another_partners(self):
+        first, second = self.partners[0], self.partners[1]
+
+        self.invest(first, "500000.00")
+
+        self.assertEqual(second.invested, ZERO)
+
+    def test_capital_is_not_a_business_cost(self):
+        """Drawings must not be mistaken for spending and cut the profit."""
+        partner = self.partners[0]
+
+        self.invest(partner, "500000.00")
+        self.draw(partner, "100000.00")
+
+        self.assertEqual(finance.profit_and_loss()["expenses"], ZERO)
+        self.assertEqual(finance.profit_and_loss()["net_profit"], ZERO)
+
+
+class TradingProfitTests(TestCase):
+    """The profit the partners divide, worked out from what actually traded."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.product = Product.objects.create(code="PAN", name="Panadol")
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1", quantity=1000,
+            cost_price=Decimal("60.00"),
+            expiry_date=timezone.localdate() + timedelta(days=365),
+        )
+
+    def sell(self, qty="10", price="100", discount="0", from_stock=True):
+        return self.client.post(reverse("generate"), {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "", "sales_tax": "", "license_no": "L",
+            "item_name[]": ["Panadol"], "qty[]": [qty], "price[]": [price],
+            "discount[]": [discount], "batch[]": ["B-1"], "expiry[]": ["12/27"],
+            "stock_batch[]": [str(self.batch.pk) if from_stock else ""],
+        })
+
+    # ------------------------------------------------------------ the basics
+
+    def test_revenue_is_what_was_billed(self):
+        self.sell(qty="10", price="100")
+
+        self.assertEqual(finance.revenue(), Decimal("1000.00"))
+
+    def test_cost_of_goods_sold_comes_off_the_batch(self):
+        self.sell(qty="10", price="100")
+
+        self.assertEqual(finance.cost_of_goods_sold(), Decimal("600.00"))
+
+    def test_gross_profit_is_sales_less_what_the_goods_cost(self):
+        self.sell(qty="10", price="100")
+
+        result = finance.profit_and_loss()
+
+        self.assertEqual(result["revenue"], Decimal("1000.00"))
+        self.assertEqual(result["cost_of_goods_sold"], Decimal("600.00"))
+        self.assertEqual(result["gross_profit"], Decimal("400.00"))
+        self.assertEqual(result["gross_margin"], Decimal("40.00"))
+
+    # ------------------------------------------------- costs that do not move
+
+    def test_the_line_records_what_the_stock_cost_on_the_day(self):
+        self.sell(qty="10", price="100")
+
+        self.assertEqual(Item.objects.get().unit_cost, Decimal("60.00"))
+
+    def test_re_costing_a_batch_does_not_rewrite_past_profit(self):
+        """Receiving the same batch again at a new price must not move the
+        profit already earned - the partners have divided it."""
+        self.sell(qty="10", price="100")
+
+        before = finance.profit_and_loss()["gross_profit"]
+
+        self.batch.cost_price = Decimal("95.00")
+        self.batch.save(update_fields=["cost_price"])
+
+        self.assertEqual(finance.profit_and_loss()["gross_profit"], before)
+
+    def test_a_hand_typed_line_carries_no_cost(self):
+        self.sell(qty="10", price="100", from_stock=False)
+
+        self.assertEqual(finance.cost_of_goods_sold(), ZERO)
+
+    def test_hand_typed_lines_are_reported_not_hidden(self):
+        """Sales with no cost flatter the margin, so they are surfaced."""
+        self.sell(qty="10", price="100", from_stock=False)
+
+        uncosted = finance.profit_and_loss()["uncosted"]
+
+        self.assertEqual(uncosted["count"], 1)
+        self.assertEqual(uncosted["value"], Decimal("1000.00"))
+
+    # ------------------------------------------------------------ the returns
+
+    def test_a_restocked_return_reverses_both_sale_and_cost(self):
+        self.sell(qty="10", price="100")
+
+        invoice = Invoice.objects.get()
+        item = invoice.items.first()
+
+        self.client.post(reverse("return_create", args=[invoice.pk]), {
+            "reason": "Wrong order", "restock": "on",
+            "date": timezone.localdate().isoformat(),
+            f"qty_{item.pk}": "10",
+        })
+
+        result = finance.profit_and_loss()
+
+        self.assertEqual(result["revenue"], ZERO)
+        self.assertEqual(result["cost_of_goods_sold"], ZERO)
+        self.assertEqual(result["gross_profit"], ZERO)
+
+    def test_goods_credited_but_scrapped_still_cost_us(self):
+        """Damaged stock is refunded and thrown away, so the business loses
+        the sale and the goods. Reversing the cost would hide the second."""
+        self.sell(qty="10", price="100")
+
+        invoice = Invoice.objects.get()
+        item = invoice.items.first()
+
+        self.client.post(reverse("return_create", args=[invoice.pk]), {
+            "reason": "Damaged in transit", "restock": "",
+            "date": timezone.localdate().isoformat(),
+            f"qty_{item.pk}": "10",
+        })
+
+        result = finance.profit_and_loss()
+
+        self.assertEqual(result["revenue"], ZERO)
+        self.assertEqual(result["cost_of_goods_sold"], Decimal("600.00"))
+        self.assertEqual(result["gross_profit"], Decimal("-600.00"))
+
+    def test_a_return_reverses_the_cost_it_went_out_at(self):
+        self.sell(qty="10", price="100")
+
+        invoice = Invoice.objects.get()
+        item = invoice.items.first()
+
+        self.client.post(reverse("return_create", args=[invoice.pk]), {
+            "reason": "Wrong order", "restock": "on",
+            "date": timezone.localdate().isoformat(),
+            f"qty_{item.pk}": "4",
+        })
+
+        self.assertEqual(
+            SalesReturnItem.objects.get().unit_cost, Decimal("60.00")
+        )
+
+    # ------------------------------------------------------------- the costs
+
+    def test_expenses_reduce_the_profit(self):
+        self.sell(qty="10", price="100")
+
+        category = ExpenseCategory.objects.create(name="Fuel")
+        Expense.objects.create(
+            category=category, amount=Decimal("150.00"),
+            status=Expense.APPROVED, date=timezone.localdate(),
+        )
+
+        self.assertEqual(finance.profit_and_loss()["expenses"], Decimal("150.00"))
+        self.assertEqual(finance.profit_and_loss()["net_profit"], Decimal("250.00"))
+
+    def test_a_rejected_claim_is_not_a_cost(self):
+        category = ExpenseCategory.objects.create(name="Fuel")
+        Expense.objects.create(
+            category=category, amount=Decimal("150.00"),
+            status=Expense.REJECTED, date=timezone.localdate(),
+        )
+
+        self.assertEqual(finance.profit_and_loss()["expenses"], ZERO)
+
+    def test_samples_given_away_are_a_cost(self):
+        employee = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali", designation="mr"
+        )
+        issue_record = SampleIssue.objects.create(
+            employee=employee, date=timezone.localdate()
+        )
+        SampleIssueItem.objects.create(
+            sample_issue=issue_record, product=self.product,
+            batch=self.batch, qty=5,
+        )
+
+        self.assertEqual(finance.profit_and_loss()["samples"], Decimal("300.00"))
+
+
+class PayrollDoubleCountTests(TestCase):
+    """An expense paid through a payslip is one cost, not two.
+
+    Approved employee expenses are copied onto that month's slip. Counting
+    the expense and the whole slip would charge the partners twice for one
+    fuel claim, quietly shrinking the profit they split.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.employee = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza", designation="mr",
+            basic_salary=Decimal("50000.00"),
+        )
+        self.category = ExpenseCategory.objects.create(name="Fuel")
+
+    def run_payroll(self):
+        self.client.post(reverse("payroll_create"), {
+            "month": timezone.localdate().isoformat(), "note": "",
+        })
+
+        run = PayrollRun.objects.get()
+        run.status = PayrollRun.FINALISED
+        run.save(update_fields=["status"])
+
+        return run
+
+    def test_a_reimbursed_expense_is_charged_once(self):
+        Expense.objects.create(
+            category=self.category, employee=self.employee,
+            amount=Decimal("4000.00"), status=Expense.APPROVED,
+            date=timezone.localdate(),
+        )
+
+        self.run_payroll()
+
+        payslip = Payslip.objects.get()
+
+        # The slip really does carry the claim...
+        self.assertEqual(payslip.expense_reimbursement, Decimal("4000.00"))
+        self.assertEqual(payslip.gross_pay, Decimal("54000.00"))
+
+        result = finance.profit_and_loss()
+
+        # ...but the wage cost has it taken back out, because the expense
+        # line below already counts it.
+        self.assertEqual(result["wages"], Decimal("50000.00"))
+        self.assertEqual(result["expenses"], Decimal("4000.00"))
+        self.assertEqual(result["total_costs"], Decimal("54000.00"))
+
+    def test_a_draft_payroll_run_is_not_a_cost_yet(self):
+        self.client.post(reverse("payroll_create"), {
+            "month": timezone.localdate().isoformat(), "note": "",
+        })
+
+        self.assertEqual(finance.profit_and_loss()["wages"], ZERO)
+
+    def test_uncommitted_payroll_is_flagged_rather_than_dropped(self):
+        self.client.post(reverse("payroll_create"), {
+            "month": timezone.localdate().isoformat(), "note": "",
+        })
+
+        self.assertEqual(finance.profit_and_loss()["draft_payroll"], 1)
+
+    def test_a_finalised_run_is_a_cost(self):
+        self.run_payroll()
+
+        self.assertEqual(finance.profit_and_loss()["wages"], Decimal("50000.00"))
+
+
+class ProfitDistributionTests(TestCase):
+    """Splitting the profit four ways, and proving the four ways add up."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.product = Product.objects.create(code="PAN", name="Panadol")
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1", quantity=1000,
+            cost_price=Decimal("60.00"),
+            expiry_date=timezone.localdate() + timedelta(days=365),
+        )
+
+    def sell(self, qty="10", price="100"):
+        return self.client.post(reverse("generate"), {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "", "sales_tax": "", "license_no": "L",
+            "item_name[]": ["Panadol"], "qty[]": [qty], "price[]": [price],
+            "discount[]": ["0"], "batch[]": ["B-1"], "expiry[]": ["12/27"],
+            "stock_batch[]": [str(self.batch.pk)],
+        })
+
+    def test_each_partner_gets_a_quarter(self):
+        self.sell(qty="10", price="100")            # 400.00 profit
+
+        split = finance.distribution()
+
+        self.assertEqual(split["net_profit"], Decimal("400.00"))
+
+        for row in split["rows"]:
+            with self.subTest(partner=row["partner"].full_name):
+                self.assertEqual(row["profit_share"], Decimal("100.00"))
+
+    def test_the_shares_add_back_up_to_the_profit(self):
+        self.sell(qty="10", price="100")
+
+        split = finance.distribution()
+
+        self.assertEqual(split["allocated"], split["net_profit"])
+        self.assertEqual(split["rounding"], ZERO)
+
+    def test_a_remainder_that_will_not_divide_is_shown_not_buried(self):
+        """Four ways into an odd number leaves a paisa over. A statement
+        that does not reconcile exactly is the one nobody trusts."""
+        self.sell(qty="1", price="100.01")          # 100.01 - 60.00 = 40.01
+
+        split = finance.distribution()
+
+        self.assertEqual(split["net_profit"], Decimal("40.01"))
+        self.assertEqual(split["allocated"], Decimal("40.00"))
+        self.assertEqual(split["rounding"], Decimal("0.01"))
+
+    def test_a_loss_is_shared_the_same_way(self):
+        category = ExpenseCategory.objects.create(name="Rent")
+        Expense.objects.create(
+            category=category, amount=Decimal("1000.00"),
+            status=Expense.APPROVED, date=timezone.localdate(),
+        )
+
+        split = finance.distribution()
+
+        self.assertEqual(split["net_profit"], Decimal("-1000.00"))
+
+        for row in split["rows"]:
+            with self.subTest(partner=row["partner"].full_name):
+                self.assertEqual(row["profit_share"], Decimal("-250.00"))
+
+    def test_an_inactive_partner_takes_no_further_share(self):
+        partner = Partner.objects.first()
+        partner.is_active = False
+        partner.save(update_fields=["is_active"])
+
+        split = finance.distribution()
+
+        self.assertEqual(len(split["rows"]), 3)
+        self.assertEqual(split["total_share"], Decimal("75.00"))
+        self.assertFalse(split["balanced"])
+
+    def test_a_partners_balance_is_capital_plus_their_profit(self):
+        self.sell(qty="10", price="100")            # 400.00 profit
+
+        partner = Partner.objects.order_by("full_name").first()
+
+        CapitalTransaction.objects.create(
+            partner=partner, kind=CapitalTransaction.INVESTMENT,
+            amount=Decimal("500000.00"), date=timezone.localdate(),
+        )
+        CapitalTransaction.objects.create(
+            partner=partner, kind=CapitalTransaction.DRAWING,
+            amount=Decimal("20000.00"), date=timezone.localdate(),
+        )
+
+        statement = finance.partner_statement(partner)
+
+        self.assertEqual(statement["net_contributed"], Decimal("480000.00"))
+        self.assertEqual(statement["profit_share"], Decimal("100.00"))
+        self.assertEqual(statement["capital_balance"], Decimal("480100.00"))
+
+
+class WhereTheMoneyIsTests(TestCase):
+    """Stock and debtors set against what the partners have funded."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.product = Product.objects.create(code="PAN", name="Panadol")
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1", quantity=100,
+            cost_price=Decimal("60.00"),
+            expiry_date=timezone.localdate() + timedelta(days=365),
+        )
+
+    def test_stock_is_valued_at_what_it_cost(self):
+        self.assertEqual(finance.stock_at_cost(), Decimal("6000.00"))
+
+    def test_receivables_are_billed_less_collected(self):
+        customer = Customer.objects.create(name="Shifa", address="Lahore")
+        invoice = Invoice.objects.create(customer=customer, license_no="L")
+        Invoice.objects.filter(pk=invoice.pk).update(total=Decimal("1000.00"))
+
+        Payment.objects.create(customer=customer, amount=Decimal("400.00"))
+
+        self.assertEqual(finance.receivables(), Decimal("600.00"))
+
+    def test_the_untracked_gap_is_shown_rather_than_forced_to_balance(self):
+        """No bank account is recorded here, so the two sides genuinely do
+        not meet. Hiding that would present a balance sheet that is wrong."""
+        partner = Partner.objects.first()
+
+        CapitalTransaction.objects.create(
+            partner=partner, kind=CapitalTransaction.INVESTMENT,
+            amount=Decimal("10000.00"), date=timezone.localdate(),
+        )
+
+        position = finance.where_the_money_is()
+
+        self.assertEqual(position["stock_at_cost"], Decimal("6000.00"))
+        self.assertEqual(position["capital_introduced"], Decimal("10000.00"))
+        self.assertEqual(position["partners_funds"], Decimal("10000.00"))
+
+        # 6,000 of stock against 10,000 put in: the other 4,000 is cash the
+        # system never sees.
+        self.assertEqual(position["unaccounted"], Decimal("-4000.00"))
+
+
+class PartnerPagesTests(TestCase):
+    """The screens, and who is allowed to see them."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+    def test_the_partner_list_shows_every_partner(self):
+        html = self.client.get(reverse("partner_list")).content.decode()
+
+        for name in ("Mustafa Ali", "Mujtaba Ali", "Muhabbat Ali", "Haider Ali"):
+            with self.subTest(name=name):
+                self.assertIn(name, html)
+
+    def test_the_profit_report_renders(self):
+        self.assertEqual(
+            self.client.get(reverse("profit_report")).status_code, 200
+        )
+
+    def test_a_statement_renders_for_each_partner(self):
+        for partner in Partner.objects.all():
+            with self.subTest(partner=partner.full_name):
+                response = self.client.get(
+                    reverse("partner_statement", args=[partner.pk])
+                )
+
+                self.assertEqual(response.status_code, 200)
+
+    def test_capital_can_be_recorded_from_the_form(self):
+        partner = Partner.objects.order_by("full_name").first()
+
+        response = self.client.post(reverse("capital_record"), {
+            "partner": partner.pk,
+            "kind": CapitalTransaction.INVESTMENT,
+            "amount": "250000.00",
+            "date": timezone.localdate().isoformat(),
+            "method": "bank",
+            "reference": "TRX-1",
+            "note": "Opening capital",
+        })
+
+        self.assertRedirects(
+            response, reverse("partner_statement", args=[partner.pk])
+        )
+        self.assertEqual(partner.invested, Decimal("250000.00"))
+
+    def test_a_zero_capital_entry_is_refused(self):
+        partner = Partner.objects.first()
+
+        response = self.client.post(reverse("capital_record"), {
+            "partner": partner.pk, "kind": CapitalTransaction.INVESTMENT,
+            "amount": "0", "date": timezone.localdate().isoformat(),
+            "method": "bank",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CapitalTransaction.objects.count(), 0)
+
+    def test_shares_over_a_hundred_percent_are_refused(self):
+        """Handing out more than was earned has to be caught at the form."""
+        partner = Partner.objects.order_by("full_name").first()
+
+        response = self.client.post(
+            reverse("partner_edit", args=[partner.pk]),
+            {
+                "full_name": partner.full_name,
+                "share_percent": "40.00",       # the other three hold 75
+                "phone": "", "user": "", "joined_on": "",
+                "is_active": "on", "note": "",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+        partner.refresh_from_db()
+        self.assertEqual(partner.share_percent, Decimal("25.00"))
+
+    def test_the_statement_runs_a_balance_down_the_page(self):
+        partner = Partner.objects.order_by("full_name").first()
+
+        CapitalTransaction.objects.create(
+            partner=partner, kind=CapitalTransaction.INVESTMENT,
+            amount=Decimal("1000.00"), date=date(2026, 1, 1),
+        )
+        CapitalTransaction.objects.create(
+            partner=partner, kind=CapitalTransaction.DRAWING,
+            amount=Decimal("400.00"), date=date(2026, 2, 1),
+        )
+
+        entries = self.client.get(
+            reverse("partner_statement", args=[partner.pk])
+        ).context["entries"]
+
+        self.assertEqual(
+            [e["balance"] for e in entries],
+            [Decimal("1000.00"), Decimal("600.00")],
+        )
+
+    def test_the_field_team_cannot_see_the_partners_money(self):
+        """An MR login has no business reading what the owners are worth."""
+        mr_user = User.objects.create_user("ali", password="pw")
+        Employee.objects.create(
+            employee_code="MR-01", full_name="Ali", designation="mr",
+            user=mr_user,
+        )
+        UserRolls.objects.filter(user=mr_user).update(
+            role=UserRolls.ROLE_FIELD
+        )
+
+        self.client.logout()
+        self.client.login(username="ali", password="pw")
+
+        for name in ("partner_list", "profit_report", "capital_record"):
+            with self.subTest(url=name):
+                response = self.client.get(reverse(name))
+
+                self.assertEqual(response.status_code, 302)
+                self.assertNotIn("/partners/", response["Location"])

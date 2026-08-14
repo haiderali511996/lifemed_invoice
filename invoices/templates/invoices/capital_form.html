@@ -1,0 +1,49 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Record Capital{% endblock %}
+{% block content %}
+<div class="page-head"><h1>Record Capital</h1></div>
+
+<div class="card" style="max-width:640px">
+  <form method="POST" novalidate>
+    {% csrf_token %}
+
+    {% if form.non_field_errors %}
+    <div class="alert alert-error">
+      {% for e in form.non_field_errors %}{{ e }}{% endfor %}
+    </div>
+    {% endif %}
+
+    {% for field in form %}
+    <div class="field">
+      <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+      {{ field }}
+      {{ field.errors }}
+      {% if field.help_text %}<p class="help">{{ field.help_text }}</p>{% endif %}
+    </div>
+    {% endfor %}
+
+    <div style="display:flex;gap:10px;margin-top:22px">
+      <button type="submit" class="btn">Save</button>
+      <a href="{% url 'partner_list' %}" class="btn btn-grey">Cancel</a>
+    </div>
+  </form>
+
+  <p class="help" style="margin-top:18px">
+    <strong>Investment in</strong> is money a partner puts into the business.
+    <strong>Drawing out</strong> is money they take back. Neither is a
+    business cost, so neither changes the profit the shares are worked out
+    from — they move that partner's own capital only.
+  </p>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .field { margin-bottom:15px; }
+  .field label { display:block;margin-bottom:5px;font-size:13px;font-weight:600;color:#55657a; }
+  .field input, .field select, .field textarea {
+    width:100%;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;
+    font-size:14px;font-family:inherit; }
+  .help { font-size:12px;color:#8595a8;margin:5px 0 0; }
+</style>
+{% endblock %}

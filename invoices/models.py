@@ -265,6 +265,20 @@ class Item(models.Model):
         related_name="sold_items",
     )
 
+    # What this stock cost us, copied off the batch as the line is sold.
+    #
+    # Not read from the batch later: receiving more of the same batch number
+    # overwrites its cost price, which would silently rewrite the profit on
+    # every sale already made from it. Partners split that profit, so it has
+    # to stay exactly what it was on the day.
+    unit_cost = models.DecimalField(
+        max_digits=10, decimal_places=2, default=ZERO
+    )
+
+    @property
+    def cost_total(self):
+        return self.unit_cost * self.qty
+
 
 class Payment(models.Model):
     """Money received from a customer.
@@ -1572,11 +1586,21 @@ class SalesReturnItem(models.Model):
         related_name="returned_lines",
     )
 
+    # Carried over from the invoice line, for the same reason it is held
+    # there: the cost of these goods must not move after the fact.
+    unit_cost = models.DecimalField(
+        max_digits=10, decimal_places=2, default=ZERO
+    )
+
     @property
     def line_total(self):
         net = self.price - (self.price * self.discount / Decimal("100"))
 
         return (net * self.qty).quantize(ZERO)
+
+    @property
+    def cost_total(self):
+        return self.unit_cost * self.qty
 
 
 # ------------------------------------------------------------------ EXPENSES
@@ -1963,3 +1987,140 @@ class CallReport(models.Model):
     @property
     def samples_given(self):
         return self.sample_issue.total_units if self.sample_issue else 0
+
+
+# ------------------------------------------------------------------ OWNERSHIP
+
+class Partner(models.Model):
+    """A shareholder in the business.
+
+    The company is owned by its partners in fixed shares. Money they put in
+    and take out is recorded against them (see `CapitalTransaction`), and the
+    trading profit is split by `share_percent` - so each partner can see what
+    they have funded, what they have drawn, and what the business owes them.
+    """
+
+    full_name = models.CharField(max_length=150, unique=True)
+
+    share_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=ZERO,
+        help_text="Share of profit and loss. All partners together make 100.",
+    )
+
+    # Optional, so a partner who never signs in still has an account.
+    user = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="partnerships",
+        help_text="Their login, if they have one.",
+    )
+
+    joined_on = models.DateField(null=True, blank=True)
+    phone = models.CharField(max_length=50, blank=True)
+    note = models.TextField(blank=True)
+
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["full_name"]
+
+    def __str__(self):
+        return self.full_name
+
+    @classmethod
+    def total_share(cls):
+        """The active partners' shares added up. Should be exactly 100."""
+        return (
+            cls.objects.filter(is_active=True)
+            .aggregate(t=Sum("share_percent"))["t"] or ZERO
+        )
+
+    @classmethod
+    def shares_are_balanced(cls):
+        return cls.total_share() == Decimal("100.00")
+
+    def _capital(self, kind):
+        return (
+            self.capital_transactions.filter(kind=kind)
+            .aggregate(t=Sum("amount"))["t"] or ZERO
+        )
+
+    @property
+    def invested(self):
+        """Everything this partner has put into the business."""
+        return self._capital(CapitalTransaction.INVESTMENT)
+
+    @property
+    def drawn(self):
+        """Everything this partner has taken back out."""
+        return self._capital(CapitalTransaction.DRAWING)
+
+    @property
+    def net_contributed(self):
+        return self.invested - self.drawn
+
+    def share_of(self, amount):
+        """This partner's cut of a company-wide figure."""
+        return (
+            amount * self.share_percent / Decimal("100")
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+class CapitalTransaction(models.Model):
+    """Money a partner put in, or took out.
+
+    Deliberately separate from `Payment` and `Expense`: this is not trading,
+    it is ownership. Counting a partner's drawing as a business cost would
+    understate the profit that the same partner's share is calculated from.
+    """
+
+    INVESTMENT = "investment"
+    DRAWING = "drawing"
+
+    KIND_CHOICES = (
+        (INVESTMENT, "Investment in"),
+        (DRAWING, "Drawing out"),
+    )
+
+    METHOD_CHOICES = (
+        ("cash", "Cash"),
+        ("bank", "Bank transfer"),
+        ("cheque", "Cheque"),
+        ("stock", "Stock or goods"),
+        ("other", "Other"),
+    )
+
+    partner = models.ForeignKey(
+        Partner, on_delete=models.PROTECT, related_name="capital_transactions"
+    )
+
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES, default=INVESTMENT)
+
+    # Always positive. Which way it moves is `kind`, so a sign error cannot
+    # quietly turn an investment into a drawing.
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+
+    date = models.DateField(default=timezone.localdate)
+    method = models.CharField(max_length=20, choices=METHOD_CHOICES, default="bank")
+    reference = models.CharField(
+        max_length=100, blank=True, help_text="Cheque no. / transaction ID."
+    )
+    note = models.CharField(max_length=255, blank=True)
+
+    recorded_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="capital_entries",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date", "-id"]
+
+    def __str__(self):
+        return f"{self.partner.full_name} {self.get_kind_display()} {self.amount}"
+
+    @property
+    def signed_amount(self):
+        """Positive into the business, negative out of it."""
+        return self.amount if self.kind == self.INVESTMENT else -self.amount
