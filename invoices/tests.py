@@ -64,12 +64,14 @@ from .models import (
     SampleIssueItem,
     StockMovement,
     Supplier,
+    SupplierPayment,
     Target,
     Territory,
     UserRolls,
     WeeklyPlan,
     ZERO,
     is_super_admin,
+    supplier_account,
 )
 from .pdf import rows_per_page
 from .stock import StockError, adjust, allocate_fefo, issue, receive
@@ -7968,3 +7970,234 @@ class PartnerFundingNoticeTests(TestCase):
 
         self.assertContains(response, "paid out of the company")
         self.assertIn("25.00%", response.context["partner_note"])
+
+
+class SupplierPayableTests(TestCase):
+    """What we owe suppliers, and what settles it.
+
+    Deliberately the mirror of the customer side: a lump sum paid to a
+    supplier has to reach the bills it settles, or each bill goes on reading
+    unpaid while the supplier's account reads square.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.supplier = Supplier.objects.create(name="Getz Pharma")
+        self.product = Product.objects.create(code="PAN", name="Panadol")
+
+    def bill(self, amount, on=None, quantity=100):
+        """A purchase whose line total comes to `amount`."""
+        cost = Decimal(amount) / quantity
+
+        batch = Batch.objects.create(
+            product=self.product, batch_no=f"B-{Batch.objects.count() + 1}",
+            quantity=quantity, cost_price=cost,
+            expiry_date=timezone.localdate() + timedelta(days=700),
+        )
+        purchase = Purchase.objects.create(
+            supplier=self.supplier, date=on or timezone.localdate()
+        )
+        PurchaseItem.objects.create(
+            purchase=purchase, product=self.product, batch=batch,
+            quantity=quantity, cost_price=cost,
+        )
+
+        return purchase
+
+    def pay(self, amount, purchase=None, on=None):
+        return SupplierPayment.objects.create(
+            supplier=self.supplier, purchase=purchase, amount=Decimal(amount),
+            date=on or timezone.localdate(),
+        )
+
+    # ------------------------------------------------------------- the bill
+
+    def test_an_unpaid_bill_is_owed_in_full(self):
+        purchase = self.bill("10000.00")
+
+        self.assertEqual(purchase.total, Decimal("10000.00"))
+        self.assertEqual(purchase.amount_paid, ZERO)
+        self.assertEqual(purchase.balance, Decimal("10000.00"))
+        self.assertFalse(purchase.is_paid)
+
+    def test_paying_a_bill_settles_it(self):
+        purchase = self.bill("10000.00")
+
+        self.pay("10000.00", purchase=purchase)
+
+        self.assertEqual(purchase.balance, ZERO)
+        self.assertTrue(purchase.is_paid)
+
+    def test_a_part_payment_leaves_the_rest_owing(self):
+        purchase = self.bill("10000.00")
+
+        self.pay("4000.00", purchase=purchase)
+
+        self.assertEqual(purchase.balance, Decimal("6000.00"))
+
+    # ---------------------------------------------------------- on account
+
+    def test_money_paid_on_account_reaches_the_bills(self):
+        """The bug this mirrors on the customer side: a lump sum that never
+        lands on a bill leaves every bill reading unpaid."""
+        first = self.bill("3000.00", on=date(2026, 1, 1))
+        second = self.bill("2000.00", on=date(2026, 2, 1))
+
+        self.pay("5000.00")
+
+        self.assertEqual(first.balance, ZERO)
+        self.assertEqual(second.balance, ZERO)
+
+    def test_a_lump_sum_clears_the_oldest_bills_first(self):
+        oldest = self.bill("3000.00", on=date(2026, 1, 1))
+        newest = self.bill("4000.00", on=date(2026, 3, 1))
+
+        self.pay("5000.00")
+
+        self.assertEqual(oldest.balance, ZERO)
+        self.assertEqual(newest.balance, Decimal("2000.00"))
+
+    def test_a_payment_naming_a_bill_settles_that_one_first(self):
+        oldest = self.bill("3000.00", on=date(2026, 1, 1))
+        newest = self.bill("4000.00", on=date(2026, 3, 1))
+
+        self.pay("4000.00", purchase=newest)
+
+        self.assertEqual(newest.balance, ZERO)
+        self.assertEqual(oldest.balance, Decimal("3000.00"))
+
+    def test_paying_more_than_is_owed_stays_on_the_account(self):
+        self.bill("1000.00")
+
+        payment = self.pay("2500.00")
+
+        self.assertEqual(payment.unapplied, Decimal("1500.00"))
+
+    def test_two_payments_do_not_both_claim_one_bill(self):
+        purchase = self.bill("5000.00")
+
+        self.pay("2000.00")
+        self.pay("2000.00")
+
+        self.assertEqual(purchase.amount_paid, Decimal("4000.00"))
+        self.assertEqual(purchase.balance, Decimal("1000.00"))
+
+    # ------------------------------------------------------- the whole book
+
+    def test_the_supplier_account_adds_up(self):
+        self.bill("3000.00")
+        self.bill("2000.00")
+        self.pay("1500.00")
+
+        account = supplier_account(self.supplier)
+
+        self.assertEqual(account["billed"], Decimal("5000.00"))
+        self.assertEqual(account["paid"], Decimal("1500.00"))
+        self.assertEqual(account["outstanding"], Decimal("3500.00"))
+
+    def test_payables_are_listed_biggest_debt_first(self):
+        other = Supplier.objects.create(name="Sami Pharma")
+
+        self.bill("1000.00")
+
+        big = Purchase.objects.create(supplier=other, date=timezone.localdate())
+        batch = Batch.objects.create(
+            product=self.product, batch_no="B-big", quantity=100,
+            cost_price=Decimal("90.00"),
+            expiry_date=timezone.localdate() + timedelta(days=700),
+        )
+        PurchaseItem.objects.create(
+            purchase=big, product=self.product, batch=batch,
+            quantity=100, cost_price=Decimal("90.00"),
+        )
+
+        rows = finance.supplier_payables()["rows"]
+
+        self.assertEqual(rows[0]["supplier"], other)
+        self.assertEqual(rows[0]["outstanding"], Decimal("9000.00"))
+
+    def test_the_total_owed_is_reported(self):
+        self.bill("3000.00")
+        self.pay("1000.00")
+
+        self.assertEqual(finance.total_payables(), Decimal("2000.00"))
+
+    def test_a_supplier_with_no_dealings_is_left_off(self):
+        Supplier.objects.create(name="Never Used")
+        self.bill("1000.00")
+
+        rows = finance.supplier_payables()["rows"]
+
+        self.assertEqual(len(rows), 1)
+
+    # ------------------------------------------------------------ the pages
+
+    def test_the_payables_page_lists_the_supplier(self):
+        self.bill("3000.00")
+
+        html = self.client.get(reverse("payables_report")).content.decode()
+
+        self.assertIn("Getz Pharma", html)
+        self.assertIn("3000.00", html)
+
+    def test_the_statement_runs_a_balance_down_the_page(self):
+        self.bill("3000.00", on=date(2026, 1, 1))
+        self.pay("1000.00", on=date(2026, 1, 15))
+
+        entries = self.client.get(
+            reverse("supplier_statement", args=[self.supplier.pk])
+        ).context["entries"]
+
+        self.assertEqual(
+            [entry["balance"] for entry in entries],
+            [Decimal("3000.00"), Decimal("2000.00")],
+        )
+
+    def test_a_payment_can_be_recorded_from_the_form(self):
+        purchase = self.bill("3000.00")
+
+        response = self.client.post(
+            reverse("supplier_payment", args=[self.supplier.pk]),
+            {
+                "purchase": purchase.pk, "amount": "3000.00",
+                "date": timezone.localdate().isoformat(),
+                "method": "bank", "reference": "TRX-9", "note": "",
+            },
+        )
+
+        self.assertRedirects(
+            response, reverse("supplier_statement", args=[self.supplier.pk])
+        )
+        self.assertEqual(purchase.balance, ZERO)
+
+    def test_overpaying_one_bill_is_refused(self):
+        purchase = self.bill("3000.00")
+
+        response = self.client.post(
+            reverse("supplier_payment", args=[self.supplier.pk]),
+            {
+                "purchase": purchase.pk, "amount": "5000.00",
+                "date": timezone.localdate().isoformat(),
+                "method": "bank", "reference": "", "note": "",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(SupplierPayment.objects.count(), 0)
+
+    def test_the_field_team_cannot_see_what_the_company_owes(self):
+        mr_user = User.objects.create_user("ali", password="pw")
+        Employee.objects.create(
+            employee_code="MR-01", full_name="Ali", designation="mr",
+            user=mr_user,
+        )
+        UserRolls.objects.filter(user=mr_user).update(role=UserRolls.ROLE_FIELD)
+
+        self.client.logout()
+        self.client.login(username="ali", password="pw")
+
+        self.assertEqual(
+            self.client.get(reverse("payables_report")).status_code, 302
+        )

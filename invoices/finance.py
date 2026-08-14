@@ -42,6 +42,8 @@ from .models import (
     SalesReturn,
     SalesReturnItem,
     SampleIssueItem,
+    Supplier,
+    SupplierPayment,
     ZERO,
 )
 
@@ -1080,3 +1082,76 @@ def describe_partner_cost(amount, kind="cost"):
         )
 
     return f"This {verb} — {detail}."
+
+
+# ------------------------------------------------------------------ payables
+
+def supplier_payables():
+    """What is owed to each supplier, oldest debt first.
+
+    The mirror of the receivables ageing: a distributor that knows what it is
+    owed but not what it owes has only half its cash position.
+    """
+    rows = []
+
+    suppliers = Supplier.objects.prefetch_related(
+        "purchases__items", "purchases__allocations", "payments"
+    )
+
+    for supplier in suppliers:
+        billed = ZERO
+        outstanding = ZERO
+        oldest = None
+        bills = 0
+
+        for purchase in supplier.purchases.all():
+            billed += purchase.total
+            owing = purchase.balance
+
+            if owing > ZERO:
+                outstanding += owing
+                bills += 1
+                oldest = purchase.date if oldest is None else min(
+                    oldest, purchase.date
+                )
+
+        paid = supplier.payments.aggregate(t=Sum("amount"))["t"] or ZERO
+
+        if billed == ZERO and paid == ZERO:
+            continue
+
+        rows.append({
+            "supplier": supplier,
+            "billed": money(billed),
+            "paid": money(paid),
+            "outstanding": money(outstanding),
+            "unpaid_bills": bills,
+            "oldest": oldest,
+            "oldest_days": (date.today() - oldest).days if oldest else 0,
+        })
+
+    rows.sort(key=lambda row: row["outstanding"], reverse=True)
+
+    return {
+        "rows": rows,
+        "total_billed": money(sum((row["billed"] for row in rows), ZERO)),
+        "total_paid": money(sum((row["paid"] for row in rows), ZERO)),
+        "total_outstanding": money(
+            sum((row["outstanding"] for row in rows), ZERO)
+        ),
+    }
+
+
+def total_payables():
+    """Everything still owed to suppliers, as one figure."""
+    return supplier_payables()["total_outstanding"]
+
+
+def unpaid_expenses():
+    """Costs incurred and not yet paid out - a liability, not cash gone."""
+    return _sum(
+        Expense.objects.exclude(status=Expense.REJECTED).exclude(
+            status=Expense.PAID
+        ),
+        "amount",
+    )

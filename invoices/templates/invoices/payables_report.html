@@ -1,0 +1,87 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - What We Owe{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>🧾 What We Owe Suppliers</h1>
+  <button onclick="window.print()" class="btn btn-grey no-print">Print</button>
+</div>
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Billed by Suppliers</span>
+    <span class="stat-value">{{ payables.total_billed|floatformat:2 }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Paid to Them</span>
+    <span class="stat-value" style="color:#1e7b24">{{ payables.total_paid|floatformat:2 }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Still Owed</span>
+    <span class="stat-value" style="color:#a71d2a">
+      {{ payables.total_outstanding|floatformat:2 }}
+    </span>
+  </div>
+</div>
+
+<div class="card">
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Supplier</th>
+          <th class="num">Billed</th>
+          <th class="num">Paid</th>
+          <th class="num">Still Owed</th>
+          <th class="num">Unpaid Bills</th>
+          <th class="num">Oldest</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in payables.rows %}
+        <tr>
+          <td><strong>{{ row.supplier.name }}</strong></td>
+          <td class="num">{{ row.billed|floatformat:2 }}</td>
+          <td class="num" style="color:#1e7b24">{{ row.paid|floatformat:2 }}</td>
+          <td class="num">
+            {% if row.outstanding > 0 %}
+            <strong style="color:#a71d2a">{{ row.outstanding|floatformat:2 }}</strong>
+            {% else %}<span class="pill pill-paid">settled</span>{% endif %}
+          </td>
+          <td class="num">{{ row.unpaid_bills }}</td>
+          <td class="num">
+            {% if row.oldest %}{{ row.oldest_days }}d{% else %}-{% endif %}
+          </td>
+          <td style="white-space:nowrap">
+            <a href="{% url 'supplier_statement' row.supplier.id %}" class="btn btn-sm">Statement</a>
+            <a href="{% url 'supplier_payment' row.supplier.id %}" class="btn btn-sm btn-green">Pay</a>
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" style="text-align:center;padding:26px">
+          No purchases recorded yet.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+      {% if payables.rows %}
+      <tfoot>
+        <tr>
+          <th>Total</th>
+          <th class="num">{{ payables.total_billed|floatformat:2 }}</th>
+          <th class="num">{{ payables.total_paid|floatformat:2 }}</th>
+          <th class="num">{{ payables.total_outstanding|floatformat:2 }}</th>
+          <th colspan="3"></th>
+        </tr>
+      </tfoot>
+      {% endif %}
+    </table>
+  </div>
+
+  <p class="help-note" style="margin-top:12px">
+    A bill counts from the day the stock was received. Until a payment is
+    recorded here, the system treats the whole purchase as still owed — so
+    stock bought and paid for in cash needs its payment entering too, or this
+    page will overstate what you owe.
+  </p>
+</div>
+{% endblock %}

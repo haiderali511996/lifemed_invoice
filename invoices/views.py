@@ -35,6 +35,7 @@ from .forms import (
     BatchForm,
     StockAdjustmentForm,
     SupplierForm,
+    SupplierPaymentForm,
     TargetForm,
     TerritoryForm,
 )
@@ -75,6 +76,8 @@ from .models import (
     PurchaseItem,
     StockMovement,
     Supplier,
+    SupplierPayment,
+    supplier_account,
     Doctor,
     DoctorMove,
     Order,
@@ -4433,5 +4436,104 @@ def ageing_report(request):
             "active": "ageing",
             "ageing": ageing,
             "oldest": finance.oldest_debts(),
+        }
+    )
+
+
+# ------------------------------------------------------------- WHAT WE OWE
+
+@login_required
+def payables_report(request):
+    """What is owed to each supplier — the mirror of the customer ledgers."""
+    return render(
+        request,
+        "invoices/payables_report.html",
+        {
+            "active": "payables",
+            "payables": finance.supplier_payables(),
+        }
+    )
+
+
+@login_required
+def supplier_statement(request, supplier_id):
+    """One supplier's account: bills raised against payments made."""
+    supplier = get_object_or_404(Supplier, pk=supplier_id)
+
+    entries = []
+
+    for purchase in supplier.purchases.prefetch_related("items", "allocations"):
+        entries.append({
+            "date": purchase.date,
+            "kind": "bill",
+            "reference": purchase.reference or f"Purchase #{purchase.pk}",
+            "charge": purchase.total,
+            "paid": ZERO,
+            "purchase": purchase,
+        })
+
+    for payment in supplier.payments.all():
+        entries.append({
+            "date": payment.date,
+            "kind": "payment",
+            "reference": payment.reference or payment.get_method_display(),
+            "charge": ZERO,
+            "paid": payment.amount,
+            "payment": payment,
+        })
+
+    entries.sort(key=lambda entry: (entry["date"], entry["kind"] == "payment"))
+
+    running = ZERO
+
+    for entry in entries:
+        running += entry["charge"] - entry["paid"]
+        entry["balance"] = running
+
+    return render(
+        request,
+        "invoices/supplier_statement.html",
+        {
+            "active": "payables",
+            "supplier": supplier,
+            "entries": entries,
+            "account": supplier_account(supplier),
+        }
+    )
+
+
+@login_required
+def supplier_payment_create(request, supplier_id):
+    supplier = get_object_or_404(Supplier, pk=supplier_id)
+
+    if request.method == "POST":
+        form = SupplierPaymentForm(request.POST, supplier=supplier)
+
+        if form.is_valid():
+            payment = form.save(commit=False)
+            payment.supplier = supplier
+            payment.recorded_by = request.user
+            payment.save()
+
+            messages.success(
+                request,
+                f"Recorded {payment.amount:.2f} paid to {supplier.name}.",
+            )
+
+            return redirect("supplier_statement", supplier_id=supplier.pk)
+
+    else:
+        form = SupplierPaymentForm(
+            supplier=supplier, initial={"date": timezone.localdate()}
+        )
+
+    return render(
+        request,
+        "invoices/supplier_payment_form.html",
+        {
+            "active": "payables",
+            "form": form,
+            "supplier": supplier,
+            "account": supplier_account(supplier),
         }
     )

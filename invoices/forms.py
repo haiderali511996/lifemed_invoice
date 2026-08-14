@@ -21,6 +21,7 @@ from .models import (
     Product,
     Purchase,
     Supplier,
+    SupplierPayment,
     Target,
     Territory,
     UserRolls,
@@ -864,3 +865,65 @@ class CapitalTransactionForm(forms.ModelForm):
             raise forms.ValidationError("Amount must be greater than zero.")
 
         return amount
+
+
+class SupplierPaymentForm(forms.ModelForm):
+    """Money paid to a supplier, against a bill or on account."""
+
+    class Meta:
+        model = SupplierPayment
+        fields = ["purchase", "amount", "date", "method", "reference", "note"]
+        widgets = {
+            "date": forms.DateInput(attrs={"type": "date"}),
+            "amount": forms.NumberInput(attrs={"step": "0.01", "min": "0.01"}),
+            "reference": forms.TextInput(
+                attrs={"placeholder": "Cheque no. / transaction ID"}
+            ),
+        }
+
+    def __init__(self, *args, supplier=None, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.supplier = supplier
+
+        self.fields["purchase"].queryset = (
+            Purchase.objects.filter(supplier=supplier)
+            if supplier else Purchase.objects.none()
+        )
+        self.fields["purchase"].required = False
+        self.fields["purchase"].empty_label = (
+            "— Against the account (no particular bill) —"
+        )
+
+        self.fields["reference"].required = False
+        self.fields["note"].required = False
+
+    def clean_amount(self):
+        amount = self.cleaned_data["amount"]
+
+        if amount is None or amount <= Decimal("0"):
+            raise forms.ValidationError("Amount must be greater than zero.")
+
+        return amount
+
+    def clean(self):
+        cleaned = super().clean()
+
+        purchase = cleaned.get("purchase")
+        amount = cleaned.get("amount")
+
+        if purchase and amount:
+            # Overpaying one bill is nearly always a misallocation; the
+            # surplus belongs on the account instead.
+            outstanding = purchase.balance
+
+            if self.instance.pk:
+                outstanding += self.instance.amount
+
+            if amount > outstanding:
+                raise forms.ValidationError(
+                    f"That bill only has {outstanding:.2f} outstanding. "
+                    f"Record the extra against the account instead."
+                )
+
+        return cleaned

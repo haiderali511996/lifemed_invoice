@@ -1,0 +1,73 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - {{ supplier.name }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>🧾 {{ supplier.name }}</h1>
+  <div style="display:flex;gap:8px">
+    <a href="{% url 'supplier_payment' supplier.id %}" class="btn btn-green">＋ Record Payment</a>
+    <button onclick="window.print()" class="btn btn-grey no-print">Print</button>
+  </div>
+</div>
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Billed</span>
+    <span class="stat-value">{{ account.billed|floatformat:2 }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Paid</span>
+    <span class="stat-value" style="color:#1e7b24">{{ account.paid|floatformat:2 }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Still Owed</span>
+    <span class="stat-value" style="color:#a71d2a">{{ account.outstanding|floatformat:2 }}</span>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Account</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Entry</th>
+          <th>Reference</th>
+          <th class="num">Billed</th>
+          <th class="num">Paid</th>
+          <th class="num">Balance</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for entry in entries %}
+        <tr>
+          <td>{{ entry.date|date:"d M Y" }}</td>
+          <td>
+            {% if entry.kind == "bill" %}Goods received
+            {% else %}Payment{% endif %}
+          </td>
+          <td>{{ entry.reference }}</td>
+          <td class="num">
+            {% if entry.charge %}{{ entry.charge|floatformat:2 }}{% endif %}
+          </td>
+          <td class="num" style="color:#1e7b24">
+            {% if entry.paid %}{{ entry.paid|floatformat:2 }}{% endif %}
+          </td>
+          <td class="num"><strong>{{ entry.balance|floatformat:2 }}</strong></td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6" style="text-align:center;padding:26px">
+          Nothing recorded for {{ supplier.name }} yet.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="help-note" style="margin-top:12px">
+    A positive balance is money you owe them. Payments settle the bill they
+    name first, then the oldest bills outstanding.
+  </p>
+</div>
+{% endblock %}

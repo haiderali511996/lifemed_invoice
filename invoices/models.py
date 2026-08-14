@@ -1126,6 +1126,25 @@ class Supplier(models.Model):
         return self.name
 
 
+def supplier_account(supplier):
+    """What a supplier has been billed, paid and is still owed.
+
+    Purchase totals live in the line items rather than on a column, so this
+    walks them rather than aggregating - the numbers are small and always
+    agree with what the purchase screen shows.
+    """
+    purchases = supplier.purchases.prefetch_related("items", "allocations")
+
+    billed = sum((purchase.total for purchase in purchases), ZERO)
+    paid = supplier.payments.aggregate(t=Sum("amount"))["t"] or ZERO
+
+    return {
+        "billed": billed,
+        "paid": paid,
+        "outstanding": billed - paid,
+    }
+
+
 class Manufacturer(models.Model):
     """Who makes a product. Distinct from Supplier, who sells it to us.
 
@@ -1279,6 +1298,19 @@ class Purchase(models.Model):
         return sum(
             (line.line_total for line in self.items.all()), ZERO
         )
+
+    @property
+    def amount_paid(self):
+        """Read from allocations, so a lump sum on account reaches this bill."""
+        return self.allocations.aggregate(t=Sum("amount"))["t"] or ZERO
+
+    @property
+    def balance(self):
+        return self.total - self.amount_paid
+
+    @property
+    def is_paid(self):
+        return self.balance <= ZERO
 
 
 class PurchaseItem(models.Model):
@@ -2124,3 +2156,119 @@ class CapitalTransaction(models.Model):
     def signed_amount(self):
         """Positive into the business, negative out of it."""
         return self.amount if self.kind == self.INVESTMENT else -self.amount
+
+
+# ------------------------------------------------------------ WHAT WE OWE
+
+class SupplierPayment(models.Model):
+    """Money paid to a supplier.
+
+    Mirrors `Payment` on the customer side, allocations and all, for the same
+    reason: a lump sum settles several bills at once, and unless it is
+    recorded against them each bill goes on reading unpaid while the
+    supplier's account reads settled.
+    """
+
+    METHOD_CHOICES = (
+        ("cash", "Cash"),
+        ("bank", "Bank transfer"),
+        ("cheque", "Cheque"),
+        ("other", "Other"),
+    )
+
+    supplier = models.ForeignKey(
+        Supplier, on_delete=models.PROTECT, related_name="payments"
+    )
+    purchase = models.ForeignKey(
+        "Purchase", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="payments",
+        help_text="The bill this settles. Leave blank to pay on account.",
+    )
+
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    date = models.DateField(default=timezone.localdate)
+
+    method = models.CharField(max_length=20, choices=METHOD_CHOICES, default="bank")
+    reference = models.CharField(
+        max_length=100, blank=True, help_text="Cheque no. / transaction ID."
+    )
+    note = models.CharField(max_length=255, blank=True)
+
+    recorded_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="supplier_payments",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date", "-id"]
+
+    def __str__(self):
+        return f"{self.supplier.name} - {self.amount}"
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+
+        self.allocate()
+
+    def allocate(self):
+        """Spread this payment across the supplier's unpaid bills.
+
+        The bill it names is settled first, then the oldest outstanding ones,
+        which is what both sides assume a lump sum does.
+        """
+        self.allocations.all().delete()
+
+        remaining = self.amount
+
+        targets = []
+
+        if self.purchase_id is not None:
+            targets.append(self.purchase)
+
+        targets.extend(
+            Purchase.objects.filter(supplier_id=self.supplier_id)
+            .exclude(pk=self.purchase_id)
+            .order_by("date", "id")
+        )
+
+        for purchase in targets:
+            if remaining <= ZERO:
+                break
+
+            owing = purchase.balance
+
+            if owing <= ZERO:
+                continue
+
+            applied = min(remaining, owing)
+
+            PurchaseAllocation.objects.create(
+                payment=self, purchase=purchase, amount=applied
+            )
+
+            remaining -= applied
+
+    @property
+    def unapplied(self):
+        """Money paid ahead of any bill."""
+        applied = self.allocations.aggregate(t=Sum("amount"))["t"] or ZERO
+
+        return self.amount - applied
+
+
+class PurchaseAllocation(models.Model):
+    payment = models.ForeignKey(
+        SupplierPayment, on_delete=models.CASCADE, related_name="allocations"
+    )
+    purchase = models.ForeignKey(
+        "Purchase", on_delete=models.CASCADE, related_name="allocations"
+    )
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+
+    class Meta:
+        ordering = ["purchase__date", "purchase_id"]
+        unique_together = [("payment", "purchase")]
+
+    def __str__(self):
+        return f"{self.payment} -> {self.purchase} {self.amount}"
