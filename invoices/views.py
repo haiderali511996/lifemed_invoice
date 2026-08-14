@@ -15,6 +15,7 @@ from django.db import transaction
 from datetime import timedelta
 
 from .forms import (
+    AccountForm,
     CallPointForm,
     CallReportForm,
     CapitalTransactionForm,
@@ -48,6 +49,7 @@ from .planning import current_week_start, generate_plan, monday_of
 from django.contrib.auth.models import User
 
 from .models import (
+    Account,
     Batch,
     CallPoint,
     CallReport,
@@ -4535,5 +4537,90 @@ def supplier_payment_create(request, supplier_id):
             "form": form,
             "supplier": supplier,
             "account": supplier_account(supplier),
+        }
+    )
+
+
+@login_required
+def account_list(request):
+    """Where the money is, account by account."""
+    return render(
+        request,
+        "invoices/account_list.html",
+        {
+            "active": "accounts",
+            "rows": finance.account_balances(),
+            "total": finance.cash_on_hand(),
+        }
+    )
+
+
+@login_required
+def account_edit(request, account_id=None):
+    account = get_object_or_404(Account, pk=account_id) if account_id else None
+
+    if request.method == "POST":
+        form = AccountForm(request.POST, instance=account)
+
+        if form.is_valid():
+            saved = form.save()
+            messages.success(request, f"Saved {saved.name}.")
+
+            return redirect("account_list")
+
+    else:
+        form = AccountForm(instance=account)
+
+    return render(
+        request,
+        "invoices/account_form.html",
+        {
+            "active": "accounts",
+            "form": form,
+            "account": account,
+        }
+    )
+
+
+@login_required
+def cash_book(request):
+    """Every rupee in and out, with a running balance."""
+    account = Account.objects.filter(
+        pk=request.GET.get("account") or None
+    ).first()
+
+    start = parse_date(request.GET.get("start", ""))
+    end = parse_date(request.GET.get("end", ""))
+
+    if start is None and end is None:
+        end = timezone.localdate()
+        start = end - timedelta(days=29)
+
+    return render(
+        request,
+        "invoices/cash_book.html",
+        {
+            "active": "cash_book",
+            "book": finance.cash_book(account, start, end),
+            "accounts": Account.objects.filter(is_active=True),
+            "selected_account": account,
+            "start": start.isoformat() if start else "",
+            "end": end.isoformat() if end else "",
+        }
+    )
+
+
+@login_required
+def balance_sheet(request):
+    """What the business owns, owes, and what is left for the partners."""
+    equity = finance.partner_equity()
+
+    return render(
+        request,
+        "invoices/balance_sheet.html",
+        {
+            "active": "balance_sheet",
+            "sheet": equity["sheet"],
+            "rows": equity["rows"],
         }
     )

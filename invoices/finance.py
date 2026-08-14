@@ -27,6 +27,7 @@ from django.db.models import (
 from django.db.models.functions import Coalesce
 
 from .models import (
+    Account,
     Batch,
     CapitalTransaction,
     Customer,
@@ -42,6 +43,7 @@ from .models import (
     SalesReturn,
     SalesReturnItem,
     SampleIssueItem,
+    StockMovement,
     Supplier,
     SupplierPayment,
     ZERO,
@@ -195,6 +197,30 @@ def draft_payroll_runs(start=None, end=None):
     ).count()
 
 
+
+def stock_adjustments(start=None, end=None):
+    """Stock written off, or found, outside a sale or a purchase.
+
+    Binning expired goods is a real cost and never appeared as one: the
+    inventory dropped and the profit did not, so the partners were shown a
+    profit that included stock already in the skip. Negative here is a
+    write-off, positive is stock found.
+    """
+    return (
+        _between(
+            StockMovement.objects.filter(kind=StockMovement.ADJUSTMENT),
+            "created_at__date", start, end,
+        )
+        .aggregate(
+            t=Sum(
+                ExpressionWrapper(
+                    F("quantity") * F("batch__cost_price"), output_field=MONEY
+                )
+            )
+        )["t"] or ZERO
+    )
+
+
 def profit_and_loss(start=None, end=None):
     """The whole trading picture for a period, or for all time."""
     sales = revenue(start, end)
@@ -205,7 +231,10 @@ def profit_and_loss(start=None, end=None):
     expenses = operating_expenses(start, end)
     wages = employment_cost(start, end)
 
-    net = gross - samples - expenses - wages
+    # A write-off is negative, so subtracting it adds the loss to the costs.
+    adjustments = stock_adjustments(start, end)
+
+    net = gross - samples - expenses - wages + adjustments
 
     return {
         "revenue": money(sales),
@@ -217,7 +246,9 @@ def profit_and_loss(start=None, end=None):
         "samples": money(samples),
         "expenses": money(expenses),
         "wages": money(wages),
-        "total_costs": money(samples + expenses + wages),
+        "stock_adjustments": money(adjustments),
+        "stock_written_off": money(-adjustments if adjustments < ZERO else ZERO),
+        "total_costs": money(samples + expenses + wages - adjustments),
         "net_profit": money(net),
         "net_margin": money(net * Decimal("100") / sales) if sales else ZERO,
         "uncosted": uncosted_sales(start, end),
@@ -1155,3 +1186,242 @@ def unpaid_expenses():
         ),
         "amount",
     )
+
+
+# ------------------------------------------------------------ cash and bank
+
+def cash_movements(account=None, start=None, end=None):
+    """Every rupee in and out, oldest first.
+
+    Gathered from the records that are themselves the movement - a customer
+    payment, a supplier payment, a paid expense, capital in or out - rather
+    than written to a second ledger that could drift out of step with them.
+
+    Payroll is counted as paid in the month it was finalised. There is no
+    record of a payslip being handed over, so that is the closest true thing
+    the system knows.
+    """
+    rows = []
+
+    def belongs(obj):
+        return account is None or obj.account_id == account.pk
+
+    for payment in _between(
+        Payment.objects.select_related("customer", "account"),
+        "paid_on", start, end,
+    ):
+        if belongs(payment):
+            rows.append({
+                "date": payment.paid_on,
+                "kind": "Customer payment",
+                "detail": payment.customer.name,
+                "reference": payment.reference,
+                "account": payment.account,
+                "amount": payment.amount,
+            })
+
+    for payment in _between(
+        SupplierPayment.objects.select_related("supplier", "account"),
+        "date", start, end,
+    ):
+        if belongs(payment):
+            rows.append({
+                "date": payment.date,
+                "kind": "Paid supplier",
+                "detail": payment.supplier.name,
+                "reference": payment.reference,
+                "account": payment.account,
+                "amount": -payment.amount,
+            })
+
+    for expense in _between(
+        Expense.objects.filter(status=Expense.PAID).select_related(
+            "category", "account"
+        ),
+        "date", start, end,
+    ):
+        if belongs(expense):
+            rows.append({
+                "date": expense.date,
+                "kind": "Expense",
+                "detail": expense.category.name,
+                "reference": expense.reference,
+                "account": expense.account,
+                "amount": -expense.amount,
+            })
+
+    for entry in _between(
+        CapitalTransaction.objects.select_related("partner", "account"),
+        "date", start, end,
+    ):
+        if belongs(entry):
+            rows.append({
+                "date": entry.date,
+                "kind": entry.get_kind_display(),
+                "detail": entry.partner.full_name,
+                "reference": entry.reference,
+                "account": entry.account,
+                "amount": entry.signed_amount,
+            })
+
+    # Payroll has no account of its own to sit in, so it is only included
+    # when looking at the business as a whole.
+    if account is None:
+        for run in _between(
+            PayrollRun.objects.filter(status=PayrollRun.FINALISED),
+            "month", start, end,
+        ):
+            paid = run.total_net
+
+            if paid:
+                rows.append({
+                    "date": run.month,
+                    "kind": "Payroll",
+                    "detail": run.month.strftime("%B %Y"),
+                    "reference": "",
+                    "account": None,
+                    "amount": -paid,
+                })
+
+    rows.sort(key=lambda row: (row["date"], row["kind"]))
+
+    return rows
+
+
+def opening_balances(account=None):
+    accounts = Account.objects.filter(is_active=True)
+
+    if account is not None:
+        accounts = accounts.filter(pk=account.pk)
+
+    return _sum(accounts, "opening_balance")
+
+
+def cash_book(account=None, start=None, end=None):
+    """Movements with a running balance, and where it started from."""
+    rows = cash_movements(account, start, end)
+
+    # Anything before the window has already happened, so the balance the
+    # window opens on has to include it - otherwise the closing figure is
+    # wrong by exactly that much.
+    brought_forward = opening_balances(account) + sum(
+        (row["amount"] for row in cash_movements(account, None, None)
+         if start is not None and row["date"] < start),
+        ZERO,
+    )
+
+    running = brought_forward
+    entries = []
+
+    for row in rows:
+        running += row["amount"]
+        entries.append({**row, "balance": money(running)})
+
+    money_in = sum((r["amount"] for r in rows if r["amount"] > ZERO), ZERO)
+    money_out = sum((-r["amount"] for r in rows if r["amount"] < ZERO), ZERO)
+
+    return {
+        "entries": entries,
+        "brought_forward": money(brought_forward),
+        "money_in": money(money_in),
+        "money_out": money(money_out),
+        "closing": money(running),
+        "account": account,
+    }
+
+
+def cash_on_hand():
+    """What every account holds right now, in total."""
+    return cash_book()["closing"]
+
+
+def account_balances():
+    """Each account and what is in it."""
+    rows = []
+
+    for account in Account.objects.filter(is_active=True):
+        book = cash_book(account)
+
+        rows.append({
+            "account": account,
+            "opening": money(account.opening_balance),
+            "money_in": book["money_in"],
+            "money_out": book["money_out"],
+            "balance": book["closing"],
+        })
+
+    return rows
+
+
+# ------------------------------------------------------------- balance sheet
+
+def balance_sheet():
+    """What the business owns, what it owes, and whose the rest is.
+
+    The two sides are worked out independently and then set against each
+    other, and any difference is printed rather than forced to nil. A balance
+    sheet that has been made to balance by plugging the gap tells you nothing;
+    one that shows a gap tells you exactly where to look.
+    """
+    cash = cash_on_hand()
+    stock = stock_at_cost()
+    owed_to_us = receivables()
+
+    assets = cash + stock + owed_to_us
+
+    owed_by_us = total_payables()
+    unpaid = unpaid_expenses()
+
+    liabilities = owed_by_us + unpaid
+
+    opening = opening_balances()
+    introduced = capital_introduced()
+    withdrawn = capital_withdrawn()
+    retained = profit_and_loss()["net_profit"]
+
+    equity = opening + introduced - withdrawn + retained
+
+    return {
+        "cash": money(cash),
+        "stock": money(stock),
+        "receivables": money(owed_to_us),
+        "assets": money(assets),
+
+        "payables": money(owed_by_us),
+        "unpaid_expenses": money(unpaid),
+        "liabilities": money(liabilities),
+
+        "net_assets": money(assets - liabilities),
+
+        "opening_balances": money(opening),
+        "capital_introduced": money(introduced),
+        "capital_withdrawn": money(withdrawn),
+        "retained_profit": money(retained),
+        "equity": money(equity),
+
+        # Zero when every movement has been recorded. Anything else is real
+        # and worth chasing: stock received without a purchase behind it, or
+        # a cost that never reached the books.
+        "difference": money((assets - liabilities) - equity),
+    }
+
+
+def partner_equity():
+    """The equity split by share, so each partner sees their piece of it."""
+    sheet = balance_sheet()
+
+    rows = []
+
+    for partner in Partner.objects.filter(is_active=True):
+        rows.append({
+            "partner": partner,
+            "share_percent": partner.share_percent,
+            "capital": money(partner.net_contributed),
+            "profit_share": partner.share_of(sheet["retained_profit"]),
+            "total": money(
+                partner.net_contributed
+                + partner.share_of(sheet["retained_profit"])
+            ),
+        })
+
+    return {"sheet": sheet, "rows": rows}

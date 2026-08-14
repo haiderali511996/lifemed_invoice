@@ -626,6 +626,12 @@
           <a href="{% url 'payables_report' %}" class="{% if active == 'payables' %}active{% endif %}">
             🧾 <span>What We Owe</span>
           </a>
+          <a href="{% url 'cash_book' %}" class="{% if active == 'cash_book' %}active{% endif %}">
+            📗 <span>Cash Book</span>
+          </a>
+          <a href="{% url 'account_list' %}" class="{% if active == 'accounts' %}active{% endif %}">
+            🏦 <span>Cash &amp; Bank</span>
+          </a>
         </div>
 
         <button type="button" class="nav-section" data-nav-key="purchasing" onclick="toggleNavGroup(this)">
@@ -706,6 +712,9 @@
           </a>
           <a href="{% url 'assessment_report' %}" class="{% if active == 'assessment' %}active{% endif %}">
             📆 <span>Company Assessment</span>
+          </a>
+          <a href="{% url 'balance_sheet' %}" class="{% if active == 'balance_sheet' %}active{% endif %}">
+            ⚖️ <span>Balance Sheet</span>
           </a>
         </div>
 

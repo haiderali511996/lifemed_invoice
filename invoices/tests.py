@@ -30,6 +30,7 @@ from .forms import (
 from .layout import LayoutError, detect_layout
 from . import finance
 from .models import (
+    Account,
     Batch,
     CallPoint,
     CallReport,
@@ -8200,4 +8201,380 @@ class SupplierPayableTests(TestCase):
 
         self.assertEqual(
             self.client.get(reverse("payables_report")).status_code, 302
+        )
+
+
+class CashBookTests(TestCase):
+    """Where the money actually is."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.bank = Account.objects.create(
+            name="Meezan Current", kind=Account.BANK,
+            opening_balance=Decimal("100000.00"), is_default=True,
+        )
+        self.cash = Account.objects.create(
+            name="Cash Box", kind=Account.CASH,
+            opening_balance=Decimal("20000.00"),
+        )
+        self.customer = Customer.objects.create(name="Shifa", address="Lahore")
+
+    def test_an_account_starts_at_its_opening_balance(self):
+        self.assertEqual(finance.cash_book(self.bank)["closing"],
+                         Decimal("100000.00"))
+
+    def test_every_account_adds_into_the_total(self):
+        self.assertEqual(finance.cash_on_hand(), Decimal("120000.00"))
+
+    def test_a_customer_payment_is_money_in(self):
+        Payment.objects.create(
+            customer=self.customer, amount=Decimal("5000.00"), account=self.bank
+        )
+
+        self.assertEqual(finance.cash_book(self.bank)["closing"],
+                         Decimal("105000.00"))
+
+    def test_paying_a_supplier_is_money_out(self):
+        supplier = Supplier.objects.create(name="Getz")
+        SupplierPayment.objects.create(
+            supplier=supplier, amount=Decimal("30000.00"), account=self.bank
+        )
+
+        self.assertEqual(finance.cash_book(self.bank)["closing"],
+                         Decimal("70000.00"))
+
+    def test_an_unpaid_expense_is_not_money_out_yet(self):
+        """Approved is a bill; only Paid has actually left the account."""
+        category = ExpenseCategory.objects.create(
+            name="Rent", per_employee=False
+        )
+        Expense.objects.create(
+            category=category, amount=Decimal("9000.00"),
+            status=Expense.APPROVED, account=self.bank,
+            date=timezone.localdate(),
+        )
+
+        self.assertEqual(finance.cash_book(self.bank)["closing"],
+                         Decimal("100000.00"))
+
+    def test_a_paid_expense_leaves_the_account(self):
+        category = ExpenseCategory.objects.create(
+            name="Rent", per_employee=False
+        )
+        Expense.objects.create(
+            category=category, amount=Decimal("9000.00"),
+            status=Expense.PAID, account=self.bank, date=timezone.localdate(),
+        )
+
+        self.assertEqual(finance.cash_book(self.bank)["closing"],
+                         Decimal("91000.00"))
+
+    def test_capital_in_and_out_move_the_account(self):
+        partner = Partner.objects.order_by("full_name").first()
+
+        CapitalTransaction.objects.create(
+            partner=partner, kind=CapitalTransaction.INVESTMENT,
+            amount=Decimal("50000.00"), account=self.bank,
+            date=timezone.localdate(),
+        )
+        CapitalTransaction.objects.create(
+            partner=partner, kind=CapitalTransaction.DRAWING,
+            amount=Decimal("20000.00"), account=self.bank,
+            date=timezone.localdate(),
+        )
+
+        self.assertEqual(finance.cash_book(self.bank)["closing"],
+                         Decimal("130000.00"))
+
+    def test_one_accounts_money_is_not_anothers(self):
+        Payment.objects.create(
+            customer=self.customer, amount=Decimal("5000.00"), account=self.cash
+        )
+
+        self.assertEqual(finance.cash_book(self.bank)["closing"],
+                         Decimal("100000.00"))
+        self.assertEqual(finance.cash_book(self.cash)["closing"],
+                         Decimal("25000.00"))
+
+    def test_earlier_movements_are_brought_forward_into_a_window(self):
+        """A window that ignores what came before it closes on the wrong
+        figure by exactly that much."""
+        Payment.objects.create(
+            customer=self.customer, amount=Decimal("5000.00"),
+            account=self.bank, paid_on=date(2026, 1, 10),
+        )
+
+        book = finance.cash_book(self.bank, date(2026, 2, 1), date(2026, 2, 28))
+
+        self.assertEqual(book["brought_forward"], Decimal("105000.00"))
+        self.assertEqual(book["closing"], Decimal("105000.00"))
+
+    def test_the_pages_render(self):
+        for name in ("account_list", "cash_book"):
+            with self.subTest(page=name):
+                self.assertEqual(
+                    self.client.get(reverse(name)).status_code, 200
+                )
+
+
+class BalanceSheetTests(TestCase):
+    """Owns, owes, and whose the rest is - and whether it actually balances."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.account = Account.objects.create(
+            name="Bank", kind=Account.BANK, is_default=True
+        )
+        self.supplier = Supplier.objects.create(name="Getz Pharma")
+        self.product = Product.objects.create(code="PAN", name="Panadol")
+        self.partner = Partner.objects.order_by("full_name").first()
+
+    def put_in(self, amount):
+        return CapitalTransaction.objects.create(
+            partner=self.partner, kind=CapitalTransaction.INVESTMENT,
+            amount=Decimal(amount), account=self.account,
+            date=timezone.localdate(),
+        )
+
+    def buy(self, quantity, cost, pay=True):
+        batch = Batch.objects.create(
+            product=self.product, batch_no=f"B-{Batch.objects.count() + 1}",
+            quantity=quantity, cost_price=Decimal(cost),
+            expiry_date=timezone.localdate() + timedelta(days=700),
+        )
+        purchase = Purchase.objects.create(
+            supplier=self.supplier, date=timezone.localdate()
+        )
+        PurchaseItem.objects.create(
+            purchase=purchase, product=self.product, batch=batch,
+            quantity=quantity, cost_price=Decimal(cost),
+        )
+
+        if pay:
+            SupplierPayment.objects.create(
+                supplier=self.supplier, purchase=purchase,
+                amount=purchase.total, account=self.account,
+                date=timezone.localdate(),
+            )
+
+        return purchase, batch
+
+    def sell(self, batch, qty, price):
+        self.client.post(reverse("generate"), {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "", "sales_tax": "", "license_no": "L",
+            "item_name[]": ["Panadol"], "qty[]": [str(qty)],
+            "price[]": [str(price)], "discount[]": ["0"],
+            "batch[]": [batch.batch_no], "expiry[]": ["12/27"],
+            "stock_batch[]": [str(batch.pk)],
+        })
+
+        return Invoice.objects.order_by("-id").first()
+
+    # --------------------------------------------------------- the identity
+
+    def test_capital_put_in_and_left_alone_balances(self):
+        self.put_in("100000.00")
+
+        sheet = finance.balance_sheet()
+
+        self.assertEqual(sheet["cash"], Decimal("100000.00"))
+        self.assertEqual(sheet["equity"], Decimal("100000.00"))
+        self.assertEqual(sheet["difference"], ZERO)
+
+    def test_buying_stock_moves_cash_into_stock_and_still_balances(self):
+        self.put_in("100000.00")
+        self.buy(quantity=100, cost="200.00")       # 20,000 of stock
+
+        sheet = finance.balance_sheet()
+
+        self.assertEqual(sheet["cash"], Decimal("80000.00"))
+        self.assertEqual(sheet["stock"], Decimal("20000.00"))
+        self.assertEqual(sheet["assets"], Decimal("100000.00"))
+        self.assertEqual(sheet["difference"], ZERO)
+
+    def test_buying_on_credit_shows_as_a_liability_and_still_balances(self):
+        self.put_in("100000.00")
+        self.buy(quantity=100, cost="200.00", pay=False)
+
+        sheet = finance.balance_sheet()
+
+        self.assertEqual(sheet["cash"], Decimal("100000.00"))
+        self.assertEqual(sheet["stock"], Decimal("20000.00"))
+        self.assertEqual(sheet["payables"], Decimal("20000.00"))
+        self.assertEqual(sheet["net_assets"], Decimal("100000.00"))
+        self.assertEqual(sheet["difference"], ZERO)
+
+    def test_a_sale_on_credit_balances_and_shows_the_profit(self):
+        self.put_in("100000.00")
+        _, batch = self.buy(quantity=100, cost="200.00")
+
+        self.sell(batch, qty=10, price="300")       # 3,000 sold, cost 2,000
+
+        sheet = finance.balance_sheet()
+
+        self.assertEqual(sheet["receivables"], Decimal("3000.00"))
+        self.assertEqual(sheet["stock"], Decimal("18000.00"))
+        self.assertEqual(sheet["retained_profit"], Decimal("1000.00"))
+        self.assertEqual(sheet["difference"], ZERO)
+
+    def test_an_unpaid_expense_is_a_liability_and_still_balances(self):
+        self.put_in("100000.00")
+
+        category = ExpenseCategory.objects.create(
+            name="Rent", per_employee=False
+        )
+        Expense.objects.create(
+            category=category, amount=Decimal("9000.00"),
+            status=Expense.APPROVED, account=self.account,
+            date=timezone.localdate(),
+        )
+
+        sheet = finance.balance_sheet()
+
+        self.assertEqual(sheet["cash"], Decimal("100000.00"))
+        self.assertEqual(sheet["unpaid_expenses"], Decimal("9000.00"))
+        self.assertEqual(sheet["retained_profit"], Decimal("-9000.00"))
+        self.assertEqual(sheet["difference"], ZERO)
+
+    def test_a_paid_expense_leaves_cash_and_still_balances(self):
+        self.put_in("100000.00")
+
+        category = ExpenseCategory.objects.create(
+            name="Rent", per_employee=False
+        )
+        Expense.objects.create(
+            category=category, amount=Decimal("9000.00"),
+            status=Expense.PAID, account=self.account,
+            date=timezone.localdate(),
+        )
+
+        sheet = finance.balance_sheet()
+
+        self.assertEqual(sheet["cash"], Decimal("91000.00"))
+        self.assertEqual(sheet["unpaid_expenses"], ZERO)
+        self.assertEqual(sheet["difference"], ZERO)
+
+    def test_a_drawing_reduces_both_cash_and_the_partners_funds(self):
+        self.put_in("100000.00")
+
+        CapitalTransaction.objects.create(
+            partner=self.partner, kind=CapitalTransaction.DRAWING,
+            amount=Decimal("30000.00"), account=self.account,
+            date=timezone.localdate(),
+        )
+
+        sheet = finance.balance_sheet()
+
+        self.assertEqual(sheet["cash"], Decimal("70000.00"))
+        self.assertEqual(sheet["equity"], Decimal("70000.00"))
+        self.assertEqual(sheet["difference"], ZERO)
+
+    def test_a_whole_trading_cycle_still_balances(self):
+        self.put_in("500000.00")
+        _, batch = self.buy(quantity=1000, cost="200.00")     # 200,000
+
+        invoice = self.sell(batch, qty=400, price="320")      # 128,000
+
+        Payment.objects.create(
+            customer=invoice.customer, amount=Decimal("80000.00"),
+            account=self.account,
+        )
+
+        category = ExpenseCategory.objects.create(
+            name="Rent", per_employee=False
+        )
+        Expense.objects.create(
+            category=category, amount=Decimal("15000.00"),
+            status=Expense.PAID, account=self.account,
+            date=timezone.localdate(),
+        )
+        Expense.objects.create(
+            category=category, amount=Decimal("5000.00"),
+            status=Expense.APPROVED, account=self.account,
+            date=timezone.localdate(),
+        )
+
+        sheet = finance.balance_sheet()
+
+        self.assertEqual(sheet["difference"], ZERO)
+        self.assertEqual(sheet["net_assets"], sheet["equity"])
+
+    # ------------------------------------------------- stock written off
+
+    def test_writing_stock_off_is_a_cost_and_keeps_the_books_straight(self):
+        """Binning expired goods used to drop the stock and leave the profit
+        untouched, so the partners were shown money that was in the skip."""
+        self.put_in("100000.00")
+        _, batch = self.buy(quantity=100, cost="200.00")
+
+        # The screen takes the counted quantity, not a difference: 10 of the
+        # 100 were binned, so 90 are on the shelf.
+        self.client.post(reverse("batch_adjust", args=[batch.pk]), {
+            "counted_quantity": "90", "note": "Expired and destroyed",
+        })
+
+        sheet = finance.balance_sheet()
+
+        self.assertEqual(sheet["stock"], Decimal("18000.00"))
+        self.assertEqual(sheet["retained_profit"], Decimal("-2000.00"))
+        self.assertEqual(sheet["difference"], ZERO)
+
+    def test_the_write_off_shows_on_the_profit_report(self):
+        self.put_in("100000.00")
+        _, batch = self.buy(quantity=100, cost="200.00")
+
+        # The screen takes the counted quantity, not a difference: 10 of the
+        # 100 were binned, so 90 are on the shelf.
+        self.client.post(reverse("batch_adjust", args=[batch.pk]), {
+            "counted_quantity": "90", "note": "Expired and destroyed",
+        })
+
+        result = finance.profit_and_loss()
+
+        self.assertEqual(result["stock_written_off"], Decimal("2000.00"))
+        self.assertEqual(result["net_profit"], Decimal("-2000.00"))
+
+    # ---------------------------------------------------------- the page
+
+    def test_the_page_renders_and_says_it_balances(self):
+        self.put_in("100000.00")
+
+        response = self.client.get(reverse("balance_sheet"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "The books balance")
+
+    def test_an_unexplained_gap_is_shown_not_hidden(self):
+        """Stock that no purchase accounts for has to surface somewhere."""
+        Batch.objects.create(
+            product=self.product, batch_no="MYSTERY", quantity=50,
+            cost_price=Decimal("100.00"),
+            expiry_date=timezone.localdate() + timedelta(days=700),
+        )
+
+        response = self.client.get(reverse("balance_sheet"))
+
+        self.assertEqual(
+            response.context["sheet"]["difference"], Decimal("5000.00")
+        )
+        self.assertContains(response, "The two sides differ")
+
+    def test_the_field_team_cannot_see_the_balance_sheet(self):
+        mr_user = User.objects.create_user("ali", password="pw")
+        Employee.objects.create(
+            employee_code="MR-01", full_name="Ali", designation="mr",
+            user=mr_user,
+        )
+        UserRolls.objects.filter(user=mr_user).update(role=UserRolls.ROLE_FIELD)
+
+        self.client.logout()
+        self.client.login(username="ali", password="pw")
+
+        self.assertEqual(
+            self.client.get(reverse("balance_sheet")).status_code, 302
         )

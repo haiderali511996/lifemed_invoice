@@ -1,0 +1,51 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - {% if account %}{{ account.name }}{% else %}New Account{% endif %}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>{% if account %}Edit {{ account.name }}{% else %}New Account{% endif %}</h1>
+</div>
+
+<div class="card" style="max-width:640px">
+  <form method="POST" novalidate>
+    {% csrf_token %}
+
+    {% if form.non_field_errors %}
+    <div class="alert alert-error">
+      {% for e in form.non_field_errors %}{{ e }}{% endfor %}
+    </div>
+    {% endif %}
+
+    {% for field in form %}
+    <div class="field">
+      <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+      {{ field }}
+      {{ field.errors }}
+      {% if field.help_text %}<p class="help">{{ field.help_text }}</p>{% endif %}
+    </div>
+    {% endfor %}
+
+    <div style="display:flex;gap:10px;margin-top:22px">
+      <button type="submit" class="btn">Save</button>
+      <a href="{% url 'account_list' %}" class="btn btn-grey">Cancel</a>
+    </div>
+  </form>
+
+  <p class="help" style="margin-top:18px;border-top:1px solid #eef2f6;padding-top:14px">
+    The <strong>opening balance</strong> is what was in the account the day
+    you started recording here. It is treated as money the partners had
+    already put in, so the books still add up from day one.
+  </p>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .field { margin-bottom:15px; }
+  .field label { display:block;margin-bottom:5px;font-size:13px;font-weight:600;color:#55657a; }
+  .field input, .field select, .field textarea {
+    width:100%;padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;
+    font-size:14px;font-family:inherit; }
+  .field input[type=checkbox] { width:auto; }
+  .help { font-size:12px;color:#8595a8;margin:5px 0 0; }
+</style>
+{% endblock %}

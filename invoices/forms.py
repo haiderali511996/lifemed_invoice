@@ -3,6 +3,7 @@ from decimal import Decimal
 from django import forms
 
 from .models import (
+    Account,
     Batch,
     CallPoint,
     CallReport,
@@ -26,6 +27,29 @@ from .models import (
     Territory,
     UserRolls,
 )
+
+
+def _optional_account(form):
+    """Offer the accounts, pre-pick the usual one, never insist.
+
+    Money was being recorded long before any account existed, and a required
+    field here would block every one of those screens until somebody set an
+    account up.
+    """
+    field = form.fields.get("account")
+
+    if field is None:
+        return
+
+    field.required = False
+    field.queryset = Account.objects.filter(is_active=True)
+    field.empty_label = "— Not recorded —"
+
+    if not form.instance.pk and form.initial.get("account") is None:
+        default = Account.default()
+
+        if default is not None:
+            form.initial["account"] = default.pk
 
 
 class CustomerForm(forms.ModelForm):
@@ -91,7 +115,10 @@ class PaymentForm(forms.ModelForm):
 
     class Meta:
         model = Payment
-        fields = ["invoice", "amount", "method", "reference", "paid_on", "note"]
+        fields = [
+            "invoice", "amount", "method", "account", "reference",
+            "paid_on", "note",
+        ]
         widgets = {
             "paid_on": forms.DateInput(attrs={"type": "date"}),
             "note": forms.Textarea(attrs={"rows": 2}),
@@ -116,6 +143,8 @@ class PaymentForm(forms.ModelForm):
 
         self.fields["reference"].required = False
         self.fields["note"].required = False
+
+        _optional_account(self)
 
     def clean_amount(self):
         amount = self.cleaned_data["amount"]
@@ -485,7 +514,7 @@ class ExpenseForm(forms.ModelForm):
         model = Expense
         fields = [
             "category", "employee", "territory", "date", "amount",
-            "description", "reference", "receipt",
+            "description", "reference", "receipt", "account",
         ]
         widgets = {
             "date": forms.DateInput(attrs={"type": "date"}),
@@ -504,6 +533,8 @@ class ExpenseForm(forms.ModelForm):
         self.fields["territory"].required = False
         self.fields["description"].required = False
         self.fields["reference"].required = False
+
+        _optional_account(self)
 
     def clean_amount(self):
         amount = self.cleaned_data["amount"]
@@ -840,7 +871,10 @@ class CapitalTransactionForm(forms.ModelForm):
 
     class Meta:
         model = CapitalTransaction
-        fields = ["partner", "kind", "amount", "date", "method", "reference", "note"]
+        fields = [
+            "partner", "kind", "amount", "date", "method", "account",
+            "reference", "note",
+        ]
         widgets = {
             "date": forms.DateInput(attrs={"type": "date"}),
             "amount": forms.NumberInput(attrs={"step": "0.01", "min": "0.01"}),
@@ -855,6 +889,8 @@ class CapitalTransactionForm(forms.ModelForm):
         self.fields["partner"].queryset = Partner.objects.filter(is_active=True)
         self.fields["reference"].required = False
         self.fields["note"].required = False
+
+        _optional_account(self)
 
     def clean_amount(self):
         amount = self.cleaned_data["amount"]
@@ -872,7 +908,10 @@ class SupplierPaymentForm(forms.ModelForm):
 
     class Meta:
         model = SupplierPayment
-        fields = ["purchase", "amount", "date", "method", "reference", "note"]
+        fields = [
+            "purchase", "amount", "date", "method", "account",
+            "reference", "note",
+        ]
         widgets = {
             "date": forms.DateInput(attrs={"type": "date"}),
             "amount": forms.NumberInput(attrs={"step": "0.01", "min": "0.01"}),
@@ -897,6 +936,8 @@ class SupplierPaymentForm(forms.ModelForm):
 
         self.fields["reference"].required = False
         self.fields["note"].required = False
+
+        _optional_account(self)
 
     def clean_amount(self):
         amount = self.cleaned_data["amount"]
@@ -927,3 +968,32 @@ class SupplierPaymentForm(forms.ModelForm):
                 )
 
         return cleaned
+
+
+class AccountForm(forms.ModelForm):
+    """A cash box or a bank account."""
+
+    class Meta:
+        model = Account
+        fields = [
+            "name", "kind", "bank_name", "account_number",
+            "opening_balance", "opened_on", "is_active", "is_default", "note",
+        ]
+        widgets = {
+            "opened_on": forms.DateInput(attrs={"type": "date"}),
+            "opening_balance": forms.NumberInput(attrs={"step": "0.01"}),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        for name in ("bank_name", "account_number", "note"):
+            self.fields[name].required = False
+
+    def clean_name(self):
+        name = self.cleaned_data["name"].strip()
+
+        if not name:
+            raise forms.ValidationError("Give the account a name.")
+
+        return name

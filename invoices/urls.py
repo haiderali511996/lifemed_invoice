@@ -31,6 +31,11 @@ urlpatterns = [
     path('partners/capital/', views.capital_record, name='capital_record'),
     path('partners/profit/', views.profit_report, name='profit_report'),
     path(
+        'partners/balance-sheet/',
+        views.balance_sheet,
+        name='balance_sheet',
+    ),
+    path(
         'partners/assessment/',
         views.assessment_report,
         name='assessment_report',
@@ -217,6 +222,14 @@ urlpatterns = [
     path('expenses/new/', views.expense_edit, name='expense_new'),
     path('reports/sales/', views.sales_report, name='sales_report'),
     path('reports/ageing/', views.ageing_report, name='ageing_report'),
+    path('accounts/', views.account_list, name='account_list'),
+    path('accounts/new/', views.account_edit, name='account_new'),
+    path('accounts/book/', views.cash_book, name='cash_book'),
+    path(
+        'accounts/<int:account_id>/edit/',
+        views.account_edit,
+        name='account_edit',
+    ),
     path('payables/', views.payables_report, name='payables_report'),
     path(
         'payables/<int:supplier_id>/',

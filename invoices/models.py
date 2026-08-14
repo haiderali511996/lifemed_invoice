@@ -312,6 +312,13 @@ class Payment(models.Model):
         max_length=100, blank=True, help_text="Cheque number, transaction ID, etc."
     )
     paid_on = models.DateField(default=timezone.localdate)
+
+    # Where the money landed. Optional, so payments taken before any account
+    # existed are not rewritten into one they never went to.
+    account = models.ForeignKey(
+        "Account", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="customer_payments",
+    )
     note = models.TextField(blank=True)
 
     recorded_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
@@ -1698,6 +1705,13 @@ class Expense(models.Model):
 
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=PENDING)
 
+    # Which account it was paid from. Only meaningful once status is Paid;
+    # an approved claim not yet settled is a liability, not cash gone.
+    account = models.ForeignKey(
+        "Account", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="expenses",
+    )
+
     submitted_by = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, related_name="submitted_expenses"
     )
@@ -2140,6 +2154,11 @@ class CapitalTransaction(models.Model):
     )
     note = models.CharField(max_length=255, blank=True)
 
+    account = models.ForeignKey(
+        "Account", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="capital_entries",
+    )
+
     recorded_by = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True,
         related_name="capital_entries",
@@ -2193,6 +2212,11 @@ class SupplierPayment(models.Model):
         max_length=100, blank=True, help_text="Cheque no. / transaction ID."
     )
     note = models.CharField(max_length=255, blank=True)
+
+    account = models.ForeignKey(
+        "Account", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="supplier_payments",
+    )
 
     recorded_by = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True,
@@ -2272,3 +2296,59 @@ class PurchaseAllocation(models.Model):
 
     def __str__(self):
         return f"{self.payment} -> {self.purchase} {self.amount}"
+
+
+# --------------------------------------------------------------- CASH & BANK
+
+class Account(models.Model):
+    """A place money actually sits: the cash box, or a bank account.
+
+    Without one, the system could say what was earned and what was owed but
+    never where the money was - which is why the partners' funds and the
+    business's assets could not be set against each other.
+    """
+
+    CASH = "cash"
+    BANK = "bank"
+
+    KIND_CHOICES = ((CASH, "Cash in hand"), (BANK, "Bank account"))
+
+    name = models.CharField(max_length=120, unique=True)
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES, default=BANK)
+
+    bank_name = models.CharField(max_length=120, blank=True)
+    account_number = models.CharField(max_length=60, blank=True)
+
+    # What was in it before the system started counting. Treated as capital
+    # brought forward, so the balance sheet still adds up on day one.
+    opening_balance = models.DecimalField(
+        max_digits=14, decimal_places=2, default=ZERO,
+        help_text="What was in it the day you started using this system.",
+    )
+    opened_on = models.DateField(default=timezone.localdate)
+
+    is_active = models.BooleanField(default=True)
+    is_default = models.BooleanField(
+        default=False, help_text="Pre-selected when money is recorded."
+    )
+
+    note = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+
+        if self.is_default:
+            Account.objects.exclude(pk=self.pk).update(is_default=False)
+
+    @classmethod
+    def default(cls):
+        return (
+            cls.objects.filter(is_active=True, is_default=True).first()
+            or cls.objects.filter(is_active=True).first()
+        )

@@ -1,0 +1,170 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Balance Sheet{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>⚖️ Balance Sheet</h1>
+  <button onclick="window.print()" class="btn btn-grey no-print">Print</button>
+</div>
+
+{% if sheet.difference %}
+<div class="alert alert-warn">
+  <strong>The two sides differ by {{ sheet.difference|floatformat:2 }}.</strong>
+  This is shown rather than hidden. It usually means stock on the shelves that
+  no purchase accounts for, an opening balance not entered, or money that
+  moved without being recorded. Everything below is still correct as far as it
+  goes — the gap is the part that is not recorded anywhere.
+</div>
+{% else %}
+<div class="alert" style="background:#eaf7ea;border:1px solid #b7e0b7">
+  <strong>The books balance.</strong> What the business owns, less what it
+  owes, is exactly what the partners have in it.
+</div>
+{% endif %}
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Owns</span>
+    <span class="stat-value">{{ sheet.assets|floatformat:2 }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Owes</span>
+    <span class="stat-value" style="color:#a71d2a">{{ sheet.liabilities|floatformat:2 }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Worth to the Partners</span>
+    <span class="stat-value" style="color:{% if sheet.net_assets < 0 %}#a71d2a{% else %}#1e7b24{% endif %}">
+      {{ sheet.net_assets|floatformat:2 }}
+    </span>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">What the Business Owns</h3>
+  <div style="overflow-x:auto">
+    <table>
+      <tbody>
+        <tr>
+          <td>Cash and bank</td>
+          <td class="num">{{ sheet.cash|floatformat:2 }}</td>
+        </tr>
+        <tr>
+          <td>Stock on the shelves, at cost</td>
+          <td class="num">{{ sheet.stock|floatformat:2 }}</td>
+        </tr>
+        <tr>
+          <td>Owed by customers</td>
+          <td class="num">{{ sheet.receivables|floatformat:2 }}</td>
+        </tr>
+        <tr style="border-top:2px solid #dbe2ea">
+          <td><strong>Total assets</strong></td>
+          <td class="num"><strong>{{ sheet.assets|floatformat:2 }}</strong></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">What the Business Owes</h3>
+  <div style="overflow-x:auto">
+    <table>
+      <tbody>
+        <tr>
+          <td>Owed to suppliers</td>
+          <td class="num">{{ sheet.payables|floatformat:2 }}</td>
+        </tr>
+        <tr>
+          <td>Expenses approved but not yet paid</td>
+          <td class="num">{{ sheet.unpaid_expenses|floatformat:2 }}</td>
+        </tr>
+        <tr style="border-top:2px solid #dbe2ea">
+          <td><strong>Total liabilities</strong></td>
+          <td class="num"><strong>{{ sheet.liabilities|floatformat:2 }}</strong></td>
+        </tr>
+        <tr style="border-top:2px solid #dbe2ea">
+          <td><strong>Net assets — owns less owes</strong></td>
+          <td class="num"><strong style="font-size:18px">{{ sheet.net_assets|floatformat:2 }}</strong></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Whose It Is</h3>
+  <div style="overflow-x:auto">
+    <table>
+      <tbody>
+        <tr>
+          <td>Balances brought forward on the accounts</td>
+          <td class="num">{{ sheet.opening_balances|floatformat:2 }}</td>
+        </tr>
+        <tr>
+          <td>Capital put in by the partners</td>
+          <td class="num">{{ sheet.capital_introduced|floatformat:2 }}</td>
+        </tr>
+        <tr>
+          <td>Less: drawings taken out</td>
+          <td class="num" style="color:#a71d2a">({{ sheet.capital_withdrawn|floatformat:2 }})</td>
+        </tr>
+        <tr>
+          <td>Profit kept in the business</td>
+          <td class="num">{{ sheet.retained_profit|floatformat:2 }}</td>
+        </tr>
+        <tr style="border-top:2px solid #dbe2ea">
+          <td><strong>Partners' funds</strong></td>
+          <td class="num"><strong style="font-size:18px">{{ sheet.equity|floatformat:2 }}</strong></td>
+        </tr>
+        {% if sheet.difference %}
+        <tr style="border-top:2px solid #dbe2ea">
+          <td style="color:#a71d2a">Unexplained difference</td>
+          <td class="num" style="color:#a71d2a">{{ sheet.difference|floatformat:2 }}</td>
+        </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Each Partner's Stake</h3>
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Partner</th>
+          <th class="num">Share</th>
+          <th class="num">Capital</th>
+          <th class="num">Share of Profit</th>
+          <th class="num">Stake</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td>
+            <a href="{% url 'partner_statement' row.partner.id %}">
+              {{ row.partner.full_name }}
+            </a>
+          </td>
+          <td class="num">{{ row.share_percent|floatformat:2 }}%</td>
+          <td class="num">{{ row.capital|floatformat:2 }}</td>
+          <td class="num">{{ row.profit_share|floatformat:2 }}</td>
+          <td class="num"><strong>{{ row.total|floatformat:2 }}</strong></td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5" style="text-align:center;padding:26px">
+          No partners recorded.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="help-note" style="margin-top:12px">
+    A partner's stake is their own capital plus their share of the profit the
+    business has kept. It does not include the accounts' opening balances,
+    which were in the business before any partner capital was recorded.
+  </p>
+</div>
+{% endblock %}

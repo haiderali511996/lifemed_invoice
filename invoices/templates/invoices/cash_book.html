@@ -1,0 +1,111 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Cash Book{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>📗 Cash Book{% if selected_account %} — {{ selected_account.name }}{% endif %}</h1>
+  <button onclick="window.print()" class="btn btn-grey no-print">Print</button>
+</div>
+
+<div class="card no-print" style="margin-bottom:16px">
+  <form method="GET" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+    <div>
+      <label style="display:block;font-size:12px;color:#55657a;margin-bottom:4px">Account</label>
+      <select name="account" style="padding:8px 11px;border:1px solid #dbe2ea;border-radius:7px">
+        <option value="">All accounts</option>
+        {% for a in accounts %}
+        <option value="{{ a.id }}" {% if selected_account and selected_account.id == a.id %}selected{% endif %}>
+          {{ a.name }}
+        </option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label style="display:block;font-size:12px;color:#55657a;margin-bottom:4px">From</label>
+      <input type="date" name="start" value="{{ start }}"
+             style="padding:8px 11px;border:1px solid #dbe2ea;border-radius:7px" />
+    </div>
+    <div>
+      <label style="display:block;font-size:12px;color:#55657a;margin-bottom:4px">To</label>
+      <input type="date" name="end" value="{{ end }}"
+             style="padding:8px 11px;border:1px solid #dbe2ea;border-radius:7px" />
+    </div>
+    <button type="submit" class="btn">Show</button>
+  </form>
+</div>
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Brought Forward</span>
+    <span class="stat-value">{{ book.brought_forward|floatformat:2 }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Money In</span>
+    <span class="stat-value" style="color:#1e7b24">{{ book.money_in|floatformat:2 }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Money Out</span>
+    <span class="stat-value" style="color:#a71d2a">{{ book.money_out|floatformat:2 }}</span>
+  </div>
+  <div class="card stat">
+    <span class="stat-label">Closing Balance</span>
+    <span class="stat-value" style="color:{% if book.closing < 0 %}#a71d2a{% else %}#1e7b24{% endif %}">
+      {{ book.closing|floatformat:2 }}
+    </span>
+  </div>
+</div>
+
+<div class="card">
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Entry</th>
+          <th>Detail</th>
+          <th>Account</th>
+          <th>Reference</th>
+          <th class="num">In</th>
+          <th class="num">Out</th>
+          <th class="num">Balance</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr style="background:#f7f9fc">
+          <td colspan="7"><em>Brought forward</em></td>
+          <td class="num"><strong>{{ book.brought_forward|floatformat:2 }}</strong></td>
+        </tr>
+        {% for entry in book.entries %}
+        <tr>
+          <td>{{ entry.date|date:"d M Y" }}</td>
+          <td>{{ entry.kind }}</td>
+          <td>{{ entry.detail }}</td>
+          <td>
+            {% if entry.account %}{{ entry.account.name }}
+            {% else %}<span class="muted">not recorded</span>{% endif %}
+          </td>
+          <td>{{ entry.reference|default:"-" }}</td>
+          <td class="num" style="color:#1e7b24">
+            {% if entry.amount > 0 %}{{ entry.amount|floatformat:2 }}{% endif %}
+          </td>
+          <td class="num" style="color:#a71d2a">
+            {% if entry.amount < 0 %}{{ entry.amount|floatformat:2|cut:"-" }}{% endif %}
+          </td>
+          <td class="num"><strong>{{ entry.balance|floatformat:2 }}</strong></td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="8" style="text-align:center;padding:26px">
+          No money moved between these dates.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="help-note" style="margin-top:12px">
+    An expense counts as money out only once it is marked Paid — approved and
+    unpaid is a bill, not a payment. Payroll counts in the month its run was
+    finalised, which is the closest the system knows to the day it was handed
+    over.
+  </p>
+</div>
+{% endblock %}

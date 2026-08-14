@@ -1,0 +1,75 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Cash &amp; Bank{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>🏦 Cash &amp; Bank</h1>
+  <div style="display:flex;gap:8px">
+    <a href="{% url 'cash_book' %}" class="btn btn-grey">Cash Book</a>
+    <a href="{% url 'account_new' %}" class="btn">＋ New Account</a>
+  </div>
+</div>
+
+<div class="stat-grid">
+  <div class="card stat">
+    <span class="stat-label">Money on Hand</span>
+    <span class="stat-value" style="color:{% if total < 0 %}#a71d2a{% else %}#1e7b24{% endif %}">
+      {{ total|floatformat:2 }}
+    </span>
+    <span class="stat-sub">across every account</span>
+  </div>
+</div>
+
+<div class="card">
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Account</th>
+          <th>Type</th>
+          <th class="num">Opening</th>
+          <th class="num">In</th>
+          <th class="num">Out</th>
+          <th class="num">Balance</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td>
+            <strong>{{ row.account.name }}</strong>
+            {% if row.account.bank_name %}
+            <br /><span class="muted" style="font-size:11px">
+              {{ row.account.bank_name }}
+              {% if row.account.account_number %} · {{ row.account.account_number }}{% endif %}
+            </span>
+            {% endif %}
+          </td>
+          <td>{{ row.account.get_kind_display }}</td>
+          <td class="num">{{ row.opening|floatformat:2 }}</td>
+          <td class="num" style="color:#1e7b24">{{ row.money_in|floatformat:2 }}</td>
+          <td class="num" style="color:#a71d2a">{{ row.money_out|floatformat:2 }}</td>
+          <td class="num"><strong>{{ row.balance|floatformat:2 }}</strong></td>
+          <td style="white-space:nowrap">
+            <a href="{% url 'cash_book' %}?account={{ row.account.id }}" class="btn btn-sm">Book</a>
+            <a href="{% url 'account_edit' row.account.id %}" class="btn btn-sm btn-grey">Edit</a>
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" style="text-align:center;padding:26px">
+          No accounts yet. Add your cash box and each bank account, with what
+          was in them the day you started using this system.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="help-note" style="margin-top:12px">
+    A balance here is the opening figure plus everything recorded since:
+    customer payments in, supplier payments and paid expenses out, and
+    partners' capital both ways. Money recorded without an account picked is
+    left out of these rows but still counts in the Cash Book total.
+  </p>
+</div>
+{% endblock %}
