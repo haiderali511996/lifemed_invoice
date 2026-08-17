@@ -31,6 +31,11 @@ urlpatterns = [
     path('partners/capital/', views.capital_record, name='capital_record'),
     path('partners/profit/', views.profit_report, name='profit_report'),
     path(
+        'partners/expenses/',
+        views.expense_share_report,
+        name='expense_shares',
+    ),
+    path(
         'partners/balance-sheet/',
         views.balance_sheet,
         name='balance_sheet',

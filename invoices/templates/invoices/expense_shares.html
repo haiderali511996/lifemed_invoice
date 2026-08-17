@@ -1,0 +1,146 @@
+{% extends "invoices/base.html" %}
+{% block title %}LifeMed Pharma - Expense Shares{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>🧮 Expense Shares</h1>
+  <button onclick="window.print()" class="btn btn-grey no-print">Print</button>
+</div>
+
+<div class="card no-print" style="margin-bottom:16px">
+  <form method="GET" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+    <div>
+      <label style="display:block;font-size:12px;color:#55657a;margin-bottom:4px">From</label>
+      <input type="date" name="start" value="{{ start }}"
+             style="padding:8px 11px;border:1px solid #dbe2ea;border-radius:7px" />
+    </div>
+    <div>
+      <label style="display:block;font-size:12px;color:#55657a;margin-bottom:4px">To</label>
+      <input type="date" name="end" value="{{ end }}"
+             style="padding:8px 11px;border:1px solid #dbe2ea;border-radius:7px" />
+    </div>
+    <button type="submit" class="btn">Show</button>
+    {% if start or end %}
+    <a href="{% url 'expense_shares' %}" class="btn btn-grey">All time</a>
+    {% endif %}
+  </form>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">What Each Partner Carries</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Partner</th>
+          <th class="num">Share</th>
+          <th class="num">Their Share of Expenses</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in shares.partner_totals %}
+        <tr>
+          <td>
+            <a href="{% url 'partner_statement' row.partner.id %}">
+              {{ row.partner.full_name }}
+            </a>
+          </td>
+          <td class="num">{{ row.partner.share_percent|floatformat:2 }}%</td>
+          <td class="num">
+            <strong style="color:#a71d2a">{{ row.amount|floatformat:2 }}</strong>
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="3" style="text-align:center;padding:26px">
+          No active partners.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr>
+          <th colspan="2" style="text-align:right">Company expenses</th>
+          <th class="num">{{ shares.total|floatformat:2 }}</th>
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+
+  <p class="help-note" style="margin-top:12px">
+    Every expense is carried by the partners in their shares. It reduces the
+    profit they divide, and so reduces what each of them is owed by exactly
+    the amount above.
+  </p>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Expense by Expense</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Expense</th>
+          <th>Status</th>
+          <th class="num">Amount</th>
+          {% for partner in shares.partners %}
+          <th class="num">{{ partner.full_name }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in shares.rows %}
+        <tr>
+          <td>{{ row.expense.date|date:"d M Y" }}</td>
+          <td>
+            <strong>{{ row.expense.category.name }}</strong>
+            {% if row.expense.description %}
+            <br /><span class="muted" style="font-size:11px">{{ row.expense.description }}</span>
+            {% endif %}
+            {% if row.expense.employee %}
+            <br /><span class="muted" style="font-size:11px">claimed by {{ row.expense.employee.full_name }}</span>
+            {% endif %}
+          </td>
+          <td>
+            <span class="pill">{{ row.expense.get_status_display }}</span>
+          </td>
+          <td class="num"><strong>{{ row.expense.amount|floatformat:2 }}</strong></td>
+          {% for share in row.shares %}
+          <td class="num" style="color:#a71d2a">{{ share.amount|floatformat:2 }}</td>
+          {% endfor %}
+        </tr>
+        {% empty %}
+        <tr>
+          <td colspan="{{ shares.partners|length|add:4 }}" style="text-align:center;padding:26px">
+            No expenses in this period.
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      {% if shares.rows %}
+      <tfoot>
+        <tr>
+          <th colspan="3" style="text-align:right">Total</th>
+          <th class="num">{{ shares.total|floatformat:2 }}</th>
+          {% for row in shares.partner_totals %}
+          <th class="num">{{ row.amount|floatformat:2 }}</th>
+          {% endfor %}
+        </tr>
+      </tfoot>
+      {% endif %}
+    </table>
+  </div>
+
+  {% if shares.shown < shares.count %}
+  <p class="help-note" style="margin-top:12px">
+    Showing the {{ shares.shown }} most recent of {{ shares.count }} expenses.
+    The totals above cover all of them. Narrow the dates to see the rest.
+  </p>
+  {% endif %}
+
+  <p class="help-note" style="margin-top:12px">
+    Rejected claims are left out — they never left the bank, so no partner
+    carries any of them.
+  </p>
+</div>
+{% endblock %}

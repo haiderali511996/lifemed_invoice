@@ -1425,3 +1425,66 @@ def partner_equity():
         })
 
     return {"sheet": sheet, "rows": rows}
+
+
+# ------------------------------------------------- costs, partner by partner
+
+def partner_cost_breakdown(partner, start=None, end=None):
+    """One partner's share of each line of the trading result.
+
+    The profit share on its own is a single number that hides how it was
+    arrived at. A partner who wants to know what the expenses did to their
+    money should not have to work backwards from it.
+    """
+    result = profit_and_loss(start, end)
+
+    return {
+        "gross_profit": partner.share_of(result["gross_profit"]),
+        "expenses": partner.share_of(result["expenses"]),
+        "wages": partner.share_of(result["wages"]),
+        "samples": partner.share_of(result["samples"]),
+        "written_off": partner.share_of(result["stock_written_off"]),
+        "net_profit": partner.share_of(result["net_profit"]),
+        "company": result,
+    }
+
+
+def expense_shares(start=None, end=None, limit=200):
+    """Every expense with each partner's slice of it, newest first.
+
+    Rejected claims are left out: they never left the bank, so no partner
+    carries any of them.
+    """
+    partners = list(Partner.objects.filter(is_active=True))
+
+    expenses = _between(
+        Expense.objects.exclude(status=Expense.REJECTED).select_related(
+            "category", "employee"
+        ),
+        "date", start, end,
+    ).order_by("-date", "-id")
+
+    rows = []
+
+    for expense in expenses[:limit]:
+        rows.append({
+            "expense": expense,
+            "shares": [
+                {"partner": partner, "amount": partner.share_of(expense.amount)}
+                for partner in partners
+            ],
+        })
+
+    total = _sum(expenses, "amount")
+
+    return {
+        "rows": rows,
+        "partners": partners,
+        "total": money(total),
+        "count": expenses.count(),
+        "shown": len(rows),
+        "partner_totals": [
+            {"partner": partner, "amount": partner.share_of(total)}
+            for partner in partners
+        ],
+    }

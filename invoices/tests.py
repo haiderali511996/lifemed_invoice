@@ -8578,3 +8578,169 @@ class BalanceSheetTests(TestCase):
         self.assertEqual(
             self.client.get(reverse("balance_sheet")).status_code, 302
         )
+
+
+class ExpenseShareTests(TestCase):
+    """Every expense divided between the partners, and shown that way.
+
+    The arithmetic already worked - an expense cut the profit and so cut each
+    partner's share of it - but it was buried in one aggregate figure with
+    nothing showing the division. These cover both the maths and the showing.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.category = ExpenseCategory.objects.create(
+            name="Office Rent", per_employee=False
+        )
+        self.partner = Partner.objects.order_by("full_name").first()
+
+    def spend(self, amount, status=None, on=None):
+        return Expense.objects.create(
+            category=self.category, amount=Decimal(amount),
+            status=status or Expense.APPROVED,
+            date=on or timezone.localdate(),
+        )
+
+    # --------------------------------------------------------- the arithmetic
+
+    def test_an_expense_reduces_every_partners_share(self):
+        self.spend("100000.00")
+
+        for partner in Partner.objects.filter(is_active=True):
+            with self.subTest(partner=partner.full_name):
+                statement = finance.partner_statement(partner)
+
+                self.assertEqual(
+                    statement["profit_share"], Decimal("-25000.00")
+                )
+
+    def test_an_expense_reduces_what_each_partner_is_owed(self):
+        CapitalTransaction.objects.create(
+            partner=self.partner, kind=CapitalTransaction.INVESTMENT,
+            amount=Decimal("500000.00"), date=timezone.localdate(),
+        )
+
+        before = finance.partner_statement(self.partner)["capital_balance"]
+
+        self.spend("100000.00")
+
+        after = finance.partner_statement(self.partner)["capital_balance"]
+
+        self.assertEqual(before - after, Decimal("25000.00"))
+
+    def test_a_second_expense_adds_to_the_share(self):
+        """The complaint was that adding one did not update the partners."""
+        self.spend("40000.00")
+        self.spend("60000.00")
+
+        self.assertEqual(
+            finance.partner_statement(self.partner)["profit_share"],
+            Decimal("-25000.00"),
+        )
+
+    def test_the_breakdown_shows_the_expense_line_on_its_own(self):
+        self.spend("100000.00")
+
+        costs = finance.partner_cost_breakdown(self.partner)
+
+        self.assertEqual(costs["expenses"], Decimal("25000.00"))
+        self.assertEqual(costs["net_profit"], Decimal("-25000.00"))
+
+    def test_a_rejected_claim_is_carried_by_nobody(self):
+        self.spend("100000.00", status=Expense.REJECTED)
+
+        self.assertEqual(
+            finance.partner_cost_breakdown(self.partner)["expenses"], ZERO
+        )
+
+    # ------------------------------------------------------ expense by expense
+
+    def test_each_expense_is_split_across_the_partners(self):
+        self.spend("4000.00")
+
+        shares = finance.expense_shares()
+
+        self.assertEqual(len(shares["rows"]), 1)
+        self.assertEqual(len(shares["rows"][0]["shares"]), 4)
+
+        for share in shares["rows"][0]["shares"]:
+            with self.subTest(partner=share["partner"].full_name):
+                self.assertEqual(share["amount"], Decimal("1000.00"))
+
+    def test_the_partner_totals_cover_every_expense(self):
+        self.spend("4000.00")
+        self.spend("6000.00")
+
+        shares = finance.expense_shares()
+
+        self.assertEqual(shares["total"], Decimal("10000.00"))
+
+        for row in shares["partner_totals"]:
+            with self.subTest(partner=row["partner"].full_name):
+                self.assertEqual(row["amount"], Decimal("2500.00"))
+
+    def test_the_totals_cover_expenses_beyond_the_listed_page(self):
+        """Only so many rows are listed; the totals must still be complete."""
+        for _ in range(5):
+            self.spend("1000.00")
+
+        shares = finance.expense_shares(limit=2)
+
+        self.assertEqual(shares["shown"], 2)
+        self.assertEqual(shares["count"], 5)
+        self.assertEqual(shares["total"], Decimal("5000.00"))
+        self.assertEqual(
+            shares["partner_totals"][0]["amount"], Decimal("1250.00")
+        )
+
+    def test_a_date_range_narrows_the_split(self):
+        self.spend("4000.00", on=date(2026, 1, 15))
+        self.spend("6000.00", on=date(2026, 5, 15))
+
+        shares = finance.expense_shares(date(2026, 1, 1), date(2026, 1, 31))
+
+        self.assertEqual(shares["total"], Decimal("4000.00"))
+
+    # ------------------------------------------------------------- the pages
+
+    def test_the_expense_shares_page_lists_the_split(self):
+        self.spend("4000.00")
+
+        html = self.client.get(reverse("expense_shares")).content.decode()
+
+        self.assertIn("Office Rent", html)
+        self.assertIn("1000.00", html)
+
+        for partner in Partner.objects.filter(is_active=True):
+            with self.subTest(partner=partner.full_name):
+                self.assertIn(partner.full_name, html)
+
+    def test_a_partners_statement_shows_the_expense_line(self):
+        self.spend("100000.00")
+
+        response = self.client.get(
+            reverse("partner_statement", args=[self.partner.pk])
+        )
+
+        self.assertEqual(
+            response.context["costs"]["expenses"], Decimal("25000.00")
+        )
+        self.assertContains(response, "share of expenses")
+
+    def test_the_field_team_cannot_see_the_expense_shares(self):
+        mr_user = User.objects.create_user("ali", password="pw")
+        Employee.objects.create(
+            employee_code="MR-01", full_name="Ali", designation="mr",
+            user=mr_user,
+        )
+        UserRolls.objects.filter(user=mr_user).update(role=UserRolls.ROLE_FIELD)
+
+        self.client.logout()
+        self.client.login(username="ali", password="pw")
+
+        self.assertEqual(
+            self.client.get(reverse("expense_shares")).status_code, 302
+        )

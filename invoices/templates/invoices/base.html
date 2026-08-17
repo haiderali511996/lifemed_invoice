@@ -716,6 +716,9 @@
           <a href="{% url 'balance_sheet' %}" class="{% if active == 'balance_sheet' %}active{% endif %}">
             ⚖️ <span>Balance Sheet</span>
           </a>
+          <a href="{% url 'expense_shares' %}" class="{% if active == 'expense_shares' %}active{% endif %}">
+            🧮 <span>Expense Shares</span>
+          </a>
         </div>
 
         <button type="button" class="nav-section" data-nav-key="reports" onclick="toggleNavGroup(this)">

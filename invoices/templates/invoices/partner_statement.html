@@ -118,6 +118,55 @@
 </div>
 
 <div class="card">
+  <h3 style="margin-top:0">Where That Profit Share Came From</h3>
+
+  <div style="overflow-x:auto">
+    <table>
+      <tbody>
+        <tr>
+          <td>Share of gross profit on what was sold</td>
+          <td class="num" style="color:#1e7b24">{{ costs.gross_profit|floatformat:2 }}</td>
+        </tr>
+        <tr>
+          <td>Less: share of expenses</td>
+          <td class="num" style="color:#a71d2a">({{ costs.expenses|floatformat:2 }})</td>
+        </tr>
+        <tr>
+          <td>Less: share of salaries and commission</td>
+          <td class="num" style="color:#a71d2a">({{ costs.wages|floatformat:2 }})</td>
+        </tr>
+        <tr>
+          <td>Less: share of samples given away</td>
+          <td class="num" style="color:#a71d2a">({{ costs.samples|floatformat:2 }})</td>
+        </tr>
+        {% if costs.written_off %}
+        <tr>
+          <td>Less: share of stock written off</td>
+          <td class="num" style="color:#a71d2a">({{ costs.written_off|floatformat:2 }})</td>
+        </tr>
+        {% endif %}
+        <tr style="border-top:2px solid #dbe2ea">
+          <td><strong>Share of profit</strong></td>
+          <td class="num">
+            <strong style="color:{% if costs.net_profit < 0 %}#a71d2a{% else %}#1e7b24{% endif %}">
+              {{ costs.net_profit|floatformat:2 }}
+            </strong>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="help-note" style="margin-top:12px">
+    Every company cost is carried by the partners in their shares, so each
+    expense entered reduces this figure — and what {{ partner.full_name }} is
+    owed — by {{ partner.share_percent|floatformat:2 }}% of it. See
+    <a href="{% url 'expense_shares' %}">Expense Shares</a> for the expenses
+    one by one.
+  </p>
+</div>
+
+<div class="card">
   <h3 style="margin-top:0">What {{ partner.full_name }} Is Owed</h3>
 
   <div style="overflow-x:auto">

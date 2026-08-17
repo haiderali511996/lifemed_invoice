@@ -4304,6 +4304,9 @@ def partner_statement(request, partner_id):
             "partner": partner,
             "entries": entries,
             "standing": standing,
+            # The workings behind the profit share, so a partner can see what
+            # the expenses did to their money without working backwards.
+            "costs": finance.partner_cost_breakdown(partner),
         }
     )
 
@@ -4622,5 +4625,23 @@ def balance_sheet(request):
             "active": "balance_sheet",
             "sheet": equity["sheet"],
             "rows": equity["rows"],
+        }
+    )
+
+
+@login_required
+def expense_share_report(request):
+    """Every expense, divided between the partners by their shares."""
+    start = parse_date(request.GET.get("start", ""))
+    end = parse_date(request.GET.get("end", ""))
+
+    return render(
+        request,
+        "invoices/expense_shares.html",
+        {
+            "active": "expense_shares",
+            "shares": finance.expense_shares(start, end),
+            "start": start.isoformat() if start else "",
+            "end": end.isoformat() if end else "",
         }
     )
