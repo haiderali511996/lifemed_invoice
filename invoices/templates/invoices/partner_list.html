@@ -161,7 +161,7 @@
             <strong style="color:#a71d2a">{{ row.owed|floatformat:2 }}</strong>
             {% elif row.owed < 0 %}
             <span style="color:#1e7b24">
-              {{ row.owed|floatformat:2 }}
+              {{ row.over|floatformat:2 }}
             </span>
             <br /><span class="muted" style="font-size:11px">put in extra</span>
             {% else %}

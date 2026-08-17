@@ -8744,3 +8744,194 @@ class ExpenseShareTests(TestCase):
         self.assertEqual(
             self.client.get(reverse("expense_shares")).status_code, 302
         )
+
+
+class PartnerLiabilityLedgerTests(TestCase):
+    """The list behind a partner's share of what the company has spent."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.category = ExpenseCategory.objects.create(
+            name="Office Rent", per_employee=False
+        )
+        self.partner = Partner.objects.order_by("full_name").first()
+
+    def spend(self, amount, on=None, status=None):
+        return Expense.objects.create(
+            category=self.category, amount=Decimal(amount),
+            status=status or Expense.APPROVED,
+            date=on or timezone.localdate(),
+        )
+
+    def ledger(self, **kwargs):
+        return finance.partner_liability_ledger(self.partner, **kwargs)
+
+    def test_an_expense_becomes_a_line_on_the_ledger(self):
+        self.spend("4000.00")
+
+        ledger = self.ledger()
+
+        self.assertEqual(len(ledger["rows"]), 1)
+        self.assertEqual(ledger["rows"][0]["kind"], "Expense")
+        self.assertEqual(ledger["rows"][0]["company"], Decimal("4000.00"))
+        self.assertEqual(ledger["rows"][0]["share"], Decimal("1000.00"))
+
+    def test_each_new_expense_adds_to_the_running_total(self):
+        """The whole point: adding one more must move what they carry."""
+        self.spend("4000.00", on=date(2026, 1, 1))
+        self.spend("8000.00", on=date(2026, 1, 2))
+
+        rows = self.ledger()["rows"]
+
+        self.assertEqual([row["running"] for row in rows],
+                         [Decimal("1000.00"), Decimal("3000.00")])
+        self.assertEqual(self.ledger()["total_share"], Decimal("3000.00"))
+
+    def test_the_total_matches_the_partners_share_of_the_costs(self):
+        self.spend("4000.00")
+        self.spend("8000.00")
+
+        breakdown = finance.partner_cost_breakdown(self.partner)
+
+        self.assertEqual(self.ledger()["total_share"], breakdown["expenses"])
+
+    def test_a_rejected_claim_never_reaches_the_ledger(self):
+        self.spend("4000.00", status=Expense.REJECTED)
+
+        self.assertEqual(self.ledger()["rows"], [])
+        self.assertEqual(self.ledger()["total_share"], ZERO)
+
+    def test_payroll_lands_on_the_ledger_too(self):
+        employee = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza", designation="mr",
+            basic_salary=Decimal("40000.00"),
+        )
+        self.client.post(reverse("payroll_create"), {
+            "month": timezone.localdate().isoformat(), "note": "",
+        })
+        run = PayrollRun.objects.get()
+        run.status = PayrollRun.FINALISED
+        run.save(update_fields=["status"])
+
+        kinds = [row["kind"] for row in self.ledger()["rows"]]
+
+        self.assertIn("Payroll", kinds)
+        self.assertEqual(self.ledger()["total_share"], Decimal("10000.00"))
+
+    def test_a_reimbursed_claim_is_carried_once_not_twice(self):
+        """It rides on the payslip and is already an expense line."""
+        employee = Employee.objects.create(
+            employee_code="MR-01", full_name="Ali Raza", designation="mr",
+            basic_salary=Decimal("40000.00"),
+        )
+        claim = ExpenseCategory.objects.create(name="Fuel")
+        Expense.objects.create(
+            category=claim, employee=employee, amount=Decimal("4000.00"),
+            status=Expense.APPROVED, date=timezone.localdate(),
+        )
+
+        self.client.post(reverse("payroll_create"), {
+            "month": timezone.localdate().isoformat(), "note": "",
+        })
+        run = PayrollRun.objects.get()
+        run.status = PayrollRun.FINALISED
+        run.save(update_fields=["status"])
+
+        # 40,000 wages + 4,000 claim = 44,000 of cost, a quarter of it here.
+        self.assertEqual(self.ledger()["total_company"], Decimal("44000.00"))
+        self.assertEqual(self.ledger()["total_share"], Decimal("11000.00"))
+
+    def test_stock_written_off_appears_as_a_cost_carried(self):
+        product = Product.objects.create(code="PAN", name="Panadol")
+        batch = Batch.objects.create(
+            product=product, batch_no="B-1", quantity=100,
+            cost_price=Decimal("200.00"),
+            expiry_date=timezone.localdate() + timedelta(days=400),
+        )
+
+        self.client.post(reverse("batch_adjust", args=[batch.pk]), {
+            "counted_quantity": "90", "note": "Expired",
+        })
+
+        rows = self.ledger()["rows"]
+
+        self.assertEqual(rows[0]["kind"], "Stock written off")
+        self.assertEqual(rows[0]["share"], Decimal("500.00"))
+
+    def test_a_date_range_narrows_the_ledger(self):
+        self.spend("4000.00", on=date(2026, 1, 15))
+        self.spend("8000.00", on=date(2026, 5, 15))
+
+        ledger = self.ledger(start=date(2026, 1, 1), end=date(2026, 1, 31))
+
+        self.assertEqual(ledger["total_share"], Decimal("1000.00"))
+
+    def test_the_statement_shows_the_ledger(self):
+        self.spend("4000.00")
+
+        response = self.client.get(
+            reverse("partner_statement", args=[self.partner.pk])
+        )
+
+        self.assertContains(response, "Liability Ledger")
+        self.assertEqual(
+            response.context["liability"]["total_share"], Decimal("1000.00")
+        )
+
+    def test_every_partner_carries_their_own_share_of_the_same_cost(self):
+        self.spend("4000.00")
+
+        for partner in Partner.objects.filter(is_active=True):
+            with self.subTest(partner=partner.full_name):
+                ledger = finance.partner_liability_ledger(partner)
+
+                self.assertEqual(ledger["total_share"], Decimal("1000.00"))
+
+
+class OverContributionWordingTests(TestCase):
+    """A partner who put in extra should not be told a negative number."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+    def invest(self, name, amount):
+        CapitalTransaction.objects.create(
+            partner=Partner.objects.get(full_name=name),
+            kind=CapitalTransaction.INVESTMENT,
+            amount=Decimal(amount), date=timezone.localdate(),
+        )
+
+    def test_over_contribution_is_reported_as_a_positive_figure(self):
+        self.invest("Mustafa Ali", "800000.00")
+        self.invest("Mujtaba Ali", "600000.00")
+        self.invest("Muhabbat Ali", "800000.00")
+        self.invest("Haider Ali", "800000.00")
+
+        rows = {
+            row["partner"].full_name: row
+            for row in finance.capital_fair_shares()["rows"]
+        }
+
+        # Owes is negative for someone who has funded more than their share;
+        # "over" is the same fact stated the way a sentence can use it.
+        self.assertEqual(rows["Mustafa Ali"]["owed"], Decimal("-50000.00"))
+        self.assertEqual(rows["Mustafa Ali"]["over"], Decimal("50000.00"))
+        self.assertEqual(rows["Mujtaba Ali"]["over"], Decimal("-150000.00"))
+
+    def test_the_statement_does_not_print_a_minus_in_that_sentence(self):
+        self.invest("Mustafa Ali", "800000.00")
+        self.invest("Mujtaba Ali", "600000.00")
+        self.invest("Muhabbat Ali", "800000.00")
+        self.invest("Haider Ali", "800000.00")
+
+        partner = Partner.objects.get(full_name="Mustafa Ali")
+
+        html = self.client.get(
+            reverse("partner_statement", args=[partner.pk])
+        ).content.decode()
+
+        self.assertIn("has put in\n  50000.00 more than his share", html)
+        self.assertNotIn("-50000.00 more than his share", html)

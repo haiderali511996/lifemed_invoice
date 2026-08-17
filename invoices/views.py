@@ -4307,6 +4307,9 @@ def partner_statement(request, partner_id):
             # The workings behind the profit share, so a partner can see what
             # the expenses did to their money without working backwards.
             "costs": finance.partner_cost_breakdown(partner),
+            # The list behind the "share of expenses" figure, so a claim
+            # entered today is visibly one more line on what they carry.
+            "liability": finance.partner_liability_ledger(partner),
         }
     )
 

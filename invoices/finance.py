@@ -42,6 +42,7 @@ from .models import (
     PurchaseItem,
     SalesReturn,
     SalesReturnItem,
+    SampleIssue,
     SampleIssueItem,
     StockMovement,
     Supplier,
@@ -416,6 +417,9 @@ def capital_fair_shares():
             # Positive: owes the company. Negative: has funded more than his
             # share, so the company is carrying his money.
             "owed": money(expected - actual),
+            # The same figure the other way up, so a sentence about putting
+            # in extra does not have to print a minus sign.
+            "over": money(actual - expected),
         })
 
     owed = sum((row["owed"] for row in rows if row["owed"] > ZERO), ZERO)
@@ -1487,4 +1491,107 @@ def expense_shares(start=None, end=None, limit=200):
             {"partner": partner, "amount": partner.share_of(total)}
             for partner in partners
         ],
+    }
+
+
+def partner_liability_ledger(partner, start=None, end=None):
+    """Every company cost as a line, with this partner's share running down.
+
+    A single "share of expenses" figure says what a partner is carrying and
+    not what made it up. This is the list behind it: each claim, each payroll,
+    each sample issue and each write-off, with their slice of it and a running
+    total - so an expense entered today is visibly one more line on what they
+    carry rather than a number that quietly moved.
+
+    Rejected claims never appear: they did not leave the bank, so no partner
+    carries any part of them.
+    """
+    entries = []
+
+    for expense in _between(
+        Expense.objects.exclude(status=Expense.REJECTED).select_related(
+            "category", "employee"
+        ),
+        "date", start, end,
+    ):
+        detail = expense.category.name
+
+        if expense.employee:
+            detail = f"{detail} — {expense.employee.full_name}"
+        elif expense.description:
+            detail = f"{detail} — {expense.description}"
+
+        entries.append({
+            "date": expense.date,
+            "kind": "Expense",
+            "detail": detail,
+            "company": expense.amount,
+            "share": partner.share_of(expense.amount),
+        })
+
+    for run in _between(
+        PayrollRun.objects.filter(status=PayrollRun.FINALISED),
+        "month", start, end,
+    ):
+        # Reimbursed claims ride on the payslip but are already an expense
+        # line above; counting them again would charge the partner twice.
+        cost = run.total_gross - (
+            run.payslips.aggregate(t=Sum("expense_reimbursement"))["t"] or ZERO
+        )
+
+        if cost:
+            entries.append({
+                "date": run.month,
+                "kind": "Payroll",
+                "detail": run.month.strftime("%B %Y"),
+                "company": cost,
+                "share": partner.share_of(cost),
+            })
+
+    for issue in _between(
+        SampleIssue.objects.select_related("employee").prefetch_related(
+            "items__batch"
+        ),
+        "date", start, end,
+    ):
+        value = issue.total_value
+
+        if value:
+            entries.append({
+                "date": issue.date,
+                "kind": "Samples",
+                "detail": f"{issue.reference} — {issue.employee.full_name}",
+                "company": value,
+                "share": partner.share_of(value),
+            })
+
+    for movement in _between(
+        StockMovement.objects.filter(
+            kind=StockMovement.ADJUSTMENT, quantity__lt=0
+        ).select_related("batch", "product"),
+        "created_at__date", start, end,
+    ):
+        value = -movement.quantity * movement.batch.cost_price
+
+        entries.append({
+            "date": movement.created_at.date(),
+            "kind": "Stock written off",
+            "detail": f"{movement.product.name} / {movement.batch.batch_no}",
+            "company": value,
+            "share": partner.share_of(value),
+        })
+
+    entries.sort(key=lambda entry: (entry["date"], entry["kind"]))
+
+    running = ZERO
+    rows = []
+
+    for entry in entries:
+        running += entry["share"]
+        rows.append({**entry, "running": money(running)})
+
+    return {
+        "rows": rows,
+        "total_company": money(sum((e["company"] for e in entries), ZERO)),
+        "total_share": money(running),
     }
