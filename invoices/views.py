@@ -519,6 +519,7 @@ def customer_last_invoice(request, customer_id):
             {
                 "name": item.name,
                 "qty": item.qty,
+                "bonus": item.bonus,
                 "price": f"{item.price:.2f}",
                 "discount": f"{item.discount:.2f}",
                 "batch": item.batch or "",
@@ -618,6 +619,7 @@ def generate_invoice(request):
         qtys = post_column(request, "qty[]", row_count)
         prices = post_column(request, "price[]", row_count)
         discounts = post_column(request, "discount[]", row_count)
+        bonuses = post_column(request, "bonus[]", row_count)
         batches = post_column(request, "batch[]", row_count)
         expiries = post_column(request, "expiry[]", row_count)
         batch_ids = post_column(request, "stock_batch[]", row_count)
@@ -637,6 +639,10 @@ def generate_invoice(request):
             qty = safe_decimal(qtys[i], max_value=MAX_PRICE)
             price = safe_decimal(prices[i], max_value=MAX_PRICE)
             disc = safe_decimal(discounts[i], max_value=MAX_DISCOUNT)
+
+            # Free packs are not charged for, so they take no part in any of
+            # the money below - only in what leaves the shelf.
+            bonus = safe_int(bonuses[i])
 
             gross = Decimal(price) * Decimal(qty)
 
@@ -674,6 +680,7 @@ def generate_invoice(request):
                 expiry=clip(expiries[i], 20),
                 price=price,
                 discount=disc,
+                bonus=bonus,
                 product=stock_batch.product if stock_batch else None,
                 stock_batch=stock_batch,
                 # Snapshotted now: receiving this batch number again later
@@ -686,7 +693,7 @@ def generate_invoice(request):
                 try:
                     issue(
                         stock_batch,
-                        item.qty,
+                        item.delivered_qty,
                         reference=invoice.invoice_no,
                         user=request.user,
                     )
@@ -706,6 +713,7 @@ def generate_invoice(request):
             pdf_rows.append({
                 "name": item.name,
                 "qty": qty,
+                "bonus": bonus,
                 "batch": item.batch,
                 "expiry": item.expiry,
                 "price": price,
@@ -826,6 +834,7 @@ def rebuild_invoice_pdf(invoice):
         rows.append({
             "name": item.name,
             "qty": qty,
+            "bonus": item.bonus,
             "batch": item.batch or "",
             "expiry": item.expiry or "",
             "price": price,
@@ -1797,7 +1806,8 @@ def distributor_preview(request, distributor_id):
 
     sample_rows = [
         {
-            "name": f"Sample Product {i + 1}", "qty": 10, "batch": f"B-{i + 1}00",
+            "name": f"Sample Product {i + 1}", "qty": 10, "bonus": i,
+            "batch": f"B-{i + 1}00",
             "expiry": "12/27", "price": Decimal("250.00"),
             "discount": Decimal("10.00"), "amount": Decimal("2250.00"),
         }

@@ -6,7 +6,7 @@ rather than read-modify-write, which would lose one of two concurrent sales.
 """
 
 from django.db import transaction
-from django.db.models import F
+from django.db.models import F, Sum
 
 from .models import Batch, StockMovement
 
@@ -164,6 +164,28 @@ def record_sales_return(sales_return, lines, user=None):
 
         batch = line.get("batch") or item.stock_batch
 
+        # Free packs come back in the same proportion as the billed ones.
+        # Worked out on the running total rather than this return alone, so
+        # ten returned in two lots of five brings back both free packs -
+        # rounding each half on its own would lose one of them.
+        bonus = 0
+
+        if item.bonus and item.qty:
+            already = SalesReturnItem.objects.filter(item=item).aggregate(
+                q=Sum("qty"), b=Sum("bonus")
+            )
+
+            returned_before = already["q"] or 0
+            bonus_before = already["b"] or 0
+
+            # Rounded down, so a return never puts back more free packs than
+            # went out with the goods.
+            bonus = (
+                (returned_before + qty) * item.bonus // item.qty
+            ) - bonus_before
+
+            bonus = max(0, bonus)
+
         returned = SalesReturnItem.objects.create(
             sales_return=sales_return,
             item=item,
@@ -172,6 +194,7 @@ def record_sales_return(sales_return, lines, user=None):
             price=item.price,
             discount=item.discount,
             batch=batch if sales_return.restock else None,
+            bonus=bonus,
             # The cost these goods went out at, so putting them back reverses
             # exactly what the sale charged rather than today's cost price.
             unit_cost=item.unit_cost,
@@ -185,14 +208,14 @@ def record_sales_return(sales_return, lines, user=None):
         if sales_return.restock and batch is not None:
             receive(
                 batch,
-                qty,
+                qty + bonus,
                 reference=sales_return.return_no,
                 note=f"Return against {sales_return.invoice.invoice_no}",
                 user=user,
                 kind=StockMovement.RETURN,
             )
 
-            restocked += qty
+            restocked += qty + bonus
 
     sales_return.total = total
     sales_return.save(update_fields=["total"])

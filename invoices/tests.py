@@ -619,6 +619,7 @@ class CustomerLastInvoiceTests(TestCase):
             [{
                 "name": "New Medicine",
                 "qty": 7,
+                "bonus": 0,
                 "price": "120.50",
                 "discount": "15.00",
                 "batch": "B9",
@@ -8935,3 +8936,363 @@ class OverContributionWordingTests(TestCase):
 
         self.assertIn("has put in\n  50000.00 more than his share", html)
         self.assertNotIn("-50000.00 more than his share", html)
+
+
+class BonusPackTests(TestCase):
+    """"10 + 2": ten billed, twelve delivered.
+
+    The trade sells free packs instead of a discount. The customer is charged
+    for ten at full trade price, receives twelve, and twelve leave the shelf -
+    so the invoice, the stock ledger and the margin all have to say different
+    things about the same line, each of them correctly.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.product = Product.objects.create(code="PAN", name="Panadol")
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1", quantity=100,
+            cost_price=Decimal("60.00"),
+            expiry_date=timezone.localdate() + timedelta(days=700),
+        )
+
+    def sell(self, qty="10", bonus="2", price="100", discount="0",
+             from_stock=True):
+        return self.client.post(reverse("generate"), {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "", "sales_tax": "", "license_no": "L",
+            "item_name[]": ["Panadol"], "qty[]": [qty], "bonus[]": [bonus],
+            "price[]": [price], "discount[]": [discount],
+            "batch[]": ["B-1"], "expiry[]": ["12/27"],
+            "stock_batch[]": [str(self.batch.pk) if from_stock else ""],
+        })
+
+    # ------------------------------------------------------------ the charge
+
+    def test_only_the_billed_packs_are_charged_for(self):
+        self.sell(qty="10", bonus="2", price="100")
+
+        invoice = Invoice.objects.get()
+
+        self.assertEqual(invoice.total, Decimal("1000.00"))
+
+    def test_the_line_records_both_numbers(self):
+        self.sell(qty="10", bonus="2")
+
+        item = Item.objects.get()
+
+        self.assertEqual(item.qty, 10)
+        self.assertEqual(item.bonus, 2)
+        self.assertEqual(item.delivered_qty, 12)
+
+    def test_free_packs_do_not_become_a_discount(self):
+        """The whole point of a bonus deal: the price stays at full trade."""
+        self.sell(qty="10", bonus="2", price="100", discount="0")
+
+        item = Item.objects.get()
+
+        self.assertEqual(item.price, Decimal("100.00"))
+        self.assertEqual(item.discount, ZERO)
+
+    # ------------------------------------------------------------- the stock
+
+    def test_twelve_packs_leave_the_shelf(self):
+        self.sell(qty="10", bonus="2")
+
+        self.batch.refresh_from_db()
+
+        self.assertEqual(self.batch.quantity, 88)
+
+    def test_the_stock_ledger_records_the_full_delivery(self):
+        self.sell(qty="10", bonus="2")
+
+        movement = StockMovement.objects.get(kind=StockMovement.SALE)
+
+        self.assertEqual(movement.quantity, -12)
+
+    def test_a_line_with_no_bonus_still_moves_only_what_was_sold(self):
+        self.sell(qty="10", bonus="0")
+
+        self.batch.refresh_from_db()
+
+        self.assertEqual(self.batch.quantity, 90)
+
+    def test_a_bonus_bigger_than_stock_is_refused(self):
+        """Ninety-five plus ten free is a hundred and five off ninety-nine."""
+        Batch.objects.filter(pk=self.batch.pk).update(quantity=99)
+
+        self.sell(qty="95", bonus="10")
+
+        self.batch.refresh_from_db()
+
+        self.assertEqual(self.batch.quantity, 99)
+        self.assertIsNone(Item.objects.get().stock_batch)
+
+    # ------------------------------------------------------------ the margin
+
+    def test_the_free_packs_are_costed_against_the_sale(self):
+        """Twelve packs at 60 cost 720, not 600 - the free ones were not
+        free to us, and a margin that ignores them is not real."""
+        self.sell(qty="10", bonus="2", price="100")
+
+        self.assertEqual(finance.cost_of_goods_sold(), Decimal("720.00"))
+
+    def test_the_bonus_shows_in_the_gross_profit(self):
+        self.sell(qty="10", bonus="2", price="100")
+
+        result = finance.profit_and_loss()
+
+        self.assertEqual(result["revenue"], Decimal("1000.00"))
+        self.assertEqual(result["cost_of_goods_sold"], Decimal("720.00"))
+        self.assertEqual(result["gross_profit"], Decimal("280.00"))
+
+    def test_a_bonus_deal_earns_less_than_the_same_sale_without_one(self):
+        self.sell(qty="10", bonus="0", price="100")
+
+        without = finance.profit_and_loss()["gross_profit"]
+
+        Item.objects.all().delete()
+        Invoice.objects.all().delete()
+        Batch.objects.filter(pk=self.batch.pk).update(quantity=100)
+
+        self.sell(qty="10", bonus="2", price="100")
+
+        with_bonus = finance.profit_and_loss()["gross_profit"]
+
+        self.assertEqual(without, Decimal("400.00"))
+        self.assertEqual(with_bonus, Decimal("280.00"))
+
+    def test_the_daily_report_costs_the_bonus_the_same_way(self):
+        """Otherwise the day's margin disagrees with the profit report."""
+        self.sell(qty="10", bonus="2", price="100")
+
+        row = finance.daily_sales()[0]
+
+        self.assertEqual(row["revenue"], Decimal("1000.00"))
+        self.assertEqual(row["cost"], Decimal("720.00"))
+        self.assertEqual(row["gross_profit"], Decimal("280.00"))
+
+    def test_product_performance_counts_the_free_packs_as_cost(self):
+        self.sell(qty="10", bonus="2", price="100")
+
+        row = finance.top_products()[0]
+
+        self.assertEqual(row["units"], 10)
+        self.assertEqual(row["bonus"], 2)
+        self.assertEqual(row["cost"], Decimal("720.00"))
+        self.assertEqual(row["gross_profit"], Decimal("280.00"))
+
+    # ---------------------------------------------------------- the document
+
+    def text_of(self, response):
+        import pymupdf
+
+        document = pymupdf.open(stream=response.content, filetype="pdf")
+
+        return "\n".join(page.get_text() for page in document)
+
+    def test_the_invoice_prints_the_bonus(self):
+        text = self.text_of(self.sell(qty="10", bonus="2", price="100"))
+
+        self.assertIn("Panadol", text)
+        self.assertIn("1000.00", text)
+
+    def test_a_reprint_carries_the_bonus_too(self):
+        self.sell(qty="10", bonus="2")
+
+        invoice = Invoice.objects.get()
+
+        response = self.client.get(
+            reverse("invoice_reprint", args=[invoice.pk])
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+
+    def test_a_repeat_invoice_offers_the_same_bonus(self):
+        self.sell(qty="10", bonus="2")
+
+        invoice = Invoice.objects.get()
+
+        body = self.client.get(
+            reverse("customer_last_invoice", args=[invoice.customer_id]),
+            headers={"x-requested-with": "XMLHttpRequest"},
+        ).json()
+
+        self.assertEqual(body["items"][0]["bonus"], 2)
+
+    # ------------------------------------------------------------- the edges
+
+    def test_a_missing_bonus_column_defaults_to_none(self):
+        """Older forms and the API post no bonus at all."""
+        self.client.post(reverse("generate"), {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "", "sales_tax": "", "license_no": "L",
+            "item_name[]": ["Panadol"], "qty[]": ["10"], "price[]": ["100"],
+            "discount[]": ["0"], "batch[]": ["B-1"], "expiry[]": ["12/27"],
+            "stock_batch[]": [str(self.batch.pk)],
+        })
+
+        self.assertEqual(Item.objects.get().bonus, 0)
+
+    def test_a_hand_typed_line_can_still_carry_a_bonus_on_paper(self):
+        """No stock moves and no cost is charged, but the paperwork is right."""
+        self.sell(qty="10", bonus="2", from_stock=False)
+
+        item = Item.objects.get()
+
+        self.assertEqual(item.bonus, 2)
+        self.assertEqual(item.unit_cost, ZERO)
+        self.assertEqual(finance.cost_of_goods_sold(), ZERO)
+
+
+class BonusReturnTests(TestCase):
+    """Twelve went out, so twelve come back.
+
+    The customer was charged for ten and given twelve. Crediting the ten they
+    paid for while restocking only ten would quietly lose the two free packs
+    out of inventory.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.product = Product.objects.create(code="PAN", name="Panadol")
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1", quantity=100,
+            cost_price=Decimal("60.00"),
+            expiry_date=timezone.localdate() + timedelta(days=700),
+        )
+
+        self.client.post(reverse("generate"), {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "", "sales_tax": "", "license_no": "L",
+            "item_name[]": ["Panadol"], "qty[]": ["10"], "bonus[]": ["2"],
+            "price[]": ["100"], "discount[]": ["0"],
+            "batch[]": ["B-1"], "expiry[]": ["12/27"],
+            "stock_batch[]": [str(self.batch.pk)],
+        })
+
+        self.invoice = Invoice.objects.get()
+        self.item = self.invoice.items.first()
+
+    def give_back(self, qty, restock=True):
+        return self.client.post(
+            reverse("return_create", args=[self.invoice.pk]),
+            {
+                "reason": "Wrong order",
+                "restock": "on" if restock else "",
+                "date": timezone.localdate().isoformat(),
+                f"qty_{self.item.pk}": str(qty),
+            },
+        )
+
+    def stock(self):
+        self.batch.refresh_from_db()
+
+        return self.batch.quantity
+
+    def test_a_full_return_brings_the_free_packs_back_too(self):
+        self.assertEqual(self.stock(), 88)          # 12 went out
+
+        self.give_back(10)
+
+        self.assertEqual(self.stock(), 100)         # all 12 came back
+
+    def test_the_free_packs_are_recorded_on_the_credit_note(self):
+        self.give_back(10)
+
+        returned = SalesReturnItem.objects.get()
+
+        self.assertEqual(returned.qty, 10)
+        self.assertEqual(returned.bonus, 2)
+        self.assertEqual(returned.returned_qty, 12)
+
+    def test_the_customer_is_only_credited_for_what_they_paid(self):
+        """The free packs cost them nothing, so they refund nothing."""
+        self.give_back(10)
+
+        self.assertEqual(SalesReturn.objects.get().total, Decimal("1000.00"))
+
+    def test_a_part_return_brings_back_its_share_of_the_free_packs(self):
+        self.give_back(5)
+
+        returned = SalesReturnItem.objects.get()
+
+        self.assertEqual(returned.bonus, 1)
+        self.assertEqual(self.stock(), 94)          # 88 + 5 + 1
+
+    def test_returning_in_two_halves_still_brings_back_both(self):
+        """Rounding each half on its own would lose one of the two."""
+        self.give_back(5)
+        self.give_back(5)
+
+        self.assertEqual(
+            sum(r.bonus for r in SalesReturnItem.objects.all()), 2
+        )
+        self.assertEqual(self.stock(), 100)
+
+    def test_an_awkward_split_never_puts_back_more_than_went_out(self):
+        self.give_back(3)
+        self.give_back(3)
+        self.give_back(4)
+
+        self.assertEqual(
+            sum(r.bonus for r in SalesReturnItem.objects.all()), 2
+        )
+        self.assertEqual(self.stock(), 100)
+
+    def test_goods_not_restocked_put_nothing_back(self):
+        self.give_back(10, restock=False)
+
+        self.assertEqual(self.stock(), 88)
+
+    def test_a_restocked_return_reverses_the_cost_of_all_twelve(self):
+        self.give_back(10)
+
+        result = finance.profit_and_loss()
+
+        self.assertEqual(result["revenue"], ZERO)
+        self.assertEqual(result["cost_of_goods_sold"], ZERO)
+        self.assertEqual(result["gross_profit"], ZERO)
+
+    def test_scrapped_bonus_goods_stay_a_cost(self):
+        """Nothing came back, so the business lost the sale and all twelve."""
+        self.give_back(10, restock=False)
+
+        result = finance.profit_and_loss()
+
+        self.assertEqual(result["revenue"], ZERO)
+        self.assertEqual(result["cost_of_goods_sold"], Decimal("720.00"))
+        self.assertEqual(result["gross_profit"], Decimal("-720.00"))
+
+    def test_a_line_with_no_bonus_returns_exactly_what_was_sold(self):
+        other = Batch.objects.create(
+            product=self.product, batch_no="B-2", quantity=50,
+            cost_price=Decimal("60.00"),
+            expiry_date=timezone.localdate() + timedelta(days=700),
+        )
+        self.client.post(reverse("generate"), {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "", "sales_tax": "", "license_no": "L",
+            "item_name[]": ["Panadol"], "qty[]": ["10"], "bonus[]": ["0"],
+            "price[]": ["100"], "discount[]": ["0"],
+            "batch[]": ["B-2"], "expiry[]": ["12/27"],
+            "stock_batch[]": [str(other.pk)],
+        })
+
+        invoice = Invoice.objects.order_by("-id").first()
+        item = invoice.items.first()
+
+        self.client.post(reverse("return_create", args=[invoice.pk]), {
+            "reason": "Wrong order", "restock": "on",
+            "date": timezone.localdate().isoformat(),
+            f"qty_{item.pk}": "10",
+        })
+
+        other.refresh_from_db()
+
+        self.assertEqual(other.quantity, 50)

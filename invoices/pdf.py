@@ -152,6 +152,12 @@ def _fill_page(page, layout, header, rows, totals, first_row_number,
         _column(page, columns, "sr", y, first_row_number + offset, font)
         _column(page, columns, "name", y, row["name"], font, limit=110)
         _column(page, columns, "qty", y, row["qty"], font)
+
+        # Only printed when there is one: a column of noughts down a form
+        # that mostly sells without bonus is just noise.
+        if row.get("bonus"):
+            _column(page, columns, "bonus", y, row["bonus"], font)
+
         _column(page, columns, "batch", y, row["batch"], font, limit=60)
         _column(page, columns, "expiry", y, row["expiry"], font, limit=50)
         _column(page, columns, "price", y, f"{row['price']:.2f}", font)

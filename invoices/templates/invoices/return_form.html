@@ -50,7 +50,14 @@
               {% if line.item.stock_batch %}{{ line.item.stock_batch.batch_no }}
               {% else %}<span class="muted">not from stock</span>{% endif %}
             </td>
-            <td class="num">{{ line.item.qty }}</td>
+            <td class="num">
+              {{ line.item.qty }}
+              {% if line.item.bonus %}
+              <br /><span class="muted" style="font-size:11px">
+                + {{ line.item.bonus }} free
+              </span>
+              {% endif %}
+            </td>
             <td class="num">{{ line.already_returned }}</td>
             <td class="num"><strong>{{ line.returnable }}</strong></td>
             <td>
@@ -64,6 +71,12 @@
         </tbody>
       </table>
     </div>
+
+    <p class="help-note" style="margin-top:12px">
+      Enter the packs the customer <strong>paid for</strong>. Any free packs
+      that went out with them come back in the same proportion and go on the
+      shelf too — the credit note still only refunds what was charged.
+    </p>
 
     <div class="row" style="margin-top:18px">
       <div class="field">

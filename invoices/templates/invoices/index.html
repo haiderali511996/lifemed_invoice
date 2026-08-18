@@ -140,6 +140,7 @@
             <th>From Stock</th>
             <th>Item</th>
             <th>Qty</th>
+            <th>Bonus</th>
             <th>T.Price</th>
             <th>Disc %</th>
             <th>Batch</th>
@@ -443,6 +444,8 @@
       </td>
       <td><input name="item_name[]" required></td>
       <td><input name="qty[]" type="number" value="1" oninput="calculate(this)"></td>
+      <td><input name="bonus[]" type="number" value="0" min="0"
+                 title="Free packs given with this line. Not charged for; comes off stock."></td>
       <td><input name="price[]" type="number" value="0" oninput="calculate(this)"></td>
       <td><input name="discount[]" type="number" value="0" oninput="calculate(this)"></td>
       <td><input name="batch[]" placeholder="Batch"></td>
@@ -459,6 +462,7 @@
       /* Assigned as values, never as markup, so item names can't inject HTML */
       tr.querySelector('[name="item_name[]"]').value = item.name;
       tr.querySelector('[name="qty[]"]').value = item.qty;
+      tr.querySelector('[name="bonus[]"]').value = item.bonus || 0;
       tr.querySelector('[name="price[]"]').value = item.price;
       tr.querySelector('[name="discount[]"]').value = item.discount;
       tr.querySelector('[name="batch[]"]').value = item.batch;

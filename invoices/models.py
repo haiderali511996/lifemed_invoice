@@ -249,6 +249,13 @@ class Item(models.Model):
     invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name="items")
     name = models.CharField(max_length=255)
     qty = models.IntegerField()
+
+    # Free packs given with the billed ones - the "10 + 2" the trade runs on.
+    # Not billed, so they never touch the price or the invoice total; they do
+    # leave the shelf and they did cost us, so stock and profit both feel them.
+    bonus = models.IntegerField(
+        default=0, help_text="Free packs given with this line, not charged for."
+    )
     batch = models.CharField(max_length=100, blank=True, null=True)
     expiry = models.CharField(max_length=20, blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
@@ -276,8 +283,14 @@ class Item(models.Model):
     )
 
     @property
+    def delivered_qty(self):
+        """Everything that left the shelf: billed packs plus the free ones."""
+        return self.qty + self.bonus
+
+    @property
     def cost_total(self):
-        return self.unit_cost * self.qty
+        """What the whole line cost us - the free packs were not free to us."""
+        return self.unit_cost * self.delivered_qty
 
 
 class Payment(models.Model):
@@ -1625,6 +1638,11 @@ class SalesReturnItem(models.Model):
         related_name="returned_lines",
     )
 
+    # Free packs coming back with the billed ones. The customer took twelve
+    # and returns twelve, so twelve go back on the shelf - crediting only the
+    # ten they paid for while restocking ten would lose the other two.
+    bonus = models.IntegerField(default=0)
+
     # Carried over from the invoice line, for the same reason it is held
     # there: the cost of these goods must not move after the fact.
     unit_cost = models.DecimalField(
@@ -1638,8 +1656,13 @@ class SalesReturnItem(models.Model):
         return (net * self.qty).quantize(ZERO)
 
     @property
+    def returned_qty(self):
+        """Everything coming back: billed packs plus the free ones with them."""
+        return self.qty + self.bonus
+
+    @property
     def cost_total(self):
-        return self.unit_cost * self.qty
+        return self.unit_cost * self.returned_qty
 
 
 # ------------------------------------------------------------------ EXPENSES

@@ -74,11 +74,19 @@ def _sum(queryset, field):
     return queryset.aggregate(t=Sum(field))["t"] or ZERO
 
 
-def _sum_cost(queryset):
-    """Total of qty x unit_cost over lines that carry a snapshotted cost."""
+def _sum_cost(queryset, quantity=None):
+    """Total of quantity x unit_cost over lines that carry a snapshotted cost.
+
+    `quantity` defaults to the billed packs. Sold lines pass billed plus
+    bonus, because free packs come off the same shelf and cost the same
+    money - leaving them out would show a margin the business never made.
+    """
+    if quantity is None:
+        quantity = F("qty")
+
     return queryset.aggregate(
         t=Sum(
-            ExpressionWrapper(F("qty") * F("unit_cost"), output_field=MONEY)
+            ExpressionWrapper(quantity * F("unit_cost"), output_field=MONEY)
         )
     )["t"] or ZERO
 
@@ -103,7 +111,8 @@ def cost_of_goods_sold(start=None, end=None):
     carries both the lost sale and the lost goods - which is what happened.
     """
     sold = _sum_cost(
-        _between(Item.objects.all(), "invoice__date", start, end)
+        _between(Item.objects.all(), "invoice__date", start, end),
+        quantity=F("qty") + F("bonus"),
     )
 
     restocked = _sum_cost(
@@ -112,7 +121,8 @@ def cost_of_goods_sold(start=None, end=None):
             "sales_return__date",
             start,
             end,
-        )
+        ),
+        quantity=F("qty") + F("bonus"),
     )
 
     return sold - restocked
@@ -698,7 +708,7 @@ def daily_sales(start=None, end=None):
         .annotate(
             total=Sum(
                 ExpressionWrapper(
-                    F("qty") * F("unit_cost"), output_field=MONEY
+                    (F("qty") + F("bonus")) * F("unit_cost"), output_field=MONEY
                 )
             )
         )
@@ -714,7 +724,7 @@ def daily_sales(start=None, end=None):
         .annotate(
             total=Sum(
                 ExpressionWrapper(
-                    F("qty") * F("unit_cost"), output_field=MONEY
+                    (F("qty") + F("bonus")) * F("unit_cost"), output_field=MONEY
                 )
             )
         )
@@ -769,10 +779,13 @@ def top_products(start=None, end=None, limit=20):
         .values("product_id", "product__name", "product__code")
         .annotate(
             units=Sum("qty"),
+            # Not aliased "bonus": that would shadow the column, and the cost
+            # expression below would resolve F("bonus") to this aggregate.
+            bonus_units=Sum("bonus"),
             revenue=Sum(_net_line_value()),
             cost=Sum(
                 ExpressionWrapper(
-                    F("qty") * F("unit_cost"), output_field=MONEY
+                    (F("qty") + F("bonus")) * F("unit_cost"), output_field=MONEY
                 )
             ),
         )
@@ -813,6 +826,7 @@ def top_products(start=None, end=None, limit=20):
             "name": entry["product__name"],
             "code": entry["product__code"],
             "units": units,
+            "bonus": entry["bonus_units"] or 0,
             "revenue": money(revenue),
             "cost": money(cost),
             "gross_profit": money(revenue - cost),
