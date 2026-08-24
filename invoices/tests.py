@@ -28,7 +28,7 @@ from .forms import (
     DistributorForm, EmployeeForm, ExpenseForm, ManufacturerForm,
 )
 from .layout import LayoutError, detect_layout
-from . import finance
+from . import exports, finance
 from .models import (
     Account,
     Batch,
@@ -9296,3 +9296,294 @@ class BonusReturnTests(TestCase):
         other.refresh_from_db()
 
         self.assertEqual(other.quantity, 50)
+
+
+class InvoiceExportTests(TestCase):
+    """Taking the invoice list out as a spreadsheet or a document.
+
+    The list exists to be worked through - chasing what is owed - so the
+    export has to be exactly what the screen was filtered to, with enough on
+    it to make the calls without opening the system again.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user("clerk", password="pw")
+        self.client.login(username="clerk", password="pw")
+
+        self.product = Product.objects.create(code="PAN", name="Panadol")
+        self.batch = Batch.objects.create(
+            product=self.product, batch_no="B-1", quantity=500,
+            cost_price=Decimal("60.00"),
+            expiry_date=timezone.localdate() + timedelta(days=700),
+        )
+
+    def sell(self, customer="Shifa Pharmacy", address="Mall Road, Lahore",
+             qty="10", price="100", discount="10", bonus="0"):
+        self.client.post(reverse("generate"), {
+            "customer_name": customer, "address": address,
+            "ntn": "", "sales_tax": "", "license_no": "LIC-7",
+            "item_name[]": ["Panadol"], "qty[]": [qty], "bonus[]": [bonus],
+            "price[]": [price], "discount[]": [discount],
+            "batch[]": ["B-1"], "expiry[]": ["12/27"],
+            "stock_batch[]": [str(self.batch.pk)],
+        })
+
+        return Invoice.objects.order_by("-id").first()
+
+    def export(self, fmt, **params):
+        return self.client.get(
+            reverse("invoice_list"), {"export": fmt, **params}
+        )
+
+    # -------------------------------------------------------------- the rows
+
+    def test_a_row_carries_the_customer_address_and_the_line(self):
+        self.sell()
+
+        row = exports.invoice_rows(list(Invoice.objects.all()))[0]
+
+        self.assertEqual(row["customer"], "Shifa Pharmacy")
+        self.assertEqual(row["address"], "Mall Road, Lahore")
+        self.assertEqual(row["item"], "Panadol")
+        self.assertEqual(row["qty"], 10)
+        self.assertEqual(row["discount"], Decimal("10.00"))
+        self.assertEqual(row["line_total"], Decimal("900.00"))
+        self.assertEqual(row["invoice_total"], Decimal("900.00"))
+        self.assertEqual(row["balance"], Decimal("900.00"))
+
+    def test_the_balance_reflects_what_has_been_paid(self):
+        invoice = self.sell()
+        Payment.objects.create(
+            customer=invoice.customer, invoice=invoice,
+            amount=Decimal("400.00"),
+        )
+
+        row = exports.invoice_rows([Invoice.objects.get(pk=invoice.pk)])[0]
+
+        self.assertEqual(row["paid"], Decimal("400.00"))
+        self.assertEqual(row["balance"], Decimal("500.00"))
+
+    def test_invoice_figures_appear_once_not_on_every_line(self):
+        """Repeating them per line would add the same invoice up twice."""
+        self.client.post(reverse("generate"), {
+            "customer_name": "Shifa Pharmacy", "address": "Lahore",
+            "ntn": "", "sales_tax": "", "license_no": "L",
+            "item_name[]": ["Panadol", "Brufen"],
+            "qty[]": ["10", "5"], "bonus[]": ["0", "0"],
+            "price[]": ["100", "50"], "discount[]": ["0", "0"],
+            "batch[]": ["B-1", ""], "expiry[]": ["12/27", "12/27"],
+            "stock_batch[]": [str(self.batch.pk), ""],
+        })
+
+        rows = exports.invoice_rows(list(Invoice.objects.all()))
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["invoice_total"], Decimal("1250.00"))
+        self.assertEqual(rows[1]["invoice_total"], "")
+        self.assertEqual(rows[1]["item"], "Brufen")
+
+    def test_an_invoice_with_no_lines_still_appears(self):
+        """It was raised and it may be owed; dropping it would shorten the
+        list being chased."""
+        customer = Customer.objects.create(name="Empty", address="Lahore")
+        invoice = Invoice.objects.create(customer=customer, license_no="L")
+        Invoice.objects.filter(pk=invoice.pk).update(total=Decimal("500.00"))
+
+        rows = exports.invoice_rows([Invoice.objects.get(pk=invoice.pk)])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["balance"], Decimal("500.00"))
+
+    def test_the_status_names_what_is_overdue(self):
+        invoice = self.sell()
+        Invoice.objects.filter(pk=invoice.pk).update(
+            date=timezone.localdate() - timedelta(days=OVERDUE_DAYS + 5)
+        )
+
+        row = exports.invoice_rows([Invoice.objects.get(pk=invoice.pk)])[0]
+
+        self.assertEqual(row["status"], "Overdue")
+
+    # ----------------------------------------------------------- the filter
+
+    def test_the_export_is_the_list_the_screen_was_filtered_to(self):
+        """An export that filtered differently from the page would send
+        somebody chasing the wrong pharmacies."""
+        settled = self.sell(customer="Paid Pharmacy", address="A")
+        Payment.objects.create(
+            customer=settled.customer, invoice=settled, amount=settled.total
+        )
+        self.sell(customer="Owing Pharmacy", address="B")
+
+        from io import BytesIO
+        from openpyxl import load_workbook
+
+        sheet = load_workbook(
+            BytesIO(self.export("excel", status="unpaid").content)
+        ).active
+
+        names = {
+            row[2] for row in sheet.iter_rows(min_row=2, values_only=True)
+            if row[2]
+        }
+
+        self.assertIn("Owing Pharmacy", names)
+        self.assertNotIn("Paid Pharmacy", names)
+
+    def test_unpaid_only_leaves_out_what_is_settled(self):
+        settled = self.sell(customer="Paid Pharmacy", address="A")
+        Payment.objects.create(
+            customer=settled.customer, invoice=settled, amount=settled.total
+        )
+        self.sell(customer="Owing Pharmacy", address="B")
+
+        response = self.client.get(
+            reverse("invoice_list"), {"status": "unpaid"}
+        )
+
+        names = [i.customer.name for i in response.context["invoices"]]
+
+        self.assertEqual(names, ["Owing Pharmacy"])
+
+    def test_overdue_is_its_own_filter(self):
+        recent = self.sell(customer="Recent Pharmacy", address="A")
+        old = self.sell(customer="Old Pharmacy", address="B")
+        Invoice.objects.filter(pk=old.pk).update(
+            date=timezone.localdate() - timedelta(days=OVERDUE_DAYS + 5)
+        )
+
+        response = self.client.get(
+            reverse("invoice_list"), {"status": "overdue"}
+        )
+
+        names = [i.customer.name for i in response.context["invoices"]]
+
+        self.assertEqual(names, ["Old Pharmacy"])
+
+    # ------------------------------------------------------------ the files
+
+    def test_the_spreadsheet_downloads_as_a_workbook(self):
+        self.sell()
+
+        response = self.export("excel", status="unpaid")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("spreadsheetml", response["Content-Type"])
+        self.assertIn("invoices-unpaid-", response["Content-Disposition"])
+        self.assertIn(".xlsx", response["Content-Disposition"])
+
+    def test_the_workbook_opens_and_holds_the_details(self):
+        self.sell()
+
+        from io import BytesIO
+        from openpyxl import load_workbook
+
+        book = load_workbook(BytesIO(self.export("excel").content))
+        sheet = book.active
+
+        headers = [cell.value for cell in sheet[1]]
+        self.assertIn("Address", headers)
+        self.assertIn("Balance", headers)
+        self.assertIn("Disc %", headers)
+
+        values = [
+            str(cell.value)
+            for row in sheet.iter_rows(min_row=2)
+            for cell in row
+            if cell.value is not None
+        ]
+
+        self.assertIn("Shifa Pharmacy", values)
+        self.assertIn("Mall Road, Lahore", values)
+        self.assertIn("Panadol", values)
+
+    def test_the_workbook_totals_each_invoice_once(self):
+        self.sell(qty="10", price="100", discount="0")
+        self.sell(qty="5", price="100", discount="0")
+
+        from io import BytesIO
+        from openpyxl import load_workbook
+
+        sheet = load_workbook(BytesIO(self.export("excel").content)).active
+
+        totals = [
+            row for row in sheet.iter_rows(values_only=True)
+            if row and row[0] == "TOTAL"
+        ]
+
+        self.assertEqual(len(totals), 1)
+        self.assertIn("2 invoice(s)", totals[0])
+        self.assertIn(Decimal("1500.00"), totals[0])
+
+    def test_the_pdf_downloads_and_names_the_filter(self):
+        self.sell()
+
+        response = self.export("pdf", status="unpaid")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertIn("invoices-unpaid-", response["Content-Disposition"])
+
+    def test_the_pdf_carries_the_customer_address_and_totals(self):
+        self.sell()
+
+        import pymupdf
+
+        document = pymupdf.open(
+            stream=self.export("pdf", status="unpaid").content,
+            filetype="pdf",
+        )
+        text = "\n".join(page.get_text() for page in document)
+
+        self.assertIn("Unpaid invoices", text)
+        self.assertIn("Shifa Pharmacy", text)
+        self.assertIn("Mall Road, Lahore", text)
+        self.assertIn("Panadol", text)
+        self.assertIn("900.00", text)
+
+    def test_a_long_list_runs_onto_more_pages(self):
+        for number in range(40):
+            self.sell(customer=f"Pharmacy {number}", address=f"Road {number}")
+
+        import pymupdf
+
+        document = pymupdf.open(
+            stream=self.export("pdf").content, filetype="pdf"
+        )
+
+        self.assertGreater(document.page_count, 1)
+        self.assertIn("Page 1 of", document[0].get_text())
+
+    def test_a_missing_spreadsheet_library_falls_back_to_csv(self):
+        """A nicer file is worth having; it is not worth a broken button."""
+        self.sell()
+
+        with mock.patch.dict("sys.modules", {"openpyxl": None}):
+            response = self.export("excel")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/csv")
+        self.assertIn(".csv", response["Content-Disposition"])
+        self.assertIn(b"Shifa Pharmacy", response.content)
+
+    def test_the_csv_starts_with_a_byte_order_mark(self):
+        """Without it Excel mangles every address that is not plain ASCII."""
+        self.sell(address="Ferozepur Road — Lahore")
+
+        body = exports.to_csv(list(Invoice.objects.all()))
+
+        self.assertTrue(body.startswith(b"\xef\xbb\xbf"))
+        self.assertIn("Ferozepur Road — Lahore", body.decode("utf-8-sig"))
+
+    def test_the_field_team_cannot_export_the_invoice_book(self):
+        mr_user = User.objects.create_user("ali", password="pw")
+        Employee.objects.create(
+            employee_code="MR-01", full_name="Ali", designation="mr",
+            user=mr_user,
+        )
+        UserRolls.objects.filter(user=mr_user).update(role=UserRolls.ROLE_FIELD)
+
+        self.client.logout()
+        self.client.login(username="ali", password="pw")
+
+        self.assertEqual(self.export("excel").status_code, 302)

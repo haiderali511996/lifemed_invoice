@@ -11,3 +11,4 @@ typing_extensions==4.15.0
 tzdata==2026.1
 whitenoise==6.11.0
 djangorestframework==3.15.2
+openpyxl==3.1.5

@@ -38,7 +38,8 @@
 
     <select name="status" style="padding:9px 12px;border:1px solid #dbe2ea;border-radius:7px;font-size:14px">
       <option value="">Any status</option>
-      <option value="unpaid" {% if status == "unpaid" %}selected{% endif %}>Unpaid</option>
+      <option value="unpaid" {% if status == "unpaid" %}selected{% endif %}>Unpaid — still owed</option>
+      <option value="overdue" {% if status == "overdue" %}selected{% endif %}>Overdue</option>
       <option value="paid" {% if status == "paid" %}selected{% endif %}>Settled</option>
     </select>
 
@@ -47,6 +48,24 @@
     <a href="{% url 'invoice_list' %}" class="btn btn-grey">Clear</a>
     {% endif %}
   </form>
+
+  {# Carries whatever is filtered on screen straight into the file, so the
+     export is always the list actually being looked at. #}
+  <div class="no-print"
+       style="display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap">
+    <span class="muted" style="font-size:13px">
+      Export these {{ invoices|length }} invoice(s), with every line, discount,
+      total and balance:
+    </span>
+    <a class="btn btn-sm btn-green"
+       href="?q={{ query|urlencode }}&amp;distributor={{ selected_distributor|urlencode }}&amp;status={{ status|urlencode }}&amp;export=excel">
+      ⬇ Excel
+    </a>
+    <a class="btn btn-sm btn-grey"
+       href="?q={{ query|urlencode }}&amp;distributor={{ selected_distributor|urlencode }}&amp;status={{ status|urlencode }}&amp;export=pdf">
+      ⬇ PDF
+    </a>
+  </div>
 
   <div style="overflow-x:auto">
     <table>

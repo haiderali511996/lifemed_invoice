@@ -40,7 +40,7 @@ from .forms import (
     TargetForm,
     TerritoryForm,
 )
-from . import finance
+from . import exports, finance
 from .layout import LayoutError, describe, detect_layout
 from .stock import (
     StockError, adjust, allocate_fefo, issue, receive, record_sales_return,
@@ -868,12 +868,16 @@ def rebuild_invoice_pdf(invoice):
     )
 
 
-@login_required
-def invoice_list(request):
-    """Every invoice raised, so any of them can be printed again."""
+def _filtered_invoices(request):
+    """The invoice list behind both the screen and the exports.
+
+    Shared deliberately: an export that filtered differently from the page it
+    was started from would be worse than no export, because nobody would
+    notice until they had chased the wrong list.
+    """
     invoices = Invoice.objects.select_related(
-        "customer", "distributor"
-    ).prefetch_related("items", "payments", "returns")
+        "customer", "distributor", "sales_rep"
+    ).prefetch_related("items", "allocations", "returns")
 
     query = request.GET.get("q", "").strip()
     distributor_id = request.GET.get("distributor", "").strip()
@@ -883,6 +887,7 @@ def invoice_list(request):
         invoices = invoices.filter(
             Q(invoice_no__icontains=query)
             | Q(customer__name__icontains=query)
+            | Q(customer__address__icontains=query)
             | Q(license_no__icontains=query)
         )
 
@@ -891,10 +896,51 @@ def invoice_list(request):
 
     invoices = list(invoices)
 
+    # Settlement is worked out per invoice from its allocations, so it cannot
+    # be filtered in the database without duplicating that arithmetic in SQL.
     if status == "unpaid":
         invoices = [i for i in invoices if i.balance > ZERO]
     elif status == "paid":
         invoices = [i for i in invoices if i.balance <= ZERO]
+    elif status == "overdue":
+        invoices = [i for i in invoices if i.is_overdue]
+
+    return invoices, {
+        "query": query,
+        "distributor": distributor_id,
+        "status": status,
+    }
+
+
+def _export_description(filters):
+    """What the export was filtered to, printed on it and in its name."""
+    wording = {
+        "unpaid": "Unpaid invoices",
+        "overdue": "Overdue invoices",
+        "paid": "Settled invoices",
+    }
+
+    parts = [wording.get(filters["status"], "All invoices")]
+
+    if filters["query"]:
+        parts.append(f'matching "{filters["query"]}"')
+
+    return " ".join(parts)
+
+
+@login_required
+def invoice_list(request):
+    """Every invoice raised, so any of them can be printed again."""
+    invoices, filters = _filtered_invoices(request)
+
+    export = request.GET.get("export", "").strip()
+
+    if export:
+        return _export_invoices(invoices, filters, export)
+
+    query = filters["query"]
+    distributor_id = filters["distributor"]
+    status = filters["status"]
 
     return render(
         request,
@@ -4658,3 +4704,51 @@ def expense_share_report(request):
             "end": end.isoformat() if end else "",
         }
     )
+
+
+def _export_invoices(invoices, filters, export):
+    """Send the filtered list out as a spreadsheet or a document."""
+    description = _export_description(filters)
+
+    stamp = timezone.localdate().strftime("%Y-%m-%d")
+    slug = (filters["status"] or "all").lower()
+
+    if export == "pdf":
+        response = HttpResponse(
+            exports.to_pdf(
+                invoices,
+                title=description,
+                subtitle=f"As at {timezone.localdate():%d %B %Y}",
+            ),
+            content_type="application/pdf",
+        )
+        response["Content-Disposition"] = (
+            f'attachment; filename="invoices-{slug}-{stamp}.pdf"'
+        )
+
+        return response
+
+    workbook = exports.to_xlsx(invoices)
+
+    if workbook is not None:
+        response = HttpResponse(
+            workbook,
+            content_type=(
+                "application/vnd.openxmlformats-officedocument"
+                ".spreadsheetml.sheet"
+            ),
+        )
+        response["Content-Disposition"] = (
+            f'attachment; filename="invoices-{slug}-{stamp}.xlsx"'
+        )
+
+        return response
+
+    # openpyxl is not installed. A comma-separated file opens in Excel just
+    # as well, so the export still works rather than the button failing.
+    response = HttpResponse(exports.to_csv(invoices), content_type="text/csv")
+    response["Content-Disposition"] = (
+        f'attachment; filename="invoices-{slug}-{stamp}.csv"'
+    )
+
+    return response
