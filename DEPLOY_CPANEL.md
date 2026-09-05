@@ -253,6 +253,99 @@ count as super admins.
 
 ## Troubleshooting
 
+### The site shows a file listing ("Index of /") instead of the app
+
+The document root has lost its `.htaccess`. **This is never caused by a code
+change** — a bad deploy gives a 500 or a Passenger error page, never a listing.
+
+LiteSpeed hands a request to Passenger only because of a `.htaccess` cPanel
+writes into the *document root* (`~/invoice.lifemedpharmaceutical.com/`), which
+is a different directory from the *application root* (`~/lifemed_invoice/`).
+Delete that one file and LiteSpeed falls back to serving the document root as
+plain files. Nothing in the app is touched, which is why *Setup Python App*
+still lists the application as **started**.
+
+Restarting from that page then fails with:
+
+```
+No such application (or application not configured) "lifemed_invoice"
+```
+
+That is the same cause, not a second fault: `cloudlinux-selector` identifies a
+configured application by reading the Passenger block out of the document
+root's `.htaccess`. No file, no application, even though the app is listed and
+running.
+
+If **every** domain on the account is listing files at once, the `.htaccess`
+files were wiped account-wide — check the other document roots too rather than
+fixing one and stopping.
+
+**1. Confirm what is missing.** Hidden files need `-a`:
+
+```bash
+ls -la ~/invoice.lifemedpharmaceutical.com/
+```
+
+A working docroot has `.htaccess` in it. A broken one holds only `cgi-bin`.
+
+**2. Have cPanel rewrite it.** *Setup Python App* → the **pencil (Edit)** on
+the application → change nothing → **Save**. Saving regenerates the docroot
+`.htaccess` from the app's own settings, which is the whole repair. Then check
+step 1 again — `.htaccess` should now be there.
+
+**3. If Save also errors**, delete the application entry (trash icon) and
+re-create it with exactly the values from step 3 above (Python `3.13`, app root
+`lifemed_invoice`, URL `invoice.lifemedpharmaceutical.com`, startup file
+`passenger_wsgi.py`, entry point `application`).
+
+Deleting the entry leaves `~/lifemed_invoice` — code, `.env`, `media/`,
+`backups/` — alone, but it does destroy the virtualenv, so afterwards:
+
+```bash
+cd ~/lifemed_invoice
+source /home/haidersirat/virtualenv/lifemed_invoice/3.13/bin/activate
+pip install -r requirements.txt
+```
+
+Creating an application also drops a stub `passenger_wsgi.py` into the app root
+on some cPanel versions. Copy ours aside first (`cp
+~/lifemed_invoice/passenger_wsgi.py ~/passenger_wsgi.py.bak`) and check
+afterwards that `grep -c DJANGO_SETTINGS_MODULE passenger_wsgi.py` still prints
+`1`.
+
+**4. Only if the UI cannot do it**, write the file by hand. Take the exact
+interpreter path from the *Setup Python App* page:
+
+```bash
+cat > ~/invoice.lifemedpharmaceutical.com/.htaccess <<'EOF'
+# DO NOT REMOVE. CLOUDLINUX PASSENGER CONFIGURATION BEGIN
+PassengerAppRoot "/home/haidersirat/lifemed_invoice"
+PassengerBaseURI "/"
+PassengerPython "/home/haidersirat/virtualenv/lifemed_invoice/3.13/bin/python"
+# DO NOT REMOVE. CLOUDLINUX PASSENGER CONFIGURATION END
+EOF
+chmod 644 ~/invoice.lifemedpharmaceutical.com/.htaccess
+```
+
+**5. Restart and check:**
+
+```bash
+cd ~/lifemed_invoice
+source /home/haidersirat/virtualenv/lifemed_invoice/3.13/bin/activate
+python manage.py check
+touch tmp/restart.txt
+curl -sI https://invoice.lifemedpharmaceutical.com/ | head -1
+```
+
+`200` or `302` means Passenger is serving again. Still listing files → read
+`~/lifemed_invoice/stderr.log` and the cPanel error log.
+
+None of this loses data, but take a dump before touching anything:
+
+```bash
+python manage.py backup_db
+```
+
 ### A page loads but 500s when you press Save
 
 This is almost always the database being a step behind the code: the new
